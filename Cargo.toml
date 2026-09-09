@@ -1,0 +1,17 @@
+[workspace]
+members = [
+    "libstamp",
+    "stamp",
+    "stamp-plugin-sdk"
+]
+resolver = "2"
+
+[workspace.lints.rust]
+missing_docs = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)', 'cfg(tarpaulin_include)'] }
+
+[workspace.lints.clippy]
+all = "deny"
+pedantic = "deny"
+unwrap_used = "deny"
+expect_used = "deny"

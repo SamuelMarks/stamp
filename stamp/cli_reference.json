@@ -1,0 +1,62 @@
+{
+  "commands": {
+    "plugins": [],
+    "validate": [
+      "evaluate-datasources",
+      "except",
+      "ignore-prerelease-plugins",
+      "machine-readable",
+      "no-warn-undeclared-var",
+      "only",
+      "syntax-only",
+      "use-sequential-evaluation",
+      "var",
+      "var-file"
+    ],
+    "build": [
+      "color",
+      "debug",
+      "except",
+      "force",
+      "ignore-prerelease-plugins",
+      "machine-readable",
+      "on-error",
+      "only",
+      "parallel-builds",
+      "skip-enforcement",
+      "timestamp-ui",
+      "use-sequential-evaluation",
+      "var",
+      "var-file",
+      "warn-on-undeclared-var"
+    ],
+    "hcl2-upgrade": [],
+    "fix": [
+      "validate"
+    ],
+    "inspect": [
+      "machine-readable",
+      "use-sequential-evaluation"
+    ],
+    "init": [
+      "force",
+      "upgrade"
+    ],
+    "console": [
+      "config-type",
+      "use-sequential-evaluation",
+      "var",
+      "var-file"
+    ],
+    "fmt": [
+      "check",
+      "diff",
+      "recursive",
+      "write"
+    ],
+    "version": [
+      "machine-readable",
+      "v"
+    ]
+  }
+}

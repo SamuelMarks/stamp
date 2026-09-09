@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-upload:
+    name: Build and upload release binaries
+    strategy:
+      matrix:
+        include:
+          - build: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - build: linux-aarch64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+          - build: macos-x86_64
+            os: macos-latest
+            target: x86_64-apple-darwin
+          - build: macos-aarch64
+            os: macos-latest
+            target: aarch64-apple-darwin
+          - build: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install aarch64-linux-gnu-gcc
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --release --target ${{ matrix.target }} -p stamp
+
+      - name: Package (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          tar -czvf stamp-${{ matrix.build }}.tar.gz -C target/${{ matrix.target }}/release stamp
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          Compress-Archive -Path target\${{ matrix.target }}\release\stamp.exe -DestinationPath stamp-${{ matrix.build }}.zip
+
+      - name: Upload Release Asset (Unix)
+        if: matrix.os != 'windows-latest'
+        uses: softprops/action-gh-release@v3
+        with:
+          files: stamp-${{ matrix.build }}.tar.gz
+
+      - name: Upload Release Asset (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: softprops/action-gh-release@v3
+        with:
+          files: stamp-${{ matrix.build }}.zip

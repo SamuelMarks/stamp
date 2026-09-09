@@ -1,0 +1,20 @@
+[package]
+name = "stamp-plugin-sdk"
+version = "0.0.1"
+edition = "2024"
+authors = ["Samuel Marks"]
+description = "SDK for authoring native Stamp and Packer plugins in Rust"
+license = "CC0 OR MIT OR Apache-2.0"
+repository = "https://github.com/SamuelMarks/stamp"
+
+[dependencies]
+libstamp = { path = "../libstamp" }
+tonic = { version = "0.11", default-features = false, features = ["transport"] }
+tokio = { version = "1.0", default-features = false, features = ["macros", "net", "rt-multi-thread", "sync"] }
+tokio-stream = { version = "0.1", default-features = false, features = ["net", "sync"] }
+async-trait = { version = "0.1", default-features = false }
+serde = { version = "1.0", default-features = false }
+serde_json = { version = "1.0", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true
