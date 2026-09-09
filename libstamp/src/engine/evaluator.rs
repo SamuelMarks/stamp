@@ -781,9 +781,12 @@ mod tests {
             .push(crate::template::DataSourceConfig {
                 source_type: "external".to_string(),
                 name: "test_ds".to_string(),
-                config: [("program".to_string(), "[\"echo\", \"test\"]".to_string())]
-                    .into_iter()
-                    .collect(),
+                config: [(
+                    "program".to_string(),
+                    "[\"echo\", \"{\\\"output\\\": \\\"success\\\"}\"]".to_string(),
+                )]
+                .into_iter()
+                .collect(),
             });
         template.builders.push(crate::template::BuilderConfig {
             builder_type: "null".to_string(),

@@ -118,26 +118,34 @@ pub async fn bind_bounded_tcp_listener() -> Result<TcpListener, StampError> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
+#[allow(clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
     use crate::plugin::handshake::{PACKER_PLUGIN_MAX_PORT_ENV, PACKER_PLUGIN_MIN_PORT_ENV};
 
     #[tokio::test]
-    async fn test_unix_socket_guard_lifecycle() {
-        let guard = UnixSocketGuard::create_ephemeral().unwrap();
+    async fn test_unix_socket_guard_lifecycle() -> Result<(), StampError> {
+        let guard = UnixSocketGuard::create_ephemeral()?;
         assert!(guard.path().to_string_lossy().contains("plugin.sock"));
         assert!(guard.as_uri().starts_with("unix://"));
         let p = guard.path().to_path_buf();
-        let d = guard.parent_dir.clone().unwrap();
+        let d = guard
+            .parent_dir
+            .clone()
+            .ok_or_else(|| StampError::Execution("Missing parent dir".to_string()))?;
 
         // Write a dummy file to simulate socket creation
-        std::fs::write(&p, b"socket").unwrap();
+        std::fs::write(&p, b"socket").map_err(StampError::Io)?;
         assert!(p.exists());
 
         drop(guard);
         assert!(!p.exists());
         assert!(!d.exists());
+
+        let custom_path = std::env::temp_dir().join("test_custom_socket.sock");
+        let custom_guard = UnixSocketGuard::new(custom_path.clone(), None);
+        assert_eq!(custom_guard.path(), &custom_path);
+        Ok(())
     }
 
     #[test]
@@ -173,21 +181,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_bind_bounded_tcp_listener_default() {
+    async fn test_bind_bounded_tcp_listener_default() -> Result<(), StampError> {
         unsafe {
             std::env::remove_var(PACKER_PLUGIN_MIN_PORT_ENV);
             std::env::remove_var(PACKER_PLUGIN_MAX_PORT_ENV);
         }
-        let listener = bind_bounded_tcp_listener().await.unwrap();
-        let port = listener.local_addr().unwrap().port();
+        let listener = bind_bounded_tcp_listener().await?;
+        let port = listener.local_addr().map_err(StampError::Io)?.port();
         assert!(port > 0);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_bind_bounded_tcp_listener_bounded() {
+    async fn test_bind_bounded_tcp_listener_bounded() -> Result<(), StampError> {
         // Reserve an arbitrary free port range
-        let temp = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = temp.local_addr().unwrap().port();
+        let temp = TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(StampError::Io)?;
+        let port = temp.local_addr().map_err(StampError::Io)?.port();
         drop(temp);
 
         // Allow a small range in case of rapid port re-bind semantics
@@ -198,8 +209,8 @@ mod tests {
             std::env::set_var(PACKER_PLUGIN_MAX_PORT_ENV, max_port.to_string());
         }
 
-        let listener = bind_bounded_tcp_listener().await.unwrap();
-        let bound_port = listener.local_addr().unwrap().port();
+        let listener = bind_bounded_tcp_listener().await?;
+        let bound_port = listener.local_addr().map_err(StampError::Io)?.port();
         assert!(bound_port >= port && bound_port <= max_port);
 
         // Conflict test: set single port and occupy it
@@ -216,5 +227,6 @@ mod tests {
             std::env::remove_var(PACKER_PLUGIN_MIN_PORT_ENV);
             std::env::remove_var(PACKER_PLUGIN_MAX_PORT_ENV);
         }
+        Ok(())
     }
 }

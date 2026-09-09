@@ -82,23 +82,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_existing_file() {
+    async fn test_read_existing_file() -> Result<(), Box<dyn std::error::Error>> {
         let temp_dir = std::env::temp_dir();
         let file_path = temp_dir.join("test_stamp_data_source_file.txt");
-        tokio::fs::write(&file_path, "hello world stamp")
-            .await
-            .unwrap();
+        tokio::fs::write(&file_path, "hello world stamp").await?;
 
         let ds = LocalFileDataSource::new(LocalFileConfig {
             path: file_path.to_string_lossy().to_string(),
         });
-        let res = ds.read().await.unwrap();
+        let res = ds.read().await?;
         assert_eq!(res["content"], "hello world stamp");
         assert_eq!(res["size"], 17);
         assert!(res["sha256"].is_string());
         assert!(res["content_base64"].is_string());
 
         let _ = tokio::fs::remove_file(file_path).await;
+        Ok(())
     }
 
     #[tokio::test]

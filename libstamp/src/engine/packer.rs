@@ -155,7 +155,6 @@ pub async fn build_concurrently(
         for tier in tiers {
             for b_name in tier {
                 if let Some(builder) = builder_map.remove(&b_name) {
-                    #[cfg_attr(coverage_nightly, coverage(off))]
                     builder.prepare().await?;
                     let hook = std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
                         provisioners: provisioners.clone(),
@@ -167,7 +166,6 @@ pub async fn build_concurrently(
                         Err(e) => {
                             match config.on_error {
                                 OnErrorStrategy::Cleanup => {
-                                    #[cfg_attr(coverage_nightly, coverage(off))]
                                     builder.cancel().await?;
                                 }
                                 OnErrorStrategy::Abort => {
@@ -187,7 +185,6 @@ pub async fn build_concurrently(
                                             &format!("Build '{b_name}' errored: {e}\nDo you want to clean up? [y/N]: "),
                                         )
                                             && (input == "y" || input == "yes") {
-                                                #[cfg_attr(coverage_nightly, coverage(off))]
                                                 builder.cancel().await?;
                                             }
                                     }
@@ -310,7 +307,6 @@ pub async fn build_concurrently(
                             Err(e) => {
                                 match err_strat {
                                     OnErrorStrategy::Cleanup => {
-                                        #[cfg_attr(coverage_nightly, coverage(off))]
                                         let _ = b.cancel().await;
                                     }
                                     OnErrorStrategy::Abort => {}
@@ -329,7 +325,6 @@ pub async fn build_concurrently(
                                             ),
                                         )
                                             && (input == "y" || input == "yes") {
-                                                #[cfg_attr(coverage_nightly, coverage(off))]
                                                 let _ = b.cancel().await;
                                             }
                                     }
@@ -370,7 +365,6 @@ pub async fn build_concurrently(
                         };
                         for b in builders_to_cancel {
                             if on_error == OnErrorStrategy::Cleanup {
-                                #[cfg_attr(coverage_nightly, coverage(off))]
                                 let _ = b.cancel().await;
                             }
                         }

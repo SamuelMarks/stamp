@@ -34,23 +34,9 @@ impl HttpDataSource {
 #[async_trait]
 impl DataSource for HttpDataSource {
     async fn read(&self) -> Result<Value, StampError> {
-        #![cfg_attr(coverage_nightly, coverage(off))]
         if self.config.url.is_empty() {
             return Err(StampError::Parse(
                 "No URL provided for HTTP data source".to_string(),
-            ));
-        }
-
-        // We check if it is a mock test URL to prevent real HTTP calls in unit tests
-        if self.config.url == "http://mock-success.com" {
-            return Ok(Value::String("mocked body".to_string()));
-        }
-        if self.config.url == "http://mock-json.com" {
-            return Ok(serde_json::json!({"mock": "json"}));
-        }
-        if self.config.url == "http://mock-fail.com" {
-            return Err(StampError::Parse(
-                "HTTP request failed with status: 404 Not Found".to_string(),
             ));
         }
 
@@ -100,20 +86,30 @@ impl DataSource for HttpDataSource {
 }
 
 #[cfg(test)]
-#[cfg(not(tarpaulin_include))]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_http_success_mock() -> Result<(), crate::error::StampError> {
+    async fn test_http_success_text() -> Result<(), crate::error::StampError> {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/text")
+            .with_status(200)
+            .with_header("content-type", "text/plain")
+            .with_body("hello plain text")
+            .create_async()
+            .await;
+
+        let mut headers = HashMap::new();
+        headers.insert("X-Custom-Header".to_string(), "CustomVal".to_string());
         let ds = HttpDataSource::new(HttpConfig {
-            url: "http://mock-success.com".to_string(),
-            ..Default::default()
+            url: format!("{}/text", server.url()),
+            headers,
         });
         let val = ds.read().await?;
-        assert_eq!(val, Value::String("mocked body".to_string()));
+        assert_eq!(val, Value::String("hello plain text".to_string()));
+        mock.assert_async().await;
         Ok(())
     }
 
@@ -165,7 +161,6 @@ mod tests {
             use tokio::io::AsyncWriteExt;
             let response = "HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\nshort";
             let _ = socket.write_all(response.as_bytes()).await;
-            // dropping the socket here abruptly closes the connection
         });
 
         let ds = HttpDataSource::new(HttpConfig {
@@ -179,13 +174,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_http_fail_mock() -> Result<(), crate::error::StampError> {
+    async fn test_http_status_404_error() -> Result<(), crate::error::StampError> {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/notfound")
+            .with_status(404)
+            .create_async()
+            .await;
+
         let ds = HttpDataSource::new(HttpConfig {
-            url: "http://mock-fail.com".to_string(),
+            url: format!("{}/notfound", server.url()),
             ..Default::default()
         });
         let res = ds.read().await;
         assert!(res.is_err());
+        mock.assert_async().await;
         Ok(())
     }
 

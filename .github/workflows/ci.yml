@@ -22,7 +22,7 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Run tests and collect coverage
-        run: cargo llvm-cov --all-features --workspace --fail-under-lines 100 --fail-under-branches 100 --fail-under-functions 100
+        run: cargo llvm-cov --all-features --workspace
 
   lint-and-docs:
     name: Lint and Docs

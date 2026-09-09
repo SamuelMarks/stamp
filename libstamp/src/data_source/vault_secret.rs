@@ -84,7 +84,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_vault_secret_success_with_key() {
+    async fn test_vault_secret_success_with_key() -> Result<(), StampError> {
         let ds = VaultSecretDataSource::new(VaultSecretConfig {
             path: "secret/data/database".to_string(),
             key: Some("password".to_string()),
@@ -92,19 +92,21 @@ mod tests {
             ..Default::default()
         });
 
-        let val = ds.read().await.unwrap();
+        let val = ds.read().await?;
         assert_eq!(val["password"], "mock-val-for-password");
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_vault_secret_success_whole_object() {
+    async fn test_vault_secret_success_whole_object() -> Result<(), StampError> {
         let ds = VaultSecretDataSource::new(VaultSecretConfig {
             path: "secret/data/app".to_string(),
             ..Default::default()
         });
 
-        let val = ds.read().await.unwrap();
+        let val = ds.read().await?;
         assert_eq!(val["data"]["username"], "vault_user");
+        Ok(())
     }
 
     #[tokio::test]

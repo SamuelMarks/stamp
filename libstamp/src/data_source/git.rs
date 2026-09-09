@@ -138,16 +138,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_git_data_source_current_repo() {
+    async fn test_git_data_source_current_repo() -> Result<(), StampError> {
         let ds = GitDataSource::new(GitDataSourceConfig {
             path: Some(".".to_string()),
         });
-        let res = ds.read().await.unwrap();
+        let res = ds.read().await?;
         assert!(res.is_object());
         assert!(res.get("commit").is_some());
         assert!(res.get("abbreviated_commit").is_some());
         assert!(res.get("branch").is_some());
         assert!(res.get("is_dirty").is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_git_data_source_default_path() -> Result<(), StampError> {
+        let ds = GitDataSource::new(GitDataSourceConfig { path: None });
+        let res = ds.read().await?;
+        assert!(res.is_object());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_git_data_source_non_git_dir() -> Result<(), StampError> {
+        let temp = std::env::temp_dir();
+        let ds = GitDataSource::new(GitDataSourceConfig {
+            path: Some(temp.to_string_lossy().to_string()),
+        });
+        let res = ds.read().await?;
+        assert!(res.is_object());
+        assert_eq!(res["commit"], "0000000000000000000000000000000000000000");
+        Ok(())
     }
 
     #[tokio::test]

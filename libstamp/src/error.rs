@@ -267,5 +267,16 @@ mod tests {
             .to_string(),
             "Plugin process 'packer-plugin-amazon' crashed with exit code Some(1): panic: nil pointer dereference"
         );
+
+        let json_err: Result<serde_json::Value, _> = serde_json::from_str("{ bad json");
+        if let Err(e) = json_err {
+            let stamp_err = StampError::from(e);
+            assert!(stamp_err.to_string().starts_with("JSON error:"));
+        }
+
+        let io_err = std::io::Error::other("custom io err");
+        let stamp_io = StampError::Io(io_err);
+        use std::error::Error;
+        assert!(stamp_io.source().is_none());
     }
 }

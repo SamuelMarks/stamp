@@ -34,7 +34,6 @@ impl ParallelsPvmBuilder {
 impl Builder for ParallelsPvmBuilder {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn prepare(&self) -> Result<(), StampError> {
-        #![cfg_attr(coverage_nightly, coverage(off))]
         if self.config.name.is_empty() {
             return Err(StampError::Parse("Name cannot be empty".to_string()));
         }

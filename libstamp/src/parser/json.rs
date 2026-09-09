@@ -9,7 +9,6 @@ use crate::template::{BuilderConfig, ProvisionerConfig, Template};
 /// # Errors
 ///
 /// Returns a `StampError::Parse` if the JSON cannot be parsed.
-#[cfg(not(tarpaulin_include))]
 pub fn parse_json<S: ::std::hash::BuildHasher>(
     input: &str,
     vars: &std::collections::HashMap<String, String, S>,
@@ -273,22 +272,89 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(tarpaulin_include))]
-    #[allow(clippy::match_wildcard_for_single_variants)]
-    fn test_parse_json_invalid_syntax() -> Result<(), crate::error::StampError> {
+    fn test_parse_json_invalid_syntax() {
         let input = r#"{ "builders": [ }"#;
-        let err = parse_json(input, &std::collections::HashMap::new()).unwrap_err();
-        assert!(matches!(err, StampError::Json(_)));
-        Ok(())
+        let err = parse_json(input, &std::collections::HashMap::new());
+        assert!(matches!(err, Err(StampError::Json(_))));
     }
 
     #[test]
-    #[cfg(not(tarpaulin_include))]
-    #[allow(clippy::match_wildcard_for_single_variants)]
-    fn test_parse_json_invalid_schema() -> Result<(), crate::error::StampError> {
+    fn test_parse_json_invalid_schema() {
         let input = r#"{ "builders": "not_an_array" }"#;
-        let err = parse_json(input, &std::collections::HashMap::new()).unwrap_err();
-        assert!(matches!(err, StampError::Json(_)));
+        let err = parse_json(input, &std::collections::HashMap::new());
+        assert!(matches!(err, Err(StampError::Json(_))));
+    }
+
+    #[test]
+    fn test_parse_json_advanced_blocks() -> Result<(), crate::error::StampError> {
+        let input = r#"{
+            "packer": {
+                "required_version": ">= 1.8.0"
+            },
+            "builders": [
+                {
+                    "type": "null",
+                    "name": "base-builder",
+                    "depends_on": ["prev-builder"],
+                    "count": 42,
+                    "enabled": true
+                }
+            ],
+            "provisioners": [
+                {
+                    "type": "shell",
+                    "only": ["base-builder"],
+                    "except": ["other-builder"],
+                    "timeout_sec": 300
+                }
+            ],
+            "error-cleanup-provisioner": [
+                {
+                    "type": "shell-local",
+                    "only": ["base-builder"],
+                    "except": ["other-builder"]
+                }
+            ],
+            "post-processors": [
+                {
+                    "type": "manifest",
+                    "only": ["base-builder"],
+                    "except": ["other-builder"],
+                    "output": "manifest.json"
+                }
+            ]
+        }"#;
+
+        let tmpl = parse_json(input, &std::collections::HashMap::new())?;
+        assert_eq!(tmpl.builders.len(), 1);
+        assert_eq!(tmpl.builders[0].depends_on, vec!["prev-builder"]);
+        assert_eq!(
+            tmpl.builders[0].config.get("count"),
+            Some(&"42".to_string())
+        );
+        assert_eq!(
+            tmpl.builders[0].config.get("enabled"),
+            Some(&"true".to_string())
+        );
+
+        assert_eq!(tmpl.provisioners.len(), 1);
+        assert_eq!(tmpl.provisioners[0].only, vec!["base-builder"]);
+        assert_eq!(tmpl.provisioners[0].except, vec!["other-builder"]);
+
+        assert_eq!(tmpl.error_cleanup_provisioners.len(), 1);
+        assert_eq!(
+            tmpl.error_cleanup_provisioners[0].only,
+            vec!["base-builder"]
+        );
+
+        assert_eq!(tmpl.post_processors.len(), 1);
+        assert_eq!(tmpl.post_processors[0].only, vec!["base-builder"]);
+        assert_eq!(tmpl.post_processors[0].except, vec!["other-builder"]);
+
+        let packer_cfg = tmpl
+            .packer
+            .ok_or_else(|| StampError::TemplateValidation("packer missing".to_string()))?;
+        assert_eq!(packer_cfg.required_version.as_deref(), Some(">= 1.8.0"));
         Ok(())
     }
 

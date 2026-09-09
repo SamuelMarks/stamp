@@ -1,3 +1,4 @@
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 #![cfg_attr(coverage_nightly, coverage(off))]
 #![deny(missing_docs)]
 #![deny(clippy::missing_docs_in_private_items)]
@@ -26,13 +27,13 @@ pub const MAGIC_COOKIE_KEY: &str = "PACKER_PLUGIN_MAGIC_COOKIE";
 pub const MAGIC_COOKIE_VALUE: &str =
     "d602bf8f470bc67ca7faa0386276bbdd4330efaf76d1a219cb4d6991ca9872b2";
 
-/// Verifies that the current execution environment satisfies `HashiCorp` `go-plugin` handshake requirements.
+/// Inner handshake verification allowing explicit control over test mode bypass.
 ///
 /// # Errors
 ///
 /// Returns `StampError::PluginResolution` if the magic cookie is missing or mismatched.
-pub fn verify_handshake() -> Result<(), StampError> {
-    if cfg!(test) {
+pub fn verify_handshake_internal(enforce: bool) -> Result<(), StampError> {
+    if !enforce && cfg!(test) {
         return Ok(());
     }
 
@@ -45,6 +46,15 @@ pub fn verify_handshake() -> Result<(), StampError> {
             "Missing environment variable {MAGIC_COOKIE_KEY}. Standalone plugins must be launched by Stamp or Packer."
         ))),
     }
+}
+
+/// Verifies that the current execution environment satisfies `HashiCorp` `go-plugin` handshake requirements.
+///
+/// # Errors
+///
+/// Returns `StampError::PluginResolution` if the magic cookie is missing or mismatched.
+pub fn verify_handshake() -> Result<(), StampError> {
+    verify_handshake_internal(false)
 }
 
 /// Standalone plugin server hosting Builders, Provisioners, Post-Processors, or `DataSources`.
@@ -391,12 +401,15 @@ impl PluginServer {
         self
     }
 
-    /// Serves the registered components on an ephemeral TCP port, emitting the `go-plugin` handshake.
+    /// Serves the registered components on an ephemeral TCP port until a shutdown signal is received.
     ///
     /// # Errors
     ///
     /// Returns `StampError` if binding or serving fails.
-    pub async fn serve(self) -> Result<(), StampError> {
+    pub async fn serve_with_shutdown<F>(self, shutdown_signal: F) -> Result<(), StampError>
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
         verify_handshake()?;
 
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -439,17 +452,24 @@ impl PluginServer {
             .add_optional_service(pp_svc)
             .add_optional_service(ds_svc);
 
-        if cfg!(test) {
-            // Do not block indefinitely in unit test suite
-            return Ok(());
-        }
-
         router
-            .serve_with_incoming(incoming)
+            .serve_with_incoming_shutdown(incoming, shutdown_signal)
             .await
             .map_err(|e| StampError::Execution(format!("Plugin gRPC serve error: {e}")))?;
 
         Ok(())
+    }
+
+    /// Serves the registered components on an ephemeral TCP port, emitting the `go-plugin` handshake.
+    ///
+    /// # Errors
+    ///
+    /// Returns `StampError` if binding or serving fails.
+    pub async fn serve(self) -> Result<(), StampError> {
+        self.serve_with_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await
     }
 }
 
@@ -833,30 +853,86 @@ mod tests {
         assert!(server.post_processor.is_some());
         assert!(server.datasource.is_some());
 
-        assert!(server.serve().await.is_ok());
+        assert!(
+            server
+                .serve_with_shutdown(async {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                })
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
     async fn test_serve_plugin_macros() {
-        assert!(
-            serve_plugin!(Builder, DummyBuilder { should_fail: false })
-                .await
-                .is_ok()
-        );
-        assert!(
-            serve_plugin!(Provisioner, DummyProvisioner { should_fail: false })
-                .await
-                .is_ok()
-        );
-        assert!(
-            serve_plugin!(PostProcessor, DummyPostProcessor { should_fail: false })
-                .await
-                .is_ok()
-        );
-        assert!(
-            serve_plugin!(DataSource, DummyDataSource { should_fail: false })
-                .await
-                .is_ok()
-        );
+        tokio::select! {
+            _ = serve_plugin!(Builder, DummyBuilder { should_fail: false }) => {},
+            () = tokio::time::sleep(std::time::Duration::from_millis(20)) => {},
+        }
+        tokio::select! {
+            _ = serve_plugin!(Provisioner, DummyProvisioner { should_fail: false }) => {},
+            () = tokio::time::sleep(std::time::Duration::from_millis(20)) => {},
+        }
+        tokio::select! {
+            _ = serve_plugin!(PostProcessor, DummyPostProcessor { should_fail: false }) => {},
+            () = tokio::time::sleep(std::time::Duration::from_millis(20)) => {},
+        }
+        tokio::select! {
+            _ = serve_plugin!(DataSource, DummyDataSource { should_fail: false }) => {},
+            () = tokio::time::sleep(std::time::Duration::from_millis(20)) => {},
+        }
+    }
+
+    #[test]
+    fn test_verify_handshake_enforcement_paths() {
+        let old_cookie = std::env::var(MAGIC_COOKIE_KEY).ok();
+
+        // 1. Missing cookie
+        unsafe {
+            std::env::remove_var(MAGIC_COOKIE_KEY);
+        }
+        assert!(verify_handshake_internal(true).is_err());
+
+        // 2. Invalid cookie
+        unsafe {
+            std::env::set_var(MAGIC_COOKIE_KEY, "invalid_magic_cookie");
+        }
+        assert!(verify_handshake_internal(true).is_err());
+
+        // 3. Valid cookie
+        unsafe {
+            std::env::set_var(MAGIC_COOKIE_KEY, MAGIC_COOKIE_VALUE);
+        }
+        assert!(verify_handshake_internal(true).is_ok());
+
+        unsafe {
+            if let Some(c) = old_cookie {
+                std::env::set_var(MAGIC_COOKIE_KEY, c);
+            } else {
+                std::env::remove_var(MAGIC_COOKIE_KEY);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sdk_health_service_watch_stream() -> Result<(), StampError> {
+        use tokio_stream::StreamExt;
+        let health = SdkHealthService;
+        let watch_resp = health
+            .watch(tonic::Request::new(
+                libstamp::r#gen::packer::HealthCheckRequest {
+                    service: String::new(),
+                },
+            ))
+            .await
+            .map_err(|e| StampError::Execution(e.to_string()))?;
+
+        let mut stream = watch_resp.into_inner();
+        let first = stream.next().await;
+        assert!(first.is_some());
+        if let Some(Ok(resp)) = first {
+            assert_eq!(resp.status, 1);
+        }
+        Ok(())
     }
 }

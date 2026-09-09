@@ -1530,8 +1530,13 @@ mod tests {
         Ok(())
     }
 
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_detect_shell_and_resolve_profile() {
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let shell = detect_shell();
         assert!(!shell.is_empty());
 
@@ -1550,6 +1555,9 @@ mod tests {
 
     #[test]
     fn test_autocomplete_install_and_uninstall_lifecycle() -> Result<(), StampError> {
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
@@ -1615,5 +1623,154 @@ mod tests {
         assert!(execute_command(&cli.command, false, false).await.is_ok());
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_execute_build_advanced_configuration() -> Result<(), StampError> {
+        let temp_dir = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let build_dir = temp_dir.join(format!("test_adv_build_{nanos}"));
+        std::fs::create_dir_all(&build_dir).map_err(StampError::Io)?;
+
+        let tmpl_path = build_dir.join("template.json");
+        std::fs::write(
+            &tmpl_path,
+            r#"{
+                "variables": {
+                    "secret_token": {
+                        "default": "super_secret_val",
+                        "sensitive": true
+                    }
+                },
+                "builders": [
+                    {"type": "null", "name": "adv-null"}
+                ],
+                "provisioners": [
+                    {"type": "shell-local", "inline": ["echo prov"]}
+                ],
+                "error_cleanup_provisioners": [
+                    {"type": "shell-local", "inline": ["echo cleanup"]}
+                ],
+                "post_processors": [
+                    {"type": "manifest", "output": "manifest.json"}
+                ]
+            }"#,
+        )
+        .map_err(StampError::Io)?;
+
+        let auto_var_path = build_dir.join("test.auto.pkrvars.hcl");
+        std::fs::write(&auto_var_path, "secret_token = \"override_secret\"\n")
+            .map_err(StampError::Io)?;
+
+        unsafe {
+            std::env::set_var("PKR_VAR_extra_key", "extra_val");
+            std::env::set_var("PACKER_BUILDER_PACING_MS", "5");
+        }
+
+        let tmpl_str = tmpl_path.to_str().unwrap_or("test.json");
+        let cli = Cli::try_parse_from([
+            "stamp",
+            "build",
+            tmpl_str,
+            "--on-error",
+            "run-cleanup-provisioner",
+            "--skip-enforcement",
+            "--ignore-prerelease-plugins",
+            "--timestamp-ui",
+            "--warn-on-undeclared-var",
+            "--var",
+            "undeclared_key=val",
+        ])
+        .map_err(|e| StampError::Execution(e.to_string()))?;
+
+        let _ = execute_command(&cli.command, false, false).await;
+
+        unsafe {
+            std::env::remove_var("PKR_VAR_extra_key");
+            std::env::remove_var("PACKER_BUILDER_PACING_MS");
+        }
+        let _ = std::fs::remove_file(&tmpl_path);
+        let _ = std::fs::remove_file(&auto_var_path);
+        let _ = std::fs::remove_dir_all(&build_dir);
+        Ok(())
+    }
+
+    #[test]
+    fn test_autocomplete_install_all_shells() -> Result<(), StampError> {
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let fake_home = std::env::temp_dir().join(format!("fake_home_shells_{nanos}"));
+        std::fs::create_dir_all(&fake_home).map_err(StampError::Io)?;
+
+        let old_home = std::env::var("HOME").ok();
+        let old_shell = std::env::var("SHELL").ok();
+
+        unsafe {
+            std::env::set_var("HOME", &fake_home);
+        }
+
+        for (shell_name, profile_file) in [
+            ("/bin/bash", ".bashrc"),
+            ("/usr/bin/fish", ".config/fish/config.fish"),
+            (
+                "powershell",
+                ".config/powershell/Microsoft.PowerShell_profile.ps1",
+            ),
+            ("/bin/unknown_shell", ".bashrc"),
+        ] {
+            unsafe {
+                std::env::set_var("SHELL", shell_name);
+            }
+            assert!(handle_autocomplete_install().is_ok());
+            assert!(handle_autocomplete_uninstall().is_ok());
+            let profile_path = fake_home.join(profile_file);
+            let _ = std::fs::remove_file(&profile_path);
+        }
+
+        unsafe {
+            if let Some(h) = old_home {
+                std::env::set_var("HOME", h);
+            } else {
+                std::env::remove_var("HOME");
+            }
+            if let Some(s) = old_shell {
+                std::env::set_var("SHELL", s);
+            } else {
+                std::env::remove_var("SHELL");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&fake_home);
+        Ok(())
+    }
+
+    #[test]
+    fn test_autocomplete_home_missing_error() {
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let old_home = std::env::var("HOME").ok();
+        let old_userprofile = std::env::var("USERPROFILE").ok();
+        unsafe {
+            std::env::remove_var("HOME");
+            std::env::remove_var("USERPROFILE");
+        }
+
+        assert!(handle_autocomplete_install().is_err());
+        assert!(handle_autocomplete_uninstall().is_err());
+
+        unsafe {
+            if let Some(h) = old_home {
+                std::env::set_var("HOME", h);
+            }
+            if let Some(u) = old_userprofile {
+                std::env::set_var("USERPROFILE", u);
+            }
+        }
     }
 }

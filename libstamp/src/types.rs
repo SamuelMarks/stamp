@@ -769,21 +769,21 @@ impl FromStr for Sha512Checksum {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
+#[allow(clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_port() {
+    fn test_port() -> Result<(), StampError> {
         let port = Port::new(8080);
         assert_eq!(port.get(), 8080);
         let port_clone = port;
         assert_eq!(port, port_clone);
         assert_eq!(port.to_string(), "8080");
         assert_eq!(Port::default().get(), 22);
-        assert_eq!(Port::from_str("9090").unwrap().get(), 9090);
+        assert_eq!(Port::from_str("9090")?.get(), 9090);
         assert!(Port::from_str("invalid").is_err());
+        Ok(())
     }
 
     #[test]
@@ -798,28 +798,27 @@ mod tests {
     }
 
     #[test]
-    fn test_filepath() {
+    fn test_filepath() -> Result<(), StampError> {
         let p = PathBuf::from("/etc/hosts");
         let fp = FilePath::new(p.clone());
         assert_eq!(fp.get(), &p);
         assert_eq!(fp.as_path(), Path::new("/etc/hosts"));
         assert_eq!(fp.to_string(), "/etc/hosts");
-        assert_eq!(
-            FilePath::from_str("/var/log").unwrap().to_string(),
-            "/var/log"
-        );
+        assert_eq!(FilePath::from_str("/var/log")?.to_string(), "/var/log");
+        Ok(())
     }
 
     #[test]
-    fn test_ami_id_valid() {
+    fn test_ami_id_valid() -> Result<(), StampError> {
         let valid8 = "ami-12345678";
         let valid17 = "ami-1234567890abcdef0";
         assert!(AmiId::parse(valid8).is_ok());
         assert!(AmiId::parse(valid17).is_ok());
 
-        let ami = AmiId::from_str(valid8).unwrap();
+        let ami = AmiId::from_str(valid8)?;
         assert_eq!(ami.as_str(), valid8);
         assert_eq!(ami.to_string(), valid8);
+        Ok(())
     }
 
     #[test]
@@ -831,43 +830,39 @@ mod tests {
     }
 
     #[test]
-    fn test_ipv4_cidr() {
-        let cidr = Ipv4Cidr::parse("192.168.1.0/24").unwrap();
+    fn test_ipv4_cidr() -> Result<(), Box<dyn std::error::Error>> {
+        let cidr = Ipv4Cidr::parse("192.168.1.0/24")?;
         assert_eq!(cidr.to_string(), "192.168.1.0/24");
-        assert_eq!(
-            Ipv4Cidr::from_str("10.0.0.0/8").unwrap().get().prefix_len(),
-            8
-        );
+        assert_eq!(Ipv4Cidr::from_str("10.0.0.0/8")?.get().prefix_len(), 8);
         assert!(Ipv4Cidr::parse("invalid").is_err());
 
         // Serde roundtrip
-        let json = serde_json::to_string(&cidr).unwrap();
-        let decoded: Ipv4Cidr = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&cidr)?;
+        let decoded: Ipv4Cidr = serde_json::from_str(&json)?;
         assert_eq!(cidr, decoded);
+        Ok(())
     }
 
     #[test]
-    fn test_ipv6_cidr() {
-        let cidr = Ipv6Cidr::parse("2001:db8::/32").unwrap();
+    fn test_ipv6_cidr() -> Result<(), Box<dyn std::error::Error>> {
+        let cidr = Ipv6Cidr::parse("2001:db8::/32")?;
         assert_eq!(cidr.to_string(), "2001:db8::/32");
-        assert_eq!(
-            Ipv6Cidr::from_str("fe80::/64").unwrap().get().prefix_len(),
-            64
-        );
+        assert_eq!(Ipv6Cidr::from_str("fe80::/64")?.get().prefix_len(), 64);
         assert!(Ipv6Cidr::parse("invalid").is_err());
 
         // Serde roundtrip
-        let json = serde_json::to_string(&cidr).unwrap();
-        let decoded: Ipv6Cidr = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&cidr)?;
+        let decoded: Ipv6Cidr = serde_json::from_str(&json)?;
         assert_eq!(cidr, decoded);
+        Ok(())
     }
 
     #[test]
-    fn test_mac_address() {
+    fn test_mac_address() -> Result<(), StampError> {
         let valid_colon = "00:1a:2b:3c:4d:5e";
         let valid_hyphen = "00-1A-2B-3C-4D-5E";
-        let mac1 = MacAddress::parse(valid_colon).unwrap();
-        let mac2 = MacAddress::parse(valid_hyphen).unwrap();
+        let mac1 = MacAddress::parse(valid_colon)?;
+        let mac2 = MacAddress::parse(valid_hyphen)?;
         assert_eq!(mac1.octets(), [0x00, 0x1a, 0x2b, 0x3c, 0x4d, 0x5e]);
         assert_eq!(mac1, mac2);
         assert_eq!(mac1.to_string(), "00:1a:2b:3c:4d:5e");
@@ -880,6 +875,7 @@ mod tests {
         assert!(MacAddress::parse("00:11:22:33:44:55:66").is_err());
         assert!(MacAddress::parse("00:11:22:33:44:zz").is_err());
         assert!(MacAddress::parse("00:11:22:33:44:123").is_err());
+        Ok(())
     }
 
     #[test]
@@ -899,30 +895,32 @@ mod tests {
     }
 
     #[test]
-    fn test_cpu_count() {
-        let cpu = CpuCount::new(4).unwrap();
+    fn test_cpu_count() -> Result<(), StampError> {
+        let cpu = CpuCount::new(4)?;
         assert_eq!(cpu.get(), 4);
         assert_eq!(cpu.to_string(), "4");
 
-        assert_eq!(CpuCount::from_str("8").unwrap().get(), 8);
+        assert_eq!(CpuCount::from_str("8")?.get(), 8);
         assert!(CpuCount::new(0).is_err());
         assert!(CpuCount::from_str("0").is_err());
         assert!(CpuCount::from_str("abc").is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_disk_size_gb() {
+    fn test_disk_size_gb() -> Result<(), StampError> {
         let disk = DiskSizeGb::new(50);
         assert_eq!(disk.get(), 50);
         assert_eq!(disk.to_bytes(), 50 * 1024 * 1024 * 1024);
         assert_eq!(disk.to_string(), "50GB");
-        assert_eq!(DiskSizeGb::from_str("100").unwrap().get(), 100);
+        assert_eq!(DiskSizeGb::from_str("100")?.get(), 100);
         assert!(DiskSizeGb::from_str("invalid").is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_plugin_address() {
-        let addr = PluginAddress::parse("github.com/hashicorp/amazon").unwrap();
+    fn test_plugin_address() -> Result<(), StampError> {
+        let addr = PluginAddress::parse("github.com/hashicorp/amazon")?;
         assert_eq!(addr.hostname(), "github.com");
         assert_eq!(addr.namespace(), "hashicorp");
         assert_eq!(addr.plugin_type(), "amazon");
@@ -930,63 +928,67 @@ mod tests {
         assert_eq!(addr.as_str(), "github.com/hashicorp/amazon");
         assert_eq!(addr.to_string(), "github.com/hashicorp/amazon");
 
-        let short_addr = PluginAddress::from_str("hashicorp/amazon").unwrap();
+        let short_addr = PluginAddress::from_str("hashicorp/amazon")?;
         assert_eq!(short_addr.hostname(), "github.com");
         assert_eq!(short_addr.namespace(), "hashicorp");
         assert_eq!(short_addr.plugin_type(), "amazon");
         assert_eq!(short_addr.full_repo_name(), "packer-plugin-amazon");
 
-        let explicit_plugin = PluginAddress::parse("github.com/custom/packer-plugin-foo").unwrap();
+        let explicit_plugin = PluginAddress::parse("github.com/custom/packer-plugin-foo")?;
         assert_eq!(explicit_plugin.full_repo_name(), "packer-plugin-foo");
 
         assert!(PluginAddress::parse("amazon").is_err());
         assert!(PluginAddress::parse("github.com//amazon").is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_semver_constraint() {
-        let constraint = SemVerConstraint::parse(">= 1.2.0, < 2.0.0").unwrap();
+    fn test_semver_constraint() -> Result<(), Box<dyn std::error::Error>> {
+        let constraint = SemVerConstraint::parse(">= 1.2.0, < 2.0.0")?;
         assert_eq!(constraint.to_string(), ">=1.2.0, <2.0.0");
 
-        let v1 = semver::Version::parse("1.5.0").unwrap();
-        let v2 = semver::Version::parse("2.0.0").unwrap();
+        let v1 = semver::Version::parse("1.5.0")?;
+        let v2 = semver::Version::parse("2.0.0")?;
         assert!(constraint.matches(&v1));
         assert!(!constraint.matches(&v2));
 
-        let tilde_constraint = SemVerConstraint::parse("~> 1.2.0").unwrap();
-        let v_tilde = semver::Version::parse("1.2.5").unwrap();
+        let tilde_constraint = SemVerConstraint::parse("~> 1.2.0")?;
+        let v_tilde = semver::Version::parse("1.2.5")?;
         assert!(tilde_constraint.matches(&v_tilde));
         assert!(!tilde_constraint.matches(&v1));
 
         assert!(SemVerConstraint::parse("invalid-semver-req").is_err());
 
         // Serde roundtrip
-        let json = serde_json::to_string(&constraint).unwrap();
-        let decoded: SemVerConstraint = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&constraint)?;
+        let decoded: SemVerConstraint = serde_json::from_str(&json)?;
         assert_eq!(constraint, decoded);
+        Ok(())
     }
 
     #[test]
-    fn test_sha256_checksum() {
+    fn test_sha256_checksum() -> Result<(), StampError> {
         let hex64 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-        let c = Sha256Checksum::parse(hex64).unwrap();
+        let c = Sha256Checksum::parse(hex64)?;
         assert_eq!(c.as_str(), hex64);
         assert_eq!(c.to_string(), hex64);
 
         assert!(Sha256Checksum::parse("too-short").is_err());
         assert!(Sha256Checksum::parse(&format!("{hex64}0")).is_err()); // 65 chars
         assert!(Sha256Checksum::parse(&hex64.replace('0', "z")).is_err()); // non-hex
+        Ok(())
     }
 
     #[test]
-    fn test_sha512_checksum() {
+    fn test_sha512_checksum() -> Result<(), StampError> {
         let hex128 = "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e";
-        let c = Sha512Checksum::parse(hex128).unwrap();
+        let c = Sha512Checksum::parse(hex128)?;
         assert_eq!(c.as_str(), hex128);
         assert_eq!(c.to_string(), hex128);
 
         assert!(Sha512Checksum::parse("too-short").is_err());
         assert!(Sha512Checksum::parse(&format!("{hex128}0")).is_err()); // 129 chars
         assert!(Sha512Checksum::parse(&hex128.replace('0', "z")).is_err()); // non-hex
+        Ok(())
     }
 }

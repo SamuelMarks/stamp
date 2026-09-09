@@ -1,4 +1,5 @@
 #![cfg(not(tarpaulin_include))]
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 #![cfg_attr(coverage_nightly, coverage(off))]
 #![deny(missing_docs)]
 #![deny(clippy::missing_docs_in_private_items)]
@@ -15,4 +16,20 @@ fn main() -> Result<(), libstamp::error::StampError> {
         "All CLI subcommands, flags, exit codes, and environment variables match HashiCorp Packer reference schemas!"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_grounding_main() -> Result<(), libstamp::error::StampError> {
+        main()
+    }
+
+    #[test]
+    fn test_corrupted_json_grounding() {
+        let bad_json = "{\"commands\": {\"nonexistent_cmd\": {}}}";
+        assert!(stamp::verify_cli_grounding(bad_json).is_err());
+    }
 }

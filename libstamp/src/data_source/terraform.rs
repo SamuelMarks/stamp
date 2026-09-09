@@ -114,7 +114,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_terraform_data_source_all_outputs() {
+    async fn test_terraform_data_source_all_outputs() -> Result<(), Box<dyn std::error::Error>> {
         let temp_dir = std::env::temp_dir();
         let state_file = temp_dir.join("test_terraform.tfstate");
         let state_content = r#"{
@@ -131,22 +131,24 @@ mod tests {
                 }
             }
         }"#;
-        tokio::fs::write(&state_file, state_content).await.unwrap();
+        tokio::fs::write(&state_file, state_content).await?;
 
         let ds = TerraformDataSource::new(TerraformDataSourceConfig {
             state_path: Some(state_file.to_string_lossy().to_string()),
             output: None,
         });
 
-        let res = ds.read().await.unwrap();
+        let res = ds.read().await?;
         assert_eq!(res["vpc_id"], "vpc-12345678");
         assert_eq!(res["subnet_ids"][0], "subnet-1");
 
         let _ = tokio::fs::remove_file(state_file).await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_terraform_data_source_specific_output() {
+    async fn test_terraform_data_source_specific_output() -> Result<(), Box<dyn std::error::Error>>
+    {
         let temp_dir = std::env::temp_dir();
         let state_file = temp_dir.join("test_terraform_specific.tfstate");
         let state_content = r#"{
@@ -156,14 +158,14 @@ mod tests {
                 }
             }
         }"#;
-        tokio::fs::write(&state_file, state_content).await.unwrap();
+        tokio::fs::write(&state_file, state_content).await?;
 
         let ds = TerraformDataSource::new(TerraformDataSourceConfig {
             state_path: Some(state_file.to_string_lossy().to_string()),
             output: Some("ami_id".to_string()),
         });
 
-        let res = ds.read().await.unwrap();
+        let res = ds.read().await?;
         assert_eq!(res, "ami-99999999");
 
         let ds_missing = TerraformDataSource::new(TerraformDataSourceConfig {
@@ -173,6 +175,7 @@ mod tests {
         assert!(ds_missing.read().await.is_err());
 
         let _ = tokio::fs::remove_file(state_file).await;
+        Ok(())
     }
 
     #[tokio::test]
@@ -185,10 +188,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_terraform_data_source_invalid_json() {
+    async fn test_terraform_data_source_invalid_json() -> Result<(), Box<dyn std::error::Error>> {
         let temp_dir = std::env::temp_dir();
         let state_file = temp_dir.join("test_terraform_invalid.tfstate");
-        tokio::fs::write(&state_file, "not json").await.unwrap();
+        tokio::fs::write(&state_file, "not json").await?;
 
         let ds = TerraformDataSource::new(TerraformDataSourceConfig {
             state_path: Some(state_file.to_string_lossy().to_string()),
@@ -197,15 +200,15 @@ mod tests {
         assert!(ds.read().await.is_err());
 
         let _ = tokio::fs::remove_file(state_file).await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_terraform_data_source_no_outputs_block() {
+    async fn test_terraform_data_source_no_outputs_block() -> Result<(), Box<dyn std::error::Error>>
+    {
         let temp_dir = std::env::temp_dir();
         let state_file = temp_dir.join("test_terraform_no_outputs.tfstate");
-        tokio::fs::write(&state_file, "{\"version\": 4}")
-            .await
-            .unwrap();
+        tokio::fs::write(&state_file, "{\"version\": 4}").await?;
 
         let ds = TerraformDataSource::new(TerraformDataSourceConfig {
             state_path: Some(state_file.to_string_lossy().to_string()),
@@ -214,5 +217,6 @@ mod tests {
         assert!(ds.read().await.is_err());
 
         let _ = tokio::fs::remove_file(state_file).await;
+        Ok(())
     }
 }

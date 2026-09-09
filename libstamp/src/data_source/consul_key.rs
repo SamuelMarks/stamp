@@ -75,15 +75,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_consul_key_success() {
+    async fn test_consul_key_success() -> Result<(), StampError> {
         let ds = ConsulKeyDataSource::new(ConsulKeyConfig {
             path: "services/db/port".to_string(),
             address: None,
             token: None,
             datacenter: None,
         });
-        let val = ds.read().await;
-        assert_eq!(val.unwrap()["value"], "val-for-services/db/port");
+        let val = ds.read().await?;
+        assert_eq!(val["value"], "val-for-services/db/port");
+        Ok(())
     }
 
     #[tokio::test]

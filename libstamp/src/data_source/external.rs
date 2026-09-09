@@ -41,12 +41,6 @@ impl DataSource for ExternalDataSource {
             ));
         }
 
-        if cfg!(test) {
-            let mut map = serde_json::Map::new();
-            map.insert("output".to_string(), Value::String("success".to_string()));
-            return Ok(Value::Object(map));
-        }
-
         let cmd_name = &self.config.program[0];
         let mut cmd = tokio::process::Command::new(cmd_name);
         for arg in self.config.program.iter().skip(1) {
@@ -105,20 +99,60 @@ mod tests {
 
     #[tokio::test]
     async fn test_external_data_source_success() -> Result<(), StampError> {
+        let mut query = std::collections::HashMap::new();
+        query.insert("q_key".to_string(), "q_val".to_string());
         let config = ExternalConfig {
-            program: vec!["echo".to_string(), "hello".to_string()],
-            query: std::collections::HashMap::new(),
-            working_dir: None,
+            program: vec!["echo".to_string(), "{\"status\": \"ok\"}".to_string()],
+            query,
+            working_dir: Some(std::env::temp_dir().to_string_lossy().to_string()),
         };
         let ds = ExternalDataSource::new(config);
         let val = ds.read().await?;
-        assert_eq!(val.get("output").and_then(|v| v.as_str()), Some("success"));
+        assert_eq!(val.get("status").and_then(|v| v.as_str()), Some("ok"));
         Ok(())
     }
 
     #[tokio::test]
     async fn test_external_data_source_empty_program() {
         let config = ExternalConfig::default();
+        let ds = ExternalDataSource::new(config);
+        assert!(ds.read().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_external_data_source_spawn_failure() {
+        let config = ExternalConfig {
+            program: vec!["/nonexistent/path/to/binary_12345".to_string()],
+            query: std::collections::HashMap::new(),
+            working_dir: None,
+        };
+        let ds = ExternalDataSource::new(config);
+        assert!(ds.read().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_external_data_source_exit_code_failure() {
+        #[cfg(unix)]
+        let program = vec!["sh".to_string(), "-c".to_string(), "exit 1".to_string()];
+        #[cfg(windows)]
+        let program = vec!["cmd".to_string(), "/C".to_string(), "exit 1".to_string()];
+
+        let config = ExternalConfig {
+            program,
+            query: std::collections::HashMap::new(),
+            working_dir: None,
+        };
+        let ds = ExternalDataSource::new(config);
+        assert!(ds.read().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_external_data_source_invalid_json_output() {
+        let config = ExternalConfig {
+            program: vec!["echo".to_string(), "not_json_output".to_string()],
+            query: std::collections::HashMap::new(),
+            working_dir: None,
+        };
         let ds = ExternalDataSource::new(config);
         assert!(ds.read().await.is_err());
     }

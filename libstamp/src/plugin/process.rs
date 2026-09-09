@@ -248,45 +248,48 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_subprocess_spawn_and_terminate() {
+    async fn test_subprocess_spawn_and_terminate() -> Result<(), StampError> {
         let script = r#"#!/bin/bash
 echo "1|5|tcp|127.0.0.1:45678|grpc"
 sleep 10
 "#;
         let script_path =
             std::env::temp_dir().join(format!("test-plugin-proc-{}", uuid::Uuid::new_v4()));
-        std::fs::write(&script_path, script).unwrap();
+        std::fs::write(&script_path, script).map_err(StampError::Io)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+                .map_err(StampError::Io)?;
         }
 
-        let proc = PluginSubprocess::spawn(&script_path, &[]).await.unwrap();
+        let proc = PluginSubprocess::spawn(&script_path, &[]).await?;
         assert_eq!(proc.handshake().address, "127.0.0.1:45678");
         assert_eq!(proc.binary_path(), &script_path);
         assert!(proc.is_alive().await);
         assert!(proc.check_crashed().await.is_ok());
 
-        proc.terminate().await.unwrap();
+        proc.terminate().await?;
         assert!(!proc.is_alive().await);
 
         let _ = std::fs::remove_file(&script_path);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_subprocess_spawn_crash_captures_stderr() {
+    async fn test_subprocess_spawn_crash_captures_stderr() -> Result<(), StampError> {
         let script = r#"#!/bin/bash
 >&2 echo "Fatal plugin bootstrap failure: missing dependency"
 exit 42
 "#;
         let script_path =
             std::env::temp_dir().join(format!("test-plugin-crash-{}", uuid::Uuid::new_v4()));
-        std::fs::write(&script_path, script).unwrap();
+        std::fs::write(&script_path, script).map_err(StampError::Io)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+                .map_err(StampError::Io)?;
         }
 
         let res = PluginSubprocess::spawn(&script_path, &[]).await;
@@ -297,13 +300,14 @@ exit 42
                 assert_eq!(exit_code, Some(42));
                 assert!(stderr.contains("Fatal plugin bootstrap failure"));
             }
-            other => panic!("Expected PluginCrashed, got {:?}", other),
+            _ => assert!(false, "Expected PluginCrashed"),
         }
         let _ = std::fs::remove_file(&script_path);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_subprocess_check_crashed_after_exit() {
+    async fn test_subprocess_check_crashed_after_exit() -> Result<(), StampError> {
         let script = r#"#!/bin/bash
 echo "1|5|tcp|127.0.0.1:45679|grpc"
 sleep 0.1
@@ -312,14 +316,15 @@ exit 7
 "#;
         let script_path =
             std::env::temp_dir().join(format!("test-plugin-run-crash-{}", uuid::Uuid::new_v4()));
-        std::fs::write(&script_path, script).unwrap();
+        std::fs::write(&script_path, script).map_err(StampError::Io)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+                .map_err(StampError::Io)?;
         }
 
-        let proc = PluginSubprocess::spawn(&script_path, &[]).await.unwrap();
+        let proc = PluginSubprocess::spawn(&script_path, &[]).await?;
         tokio::time::sleep(Duration::from_millis(300)).await;
         let crash_res = proc.check_crashed().await;
         match crash_res {
@@ -329,31 +334,59 @@ exit 7
                 assert_eq!(exit_code, Some(7));
                 assert!(stderr.contains("Plugin crashed during run"));
             }
-            other => panic!("Expected PluginCrashed, got {:?}", other),
+            _ => assert!(false, "Expected PluginCrashed"),
         }
         let collected_stderr = proc.stderr().await;
         assert!(collected_stderr.contains("Plugin crashed during run"));
 
         let _ = std::fs::remove_file(&script_path);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_subprocess_spawn_empty_output_error() {
+    async fn test_subprocess_drop_kills_child() -> Result<(), StampError> {
+        let script = r#"#!/bin/bash
+echo "1|5|tcp|127.0.0.1:45680|grpc"
+sleep 10
+"#;
+        let script_path =
+            std::env::temp_dir().join(format!("test-plugin-drop-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&script_path, script).map_err(StampError::Io)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+                .map_err(StampError::Io)?;
+        }
+
+        let proc = PluginSubprocess::spawn(&script_path, &[]).await?;
+        assert!(proc.is_alive().await);
+        drop(proc);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let _ = std::fs::remove_file(&script_path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_subprocess_spawn_empty_output_error() -> Result<(), StampError> {
         let script = r#"#!/bin/bash
 exit 0
 "#;
         let script_path =
             std::env::temp_dir().join(format!("test-plugin-empty-{}", uuid::Uuid::new_v4()));
-        std::fs::write(&script_path, script).unwrap();
+        std::fs::write(&script_path, script).map_err(StampError::Io)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+                .map_err(StampError::Io)?;
         }
 
         let res = PluginSubprocess::spawn(&script_path, &[]).await;
         assert!(res.is_err());
         let _ = std::fs::remove_file(&script_path);
+        Ok(())
     }
 
     #[tokio::test]

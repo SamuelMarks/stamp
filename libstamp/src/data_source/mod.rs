@@ -164,11 +164,11 @@ pub fn create_data_source(config: &DataSourceConfig) -> Result<Box<dyn DataSourc
             }),
         )),
         "external" => {
-            let program = config
-                .config
-                .get("program")
-                .map(|p| {
-                    if p.starts_with('[') && p.ends_with(']') {
+            let program = match config.config.get("program") {
+                Some(p) => {
+                    if let Ok(vec) = serde_json::from_str::<Vec<String>>(p) {
+                        vec
+                    } else if p.starts_with('[') && p.ends_with(']') {
                         p.trim_matches(|c| c == '[' || c == ']')
                             .split(',')
                             .map(|s| s.trim().trim_matches('"').to_string())
@@ -176,8 +176,9 @@ pub fn create_data_source(config: &DataSourceConfig) -> Result<Box<dyn DataSourc
                     } else {
                         vec![p.clone()]
                     }
-                })
-                .unwrap_or_default();
+                }
+                None => Vec::new(),
+            };
             let working_dir = config.config.get("working_dir").cloned();
             let mut query = config.config.clone();
             query.remove("program");
