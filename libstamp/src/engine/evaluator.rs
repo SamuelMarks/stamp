@@ -269,8 +269,7 @@ pub fn inject_path_context(ctx: &mut Context, template_root: Option<&std::path::
     let mut path_types = BTreeMap::new();
 
     let cwd = std::env::current_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| ".".to_string());
+        .map_or_else(|_| ".".to_string(), |p| p.to_string_lossy().to_string());
     path_types.insert("cwd".to_string(), Type::String);
     path_map.insert(
         "cwd".to_string(),
@@ -294,9 +293,9 @@ pub fn inject_path_context(ctx: &mut Context, template_root: Option<&std::path::
 
 /// Interpolates legacy Packer JSON template expressions into rendered strings.
 #[must_use]
-pub fn interpolate_legacy_template(
+pub fn interpolate_legacy_template<S: std::hash::BuildHasher>(
     input: &str,
-    vars: &std::collections::HashMap<String, String>,
+    vars: &std::collections::HashMap<String, String, S>,
     build_name: &str,
     build_type: &str,
     template_dir: &str,

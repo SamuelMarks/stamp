@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File};
+use std::io::Write;
 use std::path::Path;
 
 /// Configuration for the `manifest` post-processor.
@@ -145,7 +146,7 @@ impl PostProcessor for ManifestPostProcessor {
         let mut manifest_files = Vec::new();
         for file_path in &artifact.files {
             let path = Path::new(file_path);
-            let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            let size = fs::metadata(path).map_or(0, |m| m.len());
             let display_name = if self.config.strip_path {
                 match path.file_name() {
                     Some(n) => n.to_string_lossy().to_string(),
@@ -189,7 +190,6 @@ impl PostProcessor for ManifestPostProcessor {
             serde_json::to_string_pretty(&manifest_output).map_err(StampError::Json)?;
 
         let mut file = File::create(&self.config.output).map_err(StampError::Io)?;
-        use std::io::Write;
         file.write_all(json_string.as_bytes())
             .map_err(StampError::Io)?;
         file.flush().map_err(StampError::Io)?;

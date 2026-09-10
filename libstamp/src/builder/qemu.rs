@@ -15,7 +15,7 @@ use std::time::Duration;
 /// Target machine architecture for QEMU.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum QemuArch {
-    /// x86_64 architecture (default).
+    /// `x86_64` architecture (default).
     #[default]
     X86_64,
     /// ARM 64-bit architecture.
@@ -97,9 +97,9 @@ pub enum DiskFormat {
     /// QEMU Copy-On-Write v2/v3 (default).
     #[default]
     Qcow2,
-    /// VMware Virtual Machine Disk.
+    /// `VMware` Virtual Machine Disk.
     Vmdk,
-    /// VirtualBox Virtual Disk Image.
+    /// `VirtualBox` Virtual Disk Image.
     Vdi,
 }
 

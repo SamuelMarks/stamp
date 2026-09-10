@@ -91,12 +91,11 @@ type InFlightBuilderResult = (
 ///
 /// # Errors
 /// Returns `StampError` if any builder fails to run.
-#[allow(clippy::too_many_lines)]
 pub async fn build_concurrently(
     builders: Vec<Box<dyn crate::builder::Builder>>,
     provisioners: std::sync::Arc<Vec<Box<dyn crate::provisioner::Provisioner>>>,
     error_cleanup_provisioners: std::sync::Arc<Vec<Box<dyn crate::provisioner::Provisioner>>>,
-    _post_processors: std::sync::Arc<Vec<Box<dyn crate::post_processor::PostProcessor>>>,
+    post_processors: std::sync::Arc<Vec<Box<dyn crate::post_processor::PostProcessor>>>,
     config: EngineConfig,
 ) -> Result<(), crate::error::StampError> {
     let filtered_builders: Vec<Box<dyn crate::builder::Builder>> = builders
@@ -385,10 +384,10 @@ pub async fn build_concurrently(
 
     // 0. Post-processing
     let mut final_artifacts: Vec<Box<dyn crate::artifact::Artifact>> = Vec::new();
-    for artifact_box in all_artifacts.into_iter() {
+    for artifact_box in all_artifacts {
         let mut current_artifact =
             crate::post_processor::Artifact::new(artifact_box.id(), artifact_box.files());
-        for pp in _post_processors.iter() {
+        for pp in post_processors.iter() {
             let previous_files = current_artifact.files.clone();
             let keep_input = pp.keep_input_artifact();
             let next_artifact = pp.process(current_artifact).await?;
@@ -514,6 +513,15 @@ pub async fn build_concurrently(
     Ok(())
 }
 
+/// Undeclared variable warning options for template validation.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct UndeclaredVarOptions {
+    /// Whether to warn or error on undeclared variables.
+    pub warn_on_undeclared_var: bool,
+    /// Disables warning on undeclared variables.
+    pub no_warn_undeclared_var: bool,
+}
+
 /// Configuration for the `validate` command.
 #[derive(Debug, Default, Clone)]
 pub struct ValidateConfig {
@@ -521,10 +529,8 @@ pub struct ValidateConfig {
     pub syntax_only: bool,
     /// Evaluate data sources during validation.
     pub evaluate_datasources: bool,
-    /// Whether to warn or error on undeclared variables.
-    pub warn_on_undeclared_var: bool,
-    /// Disables warning on undeclared variables.
-    pub no_warn_undeclared_var: bool,
+    /// Undeclared variable warning options.
+    pub undeclared_vars: UndeclaredVarOptions,
     /// Only validate the given builder/source names.
     pub only: Option<String>,
     /// Exclude the given builder/source names from validation.
@@ -551,7 +557,11 @@ pub fn validate_with_config(
 
     // 1. Validate builder component schemas
     for b in &template.builders {
-        let has_ssh = b.config.get("communicator").map(|v| v.as_str()) == Some("ssh");
+        let has_ssh = b
+            .config
+            .get("communicator")
+            .map(std::string::String::as_str)
+            == Some("ssh");
         if has_ssh && (b.builder_type == "hyperv-iso" || b.builder_type == "hyperv-vmcx") {
             return Err(crate::error::StampError::Parse(format!(
                 "Builder '{}' of type '{}' only supports winrm communicator, but ssh was provided.",
@@ -605,11 +615,11 @@ pub fn validate_with_config(
             if let Some(v_name) = caps.get(1) {
                 let name = v_name.as_str();
                 if !declared_vars.contains(name) {
-                    if config.warn_on_undeclared_var {
+                    if config.undeclared_vars.warn_on_undeclared_var {
                         return Err(StampError::Validation(format!(
                             "Undeclared variable '{name}' referenced in configuration"
                         )));
-                    } else if !config.no_warn_undeclared_var {
+                    } else if !config.undeclared_vars.no_warn_undeclared_var {
                         eprintln!(
                             "Warning: Undeclared variable '{name}' referenced in configuration"
                         );
@@ -645,18 +655,24 @@ pub fn validate(template: &crate::template::Template) -> Result<(), crate::error
     validate_with_config(template, &ValidateConfig::default())
 }
 
-/// Configuration for the `fmt` command.
-#[derive(Debug, Default, Clone)]
-#[allow(clippy::struct_excessive_bools)]
-pub struct FmtConfig {
+/// Output and write options for formatting.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct FmtOutputOptions {
     /// Check if input is formatted. Return error if not.
     pub check: bool,
-    /// Display diffs of formatting changes
+    /// Display diffs of formatting changes.
     pub diff: bool,
-    /// Process directories recursively
-    pub recursive: bool,
-    /// Write result to source file
+    /// Write result to source file.
     pub write: bool,
+}
+
+/// Configuration for the `fmt` command.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct FmtConfig {
+    /// Process directories recursively.
+    pub recursive: bool,
+    /// Output and write mode options.
+    pub options: FmtOutputOptions,
 }
 
 /// Formats a single template.
@@ -674,21 +690,21 @@ pub fn fmt_file(template_path: &str, config: &FmtConfig) -> Result<(), StampErro
         serde_json::to_string_pretty(&parsed).map_err(|e| StampError::Parse(e.to_string()))?
     } else {
         hashicorp_configuration_language_rs::serde::from_str::<serde_json::Value>(&content)
-            .map_err(|e| StampError::Parse(e.to_string()))?;
+            .map_err(|e| StampError::Parse(e.clone()))?;
         crate::engine::fmt::format_hcl_canonical(&content)
     };
 
     if content != formatted {
-        if config.diff {
+        if config.options.diff {
             println!(
                 "{}",
                 crate::engine::fmt::generate_diff(&content, &formatted)
             );
         }
-        if config.write {
+        if config.options.write {
             std::fs::write(template_path, &formatted)?;
         }
-        if config.check {
+        if config.options.check {
             return Err(StampError::Validation(format!(
                 "Formatting needed for {template_path}"
             )));
@@ -1105,7 +1121,10 @@ mod tests {
             ..Default::default()
         });
         let config = ValidateConfig {
-            warn_on_undeclared_var: true,
+            undeclared_vars: UndeclaredVarOptions {
+                warn_on_undeclared_var: true,
+                no_warn_undeclared_var: false,
+            },
             ..Default::default()
         };
         assert!(validate_with_config(&tmpl, &config).is_err());
@@ -1151,7 +1170,10 @@ mod tests {
             tmp.to_str()
                 .ok_or_else(|| StampError::Parse("Path not UTF-8".to_string()))?,
             &FmtConfig {
-                write: true,
+                options: FmtOutputOptions {
+                    write: true,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
         )?;
@@ -1166,7 +1188,10 @@ mod tests {
             tmp.to_str()
                 .ok_or_else(|| StampError::Parse("Path not UTF-8".to_string()))?,
             &FmtConfig {
-                write: true,
+                options: FmtOutputOptions {
+                    write: true,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
         )?;
@@ -1639,10 +1664,12 @@ mod tests {
 
         // 1. check = true, write = false (should return error because formatting is needed)
         let mut config = FmtConfig {
-            check: true,
-            diff: true,
             recursive: false,
-            write: false,
+            options: FmtOutputOptions {
+                check: true,
+                diff: true,
+                write: false,
+            },
         };
         let res = fmt(path_str, &config);
         assert!(res.is_err());
@@ -1661,8 +1688,8 @@ mod tests {
         );
 
         // 2. check = false, write = true
-        config.check = false;
-        config.write = true;
+        config.options.check = false;
+        config.options.write = true;
         fmt(path_str, &config)?;
 
         // File is formatted
@@ -1673,7 +1700,7 @@ mod tests {
         ));
 
         // 3. check = true on formatted file (should succeed)
-        config.check = true;
+        config.options.check = true;
         fmt(path_str, &config)?;
         Ok(())
     }
@@ -1697,10 +1724,12 @@ mod tests {
 
         // Recursive false -> Error
         let config = FmtConfig {
-            check: false,
-            diff: false,
             recursive: false,
-            write: true,
+            options: FmtOutputOptions {
+                check: false,
+                diff: false,
+                write: true,
+            },
         };
         let err = fmt(path_str, &config)
             .err()
@@ -1709,10 +1738,12 @@ mod tests {
 
         // Recursive true -> Formats all
         let config = FmtConfig {
-            check: false,
-            diff: false,
             recursive: true,
-            write: true,
+            options: FmtOutputOptions {
+                check: false,
+                diff: false,
+                write: true,
+            },
         };
         fmt(path_str, &config)?;
 

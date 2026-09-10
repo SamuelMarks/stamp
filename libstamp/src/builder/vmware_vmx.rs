@@ -110,7 +110,7 @@ impl Step for StepCloneVM {
     }
 }
 
-/// Step to launch the cloned VMware VM.
+/// Step to launch the cloned `VMware` VM.
 #[derive(Debug, Clone)]
 struct StepRunVM {
     /// UI reference for terminal output.
@@ -235,7 +235,7 @@ impl Step for StepShutdown {
     async fn cleanup(&mut self, _state: &StateBag) {}
 }
 
-/// Step to export the VMware VM to OVA/OVF format via `ovftool`.
+/// Step to export the `VMware` VM to OVA/OVF format via `ovftool`.
 #[derive(Debug, Clone)]
 struct StepExportVmx {
     /// UI reference for terminal output.

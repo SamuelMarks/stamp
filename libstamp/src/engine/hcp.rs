@@ -1,5 +1,5 @@
 #![cfg_attr(coverage_nightly, coverage(off))]
-//! HashiCorp Cloud Platform (HCP) Packer Registry client and build workflow.
+//! `HashiCorp` Cloud Platform (HCP) Packer Registry client and build workflow.
 //!
 //! Provides API integration for managing HCP Packer buckets, build iterations,
 //! image artifacts, and release channels, as well as enforcing image revocation policies.
@@ -74,9 +74,9 @@ impl std::fmt::Display for HcpImageId {
 /// Configuration settings for connecting to the HCP Packer Registry API.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HcpClientConfig {
-    /// OAuth2 Client ID from HCP service principal.
+    /// `OAuth2` Client ID from HCP service principal.
     pub client_id: Option<String>,
-    /// OAuth2 Client Secret from HCP service principal.
+    /// `OAuth2` Client Secret from HCP service principal.
     pub client_secret: Option<String>,
     /// Direct Bearer token override, if already obtained.
     pub auth_token: Option<String>,

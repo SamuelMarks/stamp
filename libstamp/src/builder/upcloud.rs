@@ -1,6 +1,6 @@
 //! Implementation of the `upcloud` builder.
 //!
-//! Manages UpCloud cloud servers, executing provisioning steps over SSH
+//! Manages `UpCloud` cloud servers, executing provisioning steps over SSH
 //! and creating permanent custom storage templates.
 
 use crate::builder::Builder;
@@ -17,9 +17,9 @@ use std::time::Duration;
 pub struct UpCloudConfig {
     /// Name of the builder instance.
     pub name: String,
-    /// UpCloud API username.
+    /// `UpCloud` API username.
     pub username: Option<String>,
-    /// UpCloud API password.
+    /// `UpCloud` API password.
     pub password: Option<String>,
     /// Target datacenter zone code (e.g. `de-fra1`, `fi-hel1`, `us-chi1`).
     pub zone: Option<String>,
@@ -50,7 +50,7 @@ impl UpCloudBuilder {
     }
 }
 
-/// Step to launch a temporary UpCloud server.
+/// Step to launch a temporary `UpCloud` server.
 #[derive(Debug, Clone)]
 struct StepCreateServer {
     /// UI logger.
@@ -92,7 +92,7 @@ impl Step for StepCreateServer {
     }
 }
 
-/// Step to provision the UpCloud server over SSH.
+/// Step to provision the `UpCloud` server over SSH.
 #[derive(Clone)]
 struct StepProvision {
     /// UI logger.
@@ -144,7 +144,7 @@ impl Step for StepProvision {
     async fn cleanup(&mut self, _state: &StateBag) {}
 }
 
-/// Step to template the storage disk into an UpCloud template.
+/// Step to template the storage disk into an `UpCloud` template.
 #[derive(Debug, Clone)]
 struct StepCreateTemplate {
     /// UI logger.
@@ -181,7 +181,7 @@ impl Step for StepCreateTemplate {
     async fn cleanup(&mut self, _state: &StateBag) {}
 }
 
-/// Artifact produced by the UpCloud builder.
+/// Artifact produced by the `UpCloud` builder.
 #[derive(Debug, Clone)]
 pub struct UpCloudArtifact {
     /// Created template UUID.

@@ -98,7 +98,7 @@ pub async fn run_hyperv_ps(cmd: &str) -> Result<String, StampError> {
 /// Returns `StampError::Execution` if IP address cannot be determined.
 pub async fn extract_hyperv_ip(vm_name: &str) -> Result<String, StampError> {
     let script = format!(
-        r#"(Get-VMNetworkAdapter -VMName '{vm_name}').IPAddresses | Where-Object {{ $_ -match '^\d+\.\d+\.\d+\.\d+$' }} | Select-Object -First 1"#
+        r"(Get-VMNetworkAdapter -VMName '{vm_name}').IPAddresses | Where-Object {{ $_ -match '^\d+\.\d+\.\d+\.\d+$' }} | Select-Object -First 1"
     );
     let output = run_hyperv_ps(&script).await?;
     let ip = output.trim();

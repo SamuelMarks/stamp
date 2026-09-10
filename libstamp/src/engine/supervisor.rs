@@ -2,7 +2,7 @@
 //! Out-of-process plugin supervisor and lifecycle manager.
 //!
 //! Handles subprocess execution with environment isolation, process group assignment,
-//! HashiCorp `go-plugin` handshake negotiation, gRPC health checking, and graceful
+//! `HashiCorp` `go-plugin` handshake negotiation, gRPC health checking, and graceful
 //! termination / orphan cleanup watchdogs.
 
 use crate::error::StampError;
@@ -32,7 +32,7 @@ pub enum Protocol {
     Grpc,
 }
 
-/// Parsed HashiCorp `go-plugin` handshake.
+/// Parsed `HashiCorp` `go-plugin` handshake.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Handshake {
     /// Core protocol version (typically 1).
@@ -167,7 +167,7 @@ impl SupervisedPlugin {
         {
             if self.pgid > 0 {
                 // Sending signal 0 checks if process exists
-                unsafe { libc::kill(self.pid as i32, 0) == 0 }
+                i32::try_from(self.pid).is_ok_and(|p| unsafe { libc::kill(p, 0) == 0 })
             } else {
                 false
             }
@@ -257,6 +257,7 @@ impl SupervisedPlugin {
 
     /// Starts a background heartbeat health monitoring loop.
     /// If health check fails `max_consecutive_failures` times, marks the plugin as cancelled.
+    #[must_use]
     pub fn start_heartbeat_monitor(
         &self,
         interval: Duration,
@@ -273,16 +274,14 @@ impl SupervisedPlugin {
                 if cancelled.load(Ordering::SeqCst) {
                     break;
                 }
-                match PluginSupervisor::perform_healthcheck(&endpoint, &net_type).await {
-                    Ok(true) => {
-                        failures = 0;
-                    }
-                    _ => {
-                        failures += 1;
-                        if failures >= max_consecutive_failures {
-                            cancelled.store(true, Ordering::SeqCst);
-                            break;
-                        }
+                if let Ok(true) = PluginSupervisor::perform_healthcheck(&endpoint, &net_type).await
+                {
+                    failures = 0;
+                } else {
+                    failures += 1;
+                    if failures >= max_consecutive_failures {
+                        cancelled.store(true, Ordering::SeqCst);
+                        break;
                     }
                 }
             }
@@ -420,11 +419,11 @@ impl PluginSupervisor {
             .spawn()
             .map_err(|e| StampError::Execution(format!("Failed to spawn plugin process: {e}")))?;
 
-        let pid = child.id().unwrap_or(0);
+        let child_pid = child.id().unwrap_or(0);
         #[cfg(unix)]
-        let pgid = pid as i32;
+        let group_id = i32::try_from(child_pid).unwrap_or(0);
         #[cfg(not(unix))]
-        let pgid = 0;
+        let group_id = 0;
 
         let stdout = child.stdout.take().ok_or_else(|| {
             StampError::Execution("Plugin stdout pipe was not captured".to_string())
@@ -440,8 +439,8 @@ impl PluginSupervisor {
         let handshake: Handshake = line.parse()?;
 
         Ok(SupervisedPlugin {
-            pid,
-            pgid,
+            pid: child_pid,
+            pgid: group_id,
             handshake,
             child: Arc::new(Mutex::new(Some(child))),
             cancelled: Arc::new(AtomicBool::new(false)),

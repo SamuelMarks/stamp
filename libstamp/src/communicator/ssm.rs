@@ -10,6 +10,7 @@ use crate::communicator::{Command, CommandResult, Communicator};
 use crate::error::StampError;
 use crate::types::{FilePath, Timeout};
 use async_trait::async_trait;
+use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
@@ -82,7 +83,7 @@ pub fn build_ssm_proxy_args(
     args
 }
 
-/// Helper function to construct AWS SSM SendCommand arguments for Linux shells.
+/// Helper function to construct AWS SSM `SendCommand` arguments for Linux shells.
 #[must_use]
 pub fn build_ssm_send_command_args(
     instance_id: &str,
@@ -109,7 +110,7 @@ pub fn build_ssm_send_command_args(
     args
 }
 
-/// Helper function to construct AWS SSM SendCommand arguments for Windows PowerShell.
+/// Helper function to construct AWS SSM `SendCommand` arguments for Windows PowerShell.
 #[must_use]
 pub fn build_ssm_send_powershell_command_args(
     instance_id: &str,
@@ -136,7 +137,7 @@ pub fn build_ssm_send_powershell_command_args(
     args
 }
 
-/// Helper function to build a full ProxyCommand string for OpenSSH tunneling over SSM.
+/// Helper function to build a full `ProxyCommand` string for OpenSSH tunneling over SSM.
 #[must_use]
 pub fn build_ssm_proxy_command(
     instance_id: &str,
@@ -149,7 +150,7 @@ pub fn build_ssm_proxy_command(
         "aws ssm start-session --target {instance_id} --document-name AWS-StartSSHSession --parameters portNumber={port} --region {region}"
     );
     if let Some(p) = profile {
-        cmd.push_str(&format!(" --profile {p}"));
+        let _ = write!(cmd, " --profile {p}");
     }
     cmd
 }
@@ -377,19 +378,17 @@ mod tests {
             region: "us-east-1".to_string(),
             profile: Some("prod".to_string()),
             document_name: "AWS-StartSSHSession".to_string(),
-            session_manager_plugin_path: Some(FilePath::new(PathBuf::from(
-                "/usr/local/bin/session-manager-plugin",
-            ))),
+            session_manager_plugin_path: None,
             ssh_config: Some(SshConfig::default()),
             timeout: Timeout::new(Duration::from_secs(30)),
         };
-        let c = SsmCommunicator::new(config);
+        let c = SsmCommunicator::new(config.clone());
 
-        let res = c
-            .execute(&Command::new("echo hello".to_string()))
-            .await
-            .unwrap();
-        assert_eq!(res.exit_code, 0);
+        let res = c.execute(&Command::new("echo hello".to_string())).await;
+        assert!(res.is_ok());
+        if let Ok(cmd_res) = res {
+            assert_eq!(cmd_res.exit_code, 0);
+        }
 
         let fp = FilePath::new(PathBuf::from("a"));
         assert!(c.upload(&fp, &fp).await.is_ok());
@@ -400,6 +399,23 @@ mod tests {
         assert_eq!(format!("{c:?}"), format!("{c2:?}"));
 
         assert!(!c.has_session_manager_plugin());
+
+        // Test non-existent plugin path
+        let mut nonexistent_config = config.clone();
+        nonexistent_config.session_manager_plugin_path = Some(FilePath::new(PathBuf::from(
+            "/nonexistent/stamp/session-manager-plugin",
+        )));
+        let nonexistent_comm = SsmCommunicator::new(nonexistent_config);
+        assert!(!nonexistent_comm.has_session_manager_plugin());
+
+        // Test existing plugin path using a named temporary file
+        if let Ok(temp_plugin) = tempfile::NamedTempFile::new() {
+            let mut existing_config = config;
+            existing_config.session_manager_plugin_path =
+                Some(FilePath::new(temp_plugin.path().to_path_buf()));
+            let existing_comm = SsmCommunicator::new(existing_config);
+            assert!(existing_comm.has_session_manager_plugin());
+        }
 
         // Test invalid instance error
         let invalid_config = SsmConfig::new("invalid_instance", "us-east-1");

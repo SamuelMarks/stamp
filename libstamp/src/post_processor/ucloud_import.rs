@@ -7,19 +7,19 @@ use async_trait::async_trait;
 /// Configuration for the `ucloud-import` post-processor.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UcloudImportConfig {
-    /// Name of the imported image in UCloud.
+    /// Name of the imported image in `UCloud`.
     pub image_name: String,
     /// Description for the imported image.
     pub image_description: Option<String>,
-    /// Download URL for the disk image stored in UFile object storage.
+    /// Download URL for the disk image stored in `UFile` object storage.
     pub ufile_url: Option<String>,
     /// Image disk format (e.g. `RAW`, `VHD`, `QCOW2`).
     pub format: Option<String>,
     /// Operating system type (e.g. `CentOS`, `Ubuntu`, `Windows`).
     pub os_type: Option<String>,
-    /// UCloud region (e.g. `cn-bj2`, `cn-sh2`, `hk`).
+    /// `UCloud` region (e.g. `cn-bj2`, `cn-sh2`, `hk`).
     pub region: Option<String>,
-    /// UCloud project ID (optional).
+    /// `UCloud` project ID (optional).
     pub project_id: Option<String>,
     /// Whether to keep the input artifact. Defaults to true.
     pub keep_input_artifact: bool,

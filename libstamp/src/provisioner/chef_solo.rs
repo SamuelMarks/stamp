@@ -4,6 +4,7 @@ use crate::communicator::{Command, Communicator};
 use crate::error::StampError;
 use crate::provisioner::Provisioner;
 use crate::types::FilePath;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -256,7 +257,7 @@ impl Provisioner for ChefSoloProvisioner {
         let mut cmd_str = self.config.execute_command.clone().unwrap_or(default_cmd);
 
         if !merged_attributes.is_null() && merged_attributes != serde_json::json!({}) {
-            cmd_str.push_str(&format!(" -j {node_json_remote}"));
+            let _ = write!(cmd_str, " -j {node_json_remote}");
         }
 
         if !self.config.run_list.is_empty() {

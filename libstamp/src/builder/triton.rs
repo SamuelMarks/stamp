@@ -1,7 +1,7 @@
 #![cfg_attr(coverage_nightly, coverage(off))]
-//! Implementation of the `triton` builder for Joyent Triton CloudAPI.
+//! Implementation of the `triton` builder for Joyent Triton `CloudAPI`.
 //!
-//! Provides a full REST client for Triton CloudAPI with HTTP signature authentication,
+//! Provides a full REST client for Triton `CloudAPI` with HTTP signature authentication,
 //! machine creation and package sizing, communicator provisioning, machine snapshotting,
 //! and image registration.
 
@@ -19,9 +19,9 @@ use std::time::Duration;
 /// Configuration for the `triton` builder.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct TritonConfig {
-    /// Triton CloudAPI account username.
+    /// Triton `CloudAPI` account username.
     pub account: String,
-    /// Triton CloudAPI endpoint URL (e.g. `https://us-east-1.api.joyent.com`).
+    /// Triton `CloudAPI` endpoint URL (e.g. `https://us-east-1.api.joyent.com`).
     pub triton_url: Option<String>,
     /// SSH Key ID / fingerprint in Triton (e.g. `/account/keys/key_name` or fingerprint).
     pub key_id: Option<String>,
@@ -45,7 +45,7 @@ pub struct TritonConfig {
     pub ssh_password: Option<String>,
 }
 
-/// Triton CloudAPI client.
+/// Triton `CloudAPI` client.
 #[derive(Debug, Clone)]
 pub struct TritonClient {
     /// Account username.
@@ -56,6 +56,29 @@ pub struct TritonClient {
     pub key_id: Option<String>,
     /// Key material.
     pub key_material: Option<String>,
+}
+
+/// Machine creation response.
+#[derive(Deserialize)]
+struct MachineResp {
+    /// Machine identifier.
+    id: String,
+}
+
+/// Machine details payload.
+#[derive(Deserialize)]
+struct MachineDetails {
+    /// Primary IP address.
+    primary_ip: Option<String>,
+    /// List of assigned IP addresses.
+    ips: Option<Vec<String>>,
+}
+
+/// Image creation response.
+#[derive(Deserialize)]
+struct ImageResp {
+    /// Image identifier.
+    id: String,
 }
 
 impl TritonClient {
@@ -75,7 +98,7 @@ impl TritonClient {
         }
     }
 
-    /// Create a new machine in Triton CloudAPI.
+    /// Create a new machine in Triton `CloudAPI`.
     ///
     /// # Errors
     ///
@@ -111,11 +134,6 @@ impl TritonClient {
             .await
             .map_err(|e| StampError::Execution(format!("Triton create machine failed: {e}")))?;
 
-        #[derive(Deserialize)]
-        struct MachineResp {
-            id: String,
-        }
-
         let machine: MachineResp = resp
             .json()
             .await
@@ -141,12 +159,6 @@ impl TritonClient {
             .send()
             .await
             .map_err(|e| StampError::Execution(format!("Triton get machine failed: {e}")))?;
-
-        #[derive(Deserialize)]
-        struct MachineDetails {
-            primary_ip: Option<String>,
-            ips: Option<Vec<String>>,
-        }
 
         let details: MachineDetails = resp
             .json()
@@ -223,11 +235,6 @@ impl TritonClient {
             .send()
             .await
             .map_err(|e| StampError::Execution(format!("Triton image creation failed: {e}")))?;
-
-        #[derive(Deserialize)]
-        struct ImageResp {
-            id: String,
-        }
 
         let img: ImageResp = resp
             .json()

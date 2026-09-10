@@ -1,7 +1,7 @@
 //! Implementation of the `cloudstack` builder.
 //!
-//! Deploys temporary virtual machines on Apache CloudStack, provisions them over SSH,
-//! and registers new reusable CloudStack templates from volume snapshots.
+//! Deploys temporary virtual machines on Apache `CloudStack`, provisions them over SSH,
+//! and registers new reusable `CloudStack` templates from volume snapshots.
 
 use crate::builder::Builder;
 use crate::communicator::ssh::{SshCommunicator, SshConfig};
@@ -17,11 +17,11 @@ use std::time::Duration;
 pub struct CloudstackConfig {
     /// Name of the builder instance.
     pub name: String,
-    /// Apache CloudStack API URL endpoint (e.g. `http://cloudstack.example.com:8080/client/api`).
+    /// Apache `CloudStack` API URL endpoint (e.g. `http://cloudstack.example.com:8080/client/api`).
     pub api_url: Option<String>,
-    /// CloudStack API key.
+    /// `CloudStack` API key.
     pub api_key: Option<String>,
-    /// CloudStack Secret key.
+    /// `CloudStack` Secret key.
     pub secret_key: Option<String>,
     /// Target zone name or ID.
     pub zone: Option<String>,
@@ -52,14 +52,14 @@ impl CloudstackBuilder {
     }
 }
 
-/// Step to deploy a temporary CloudStack virtual machine.
+/// Step to deploy a temporary `CloudStack` virtual machine.
 #[derive(Debug, Clone)]
 struct StepDeployVM {
     /// UI logger.
     ui: Arc<crate::engine::ui::Ui>,
     /// Builder name.
     name: String,
-    /// CloudStack configuration.
+    /// `CloudStack` configuration.
     config: CloudstackConfig,
 }
 
@@ -94,14 +94,14 @@ impl Step for StepDeployVM {
     }
 }
 
-/// Step to provision the CloudStack VM over SSH.
+/// Step to provision the `CloudStack` VM over SSH.
 #[derive(Clone)]
 struct StepProvision {
     /// UI logger.
     ui: Arc<crate::engine::ui::Ui>,
     /// Builder name.
     name: String,
-    /// CloudStack configuration.
+    /// `CloudStack` configuration.
     config: CloudstackConfig,
     /// Provisioning hook.
     hook: Arc<dyn ProvisionHook>,
@@ -167,7 +167,7 @@ struct StepCreateTemplate {
     ui: Arc<crate::engine::ui::Ui>,
     /// Builder name.
     name: String,
-    /// CloudStack configuration.
+    /// `CloudStack` configuration.
     config: CloudstackConfig,
 }
 

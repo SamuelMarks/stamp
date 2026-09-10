@@ -71,13 +71,10 @@ impl Provisioner for SaltMasterlessProvisioner {
         ui: std::sync::Arc<crate::engine::ui::Ui>,
     ) -> Result<(), StampError> {
         #![cfg_attr(coverage_nightly, coverage(off))]
-        let state_tree = match &self.config.local_state_tree {
-            Some(tree) => tree,
-            None => {
-                return Err(StampError::Provisioner(
-                    "local_state_tree is required".to_string(),
-                ));
-            }
+        let Some(state_tree) = &self.config.local_state_tree else {
+            return Err(StampError::Provisioner(
+                "local_state_tree is required".to_string(),
+            ));
         };
 
         let remote_dir = self

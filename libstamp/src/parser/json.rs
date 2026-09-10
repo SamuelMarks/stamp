@@ -172,9 +172,10 @@ pub fn parse_json<S: ::std::hash::BuildHasher>(
 
     let mut variables = std::collections::HashMap::new();
     for (k, v) in parsed.variables {
-        #[allow(clippy::field_reassign_with_default)]
-        let mut var = crate::template::VariableConfig::default();
-        var.default = Some(v);
+        let var = crate::template::VariableConfig {
+            default: Some(v),
+            ..crate::template::VariableConfig::default()
+        };
         variables.insert(k, var);
     }
 

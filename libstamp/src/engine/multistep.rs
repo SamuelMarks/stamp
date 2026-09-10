@@ -367,6 +367,7 @@ impl Runner {
     /// Spawns a background task that listens for SIGINT/SIGTERM.
     /// The first signal initiates cancellation on the runner.
     /// The second signal immediately exits the process.
+    #[must_use]
     pub fn spawn_signal_listener(&self) -> tokio::task::JoinHandle<()> {
         let cancel_tx = self.cancel_tx.clone();
         tokio::spawn(async move {
@@ -376,14 +377,14 @@ impl Runner {
                 let mut sigint = signal(SignalKind::interrupt()).ok();
                 let mut sigterm = signal(SignalKind::terminate()).ok();
                 tokio::select! {
-                    _ = async {
+                    () = async {
                         if let Some(ref mut s) = sigint {
                             s.recv().await;
                         } else {
                             std::future::pending::<()>().await;
                         }
                     } => {},
-                    _ = async {
+                    () = async {
                         if let Some(ref mut s) = sigterm {
                             s.recv().await;
                         } else {
@@ -404,14 +405,14 @@ impl Runner {
                 let mut sigint2 = signal(SignalKind::interrupt()).ok();
                 let mut sigterm2 = signal(SignalKind::terminate()).ok();
                 tokio::select! {
-                    _ = async {
+                    () = async {
                         if let Some(ref mut s) = sigint2 {
                             s.recv().await;
                         } else {
                             std::future::pending::<()>().await;
                         }
                     } => {},
-                    _ = async {
+                    () = async {
                         if let Some(ref mut s) = sigterm2 {
                             s.recv().await;
                         } else {
@@ -1105,8 +1106,11 @@ mod tests {
             .with_on_error(crate::engine::packer::OnErrorStrategy::Ask);
 
         assert!(runner.run(&mut state).await.is_ok());
-        let final_attempts = *attempts.lock().unwrap_or_else(|_| panic!("lock failed"));
-        assert_eq!(final_attempts, 2);
+        if let Ok(attempts_guard) = attempts.lock() {
+            assert_eq!(*attempts_guard, 2);
+        } else {
+            panic!("lock failed");
+        }
     }
 
     #[tokio::test]

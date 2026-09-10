@@ -5,10 +5,11 @@
 use crate::communicator::{Command, CommandResult, Communicator};
 use crate::error::StampError;
 use crate::types::{FilePath, Port, Timeout};
+use sha2::Digest;
 use std::time::Duration;
-use winrm_rs::{AuthMethod, WinrmClient, WinrmConfig as RsWinrmConfig};
+use winrm_rs::{AuthMethod, WinrmClient};
 #[cfg(not(test))]
-use winrm_rs::{WinrmClientBuilder, WinrmCredentials};
+use winrm_rs::{WinrmClientBuilder, WinrmConfig as RsWinrmConfig, WinrmCredentials};
 
 /// `WinRM` authentication mechanism.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -22,7 +23,7 @@ pub enum WinRmAuth {
     Kerberos,
     /// SPNEGO / Negotiate authentication.
     Negotiate,
-    /// Credential Security Support Provider (CredSSP) authentication for multi-hop delegation.
+    /// Credential Security Support Provider (`CredSSP`) authentication for multi-hop delegation.
     CredSsp,
 }
 
@@ -35,6 +36,17 @@ impl From<WinRmAuth> for AuthMethod {
             WinRmAuth::Kerberos | WinRmAuth::Negotiate => Self::Kerberos,
         }
     }
+}
+
+/// TLS configuration options for `WinRM`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WinRmTlsConfig {
+    /// Whether to use HTTPS transport.
+    pub use_https: bool,
+    /// Whether to bypass TLS certificate validation when using HTTPS.
+    pub insecure_skip_verify: bool,
+    /// Whether to bypass TLS certificate validation specifically via `winrm_insecure`.
+    pub winrm_insecure: bool,
 }
 
 /// Strongly-typed `WinRM` configuration.
@@ -50,20 +62,16 @@ pub struct WinRmConfig {
     pub password: Option<String>,
     /// Optional Windows domain for authentication.
     pub domain: Option<String>,
-    /// Authentication mechanism (Basic, NTLM, Kerberos, Negotiate, or CredSSP).
+    /// Authentication mechanism (Basic, NTLM, Kerberos, Negotiate, or `CredSSP`).
     pub auth: WinRmAuth,
     /// Optional Kerberos configuration file path (`KRB5_CONFIG`).
     pub krb5_config: Option<FilePath>,
     /// Optional Kerberos credential cache file path (`KRB5CCNAME`).
     pub krb5_ccname: Option<FilePath>,
-    /// Whether to use HTTPS transport.
-    pub use_https: bool,
+    /// TLS options.
+    pub tls: WinRmTlsConfig,
     /// Connection and operation timeout.
     pub timeout: Timeout,
-    /// Whether to bypass TLS certificate validation when using HTTPS.
-    pub insecure_skip_verify: bool,
-    /// Whether to bypass TLS certificate validation specifically via `winrm_insecure`.
-    pub winrm_insecure: bool,
     /// Optional custom CA certificate path for HTTPS certificate validation.
     pub ca_cert_path: Option<FilePath>,
     /// Whether to wrap commands in encoded PowerShell invocations.
@@ -90,10 +98,8 @@ impl Default for WinRmConfig {
             auth: WinRmAuth::Basic,
             krb5_config: None,
             krb5_ccname: None,
-            use_https: false,
+            tls: WinRmTlsConfig::default(),
             timeout: Timeout::new(Duration::from_secs(30)),
-            insecure_skip_verify: false,
-            winrm_insecure: false,
             ca_cert_path: None,
             use_powershell_wrapper: true,
             run_elevated: false,
@@ -235,17 +241,17 @@ impl WinRmCommunicator {
             return Err(StampError::Execution("Simulated mock exit".to_string()));
         }
 
-        #[allow(clippy::field_reassign_with_default)]
-        let mut rs_config = RsWinrmConfig::default();
-        rs_config.port = self.config.port.get();
-        rs_config.use_tls = self.config.use_https;
-        rs_config.accept_invalid_certs = self.config.insecure_skip_verify;
-        rs_config.connect_timeout_secs = self.config.timeout.get().as_secs();
-        rs_config.operation_timeout_secs = self.config.timeout.get().as_secs();
-        rs_config.auth_method = self.config.auth.clone().into();
-
         #[cfg(not(test))]
         {
+            let rs_config = RsWinrmConfig {
+                port: self.config.port.get(),
+                use_tls: self.config.tls.use_https,
+                accept_invalid_certs: self.config.tls.insecure_skip_verify,
+                connect_timeout_secs: self.config.timeout.get().as_secs(),
+                operation_timeout_secs: self.config.timeout.get().as_secs(),
+                auth_method: self.config.auth.clone().into(),
+                ..RsWinrmConfig::default()
+            };
             let pass = self.config.password.clone().unwrap_or_default();
             let domain = self.config.domain.clone().unwrap_or_default();
             let creds = WinrmCredentials::new(self.config.username.clone(), pass, domain);
@@ -314,7 +320,6 @@ impl WinRmCommunicator {
         }
 
         // Verify remote file checksum
-        use sha2::Digest;
         let mut hasher = sha2::Sha256::new();
         hasher.update(&content);
         let expected_hash = hex::encode(hasher.finalize());
@@ -534,10 +539,8 @@ mod tests {
             auth: WinRmAuth::Ntlm,
             krb5_config: None,
             krb5_ccname: None,
-            use_https: false,
+            tls: WinRmTlsConfig::default(),
             timeout: Timeout::new(Duration::from_secs(10)),
-            insecure_skip_verify: false,
-            winrm_insecure: false,
             ca_cert_path: None,
             use_powershell_wrapper: true,
             run_elevated: false,
@@ -556,9 +559,11 @@ mod tests {
             password: Some("pass".to_string()),
             domain: None,
             timeout: Timeout(Duration::from_secs(10)),
-            use_https: false,
-            insecure_skip_verify: true,
-            winrm_insecure: false,
+            tls: WinRmTlsConfig {
+                use_https: false,
+                insecure_skip_verify: true,
+                winrm_insecure: false,
+            },
             ca_cert_path: None,
             auth: WinRmAuth::Basic,
             krb5_config: None,
@@ -681,7 +686,7 @@ mod tests {
         assert!(hash_script.contains("Get-FileHash"));
 
         let default_winrm = WinRmConfig::default();
-        assert!(!default_winrm.winrm_insecure);
+        assert!(!default_winrm.tls.winrm_insecure);
         assert!(default_winrm.ca_cert_path.is_none());
     }
 }

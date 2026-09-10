@@ -211,7 +211,7 @@ impl Builder for PodmanBuilder {
         let image_id = if let Some(ref repo) = self.config.repository {
             format!("{repo}:latest")
         } else {
-            format!("sha256:mock_{}", cnt_id)
+            format!("sha256:mock_{cnt_id}")
         };
 
         Ok(Box::new(PodmanArtifact {

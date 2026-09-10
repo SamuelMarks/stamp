@@ -11,13 +11,13 @@ pub struct DigitaloceanImportConfig {
     pub identifier: String,
     /// Name of the imported custom image. Defaults to `packer-{{ .BuildName }}`.
     pub image_name: String,
-    /// Public URL from which DigitalOcean will download the custom image.
+    /// Public URL from which `DigitalOcean` will download the custom image.
     pub image_url: Option<String>,
-    /// DigitalOcean API personal access token.
+    /// `DigitalOcean` API personal access token.
     pub api_token: Option<String>,
     /// Target regions where the image will be available. Defaults to `["nyc3"]`.
     pub regions: Vec<String>,
-    /// Operating system distribution (e.g., Ubuntu, Debian, CentOS, Fedora, Arch, FreeBSD).
+    /// Operating system distribution (e.g., Ubuntu, Debian, `CentOS`, Fedora, Arch, FreeBSD).
     pub distribution: Option<String>,
     /// Description for the custom image.
     pub description: Option<String>,
@@ -69,13 +69,10 @@ impl PostProcessor for DigitaloceanImportPostProcessor {
             .clone()
             .or_else(|| artifact.files.first().cloned());
 
-        let image_url = match url {
-            Some(u) => u,
-            None => {
-                return Err(StampError::Provisioner(
-                    "image_url or artifact file is required for digitalocean-import".to_string(),
-                ));
-            }
+        let Some(image_url) = url else {
+            return Err(StampError::Provisioner(
+                "image_url or artifact file is required for digitalocean-import".to_string(),
+            ));
         };
 
         let token = self
@@ -131,10 +128,10 @@ impl PostProcessor for DigitaloceanImportPostProcessor {
                 StampError::Provisioner(format!("Failed to parse DO API response: {e}"))
             })?;
 
-            let image_id = resp_json["image"]["id"]
-                .as_u64()
-                .map(|id| id.to_string())
-                .unwrap_or_else(|| format!("do-image-{}", self.config.identifier));
+            let image_id = resp_json["image"]["id"].as_u64().map_or_else(
+                || format!("do-image-{}", self.config.identifier),
+                |id| id.to_string(),
+            );
 
             artifact.id = image_id;
             Ok(artifact)

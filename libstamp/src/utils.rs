@@ -2,6 +2,7 @@
 //! General utilities for Stamp.
 
 use std::collections::HashMap;
+use std::io::Write as _;
 use std::path::Path;
 
 /// Resolves the Docker executable path. Checks the `DOCKER_EXECUTABLE` environment variable.
@@ -13,7 +14,7 @@ pub fn docker_executable() -> String {
 /// Mutex for synchronizing tests that mutate environment variables.
 pub static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Loads and merges variables according to HashiCorp Packer's strict precedence rules:
+/// Loads and merges variables according to `HashiCorp` Packer's strict precedence rules:
 /// 1. Auto-loaded `.pkrvars.hcl` / `.pkrvars.json` in directory (alphabetical)
 /// 2. Auto-loaded `.auto.pkrvars.hcl` / `.auto.pkrvars.json` (alphabetical)
 /// 3. Environment variables matching prefix `PKR_VAR_<variable_name>`
@@ -261,7 +262,7 @@ pub fn clean_cache(
         let entry = entry?;
         let path = entry.path();
         if path.is_file()
-            && !path.extension().is_some_and(|ext| ext == "lock")
+            && path.extension().is_none_or(|ext| ext != "lock")
             && let Ok(metadata) = entry.metadata()
             && let Ok(modified) = metadata.modified()
             && let Ok(elapsed) = now.duration_since(modified)
@@ -355,7 +356,6 @@ pub fn init_packer_logging() -> Result<Option<String>, crate::error::StampError>
             .create(true)
             .append(true)
             .open(&log_path)?;
-        use std::io::Write as _;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());

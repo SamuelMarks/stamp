@@ -121,9 +121,8 @@ pub async fn start_http_server_full(
 
     let task = tokio::spawn(async move {
         loop {
-            let (mut socket, peer_addr) = match listener.accept().await {
-                Ok(conn) => conn,
-                Err(_) => break,
+            let Ok((mut socket, peer_addr)) = listener.accept().await else {
+                break;
             };
 
             let dir = serve_dir.clone();

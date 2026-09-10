@@ -3,6 +3,10 @@ name = "stamp"
 version = "0.0.1"
 edition = "2024"
 authors = ["Samuel Marks"]
+description = "CLI tool and modern Rust replacement for HashiCorp Packer"
+readme = "../README.md"
+keywords = ["packer", "image-builder", "virtualization", "infrastructure", "cloud"]
+categories = ["command-line-utilities"]
 license = "CC0 OR MIT OR Apache-2.0"
 repository = "https://github.com/SamuelMarks/stamp"
 

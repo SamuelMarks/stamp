@@ -92,7 +92,6 @@ use crate::template::PostProcessorConfig;
 /// # Errors
 ///
 /// Returns a `StampError` if the post-processor type is unknown.
-#[allow(clippy::too_many_lines)]
 pub fn create_post_processor(
     config: &PostProcessorConfig,
 ) -> Result<Box<dyn PostProcessor>, StampError> {

@@ -1,5 +1,3 @@
-#![allow(clippy::needless_update)]
-
 //! Builders for creating machine images.
 
 use crate::error::StampError;
@@ -92,7 +90,6 @@ use crate::template::BuilderConfig;
 /// # Errors
 ///
 /// Returns a `StampError` if the builder type is unknown.
-#[allow(clippy::too_many_lines)]
 fn create_raw_builder(config: &BuilderConfig) -> Result<Box<dyn Builder>, StampError> {
     match config.builder_type.as_str() {
         "file" => {
@@ -214,13 +211,13 @@ fn create_raw_builder(config: &BuilderConfig) -> Result<Box<dyn Builder>, StampE
         "parallels-iso" => Ok(Box::new(parallels_iso::ParallelsIsoBuilder::new(
             parallels_iso::ParallelsIsoConfig {
                 name: config.name.clone(),
-                ..Default::default()
+                test_cmd: None,
             },
         ))),
         "parallels-pvm" => Ok(Box::new(parallels_pvm::ParallelsPvmBuilder::new(
             parallels_pvm::ParallelsPvmConfig {
                 name: config.name.clone(),
-                ..Default::default()
+                test_cmd: None,
             },
         ))),
         "proxmox-clone" => Ok(Box::new(proxmox_clone::ProxmoxCloneBuilder::new(

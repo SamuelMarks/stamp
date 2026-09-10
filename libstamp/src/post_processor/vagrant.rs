@@ -80,18 +80,20 @@ impl VagrantPostProcessor {
         }
 
         for file in &artifact.files {
+            let path = Path::new(file);
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let ext_lower = ext.to_ascii_lowercase();
             let f_lower = file.to_lowercase();
-            if f_lower.ends_with(".vmx") || f_lower.ends_with(".vmdk") && f_lower.contains("vmware")
-            {
+            if ext_lower == "vmx" || (ext_lower == "vmdk" && f_lower.contains("vmware")) {
                 return "vmware_desktop".to_string();
             }
-            if f_lower.ends_with(".qcow2") || f_lower.ends_with(".img") {
+            if ext_lower == "qcow2" || ext_lower == "img" {
                 return "qemu".to_string();
             }
-            if f_lower.ends_with(".vhdx") || f_lower.ends_with(".vhd") {
+            if ext_lower == "vhdx" || ext_lower == "vhd" {
                 return "hyperv".to_string();
             }
-            if f_lower.ends_with(".pvm") {
+            if ext_lower == "pvm" {
                 return "parallels".to_string();
             }
         }

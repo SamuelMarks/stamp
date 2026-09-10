@@ -5,11 +5,33 @@ use crate::error::StampError;
 use crate::provisioner::Provisioner;
 use crate::provisioner::chef_solo::merge_json_attributes;
 use crate::types::FilePath;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 
-/// Configuration for the `chef-client` provisioner.
+/// Cleanup and error-handling options for Chef provisioning.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChefCleanupOptions {
+    /// Whether to delete the Chef node on error during provisioning.
+    pub delete_node_on_error: bool,
+    /// Whether to delete the Chef client on error during provisioning.
+    pub delete_client_on_error: bool,
+    /// Whether to delete staging directories and keys on the guest upon completion. Defaults to true.
+    pub clean_up: bool,
+}
+
+impl Default for ChefCleanupOptions {
+    fn default() -> Self {
+        Self {
+            delete_node_on_error: false,
+            delete_client_on_error: false,
+            clean_up: true,
+        }
+    }
+}
+
+/// Configuration for the `chef-client` provisioner.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ChefClientConfig {
     /// URL of the Chef server.
     pub server_url: String,
@@ -31,10 +53,6 @@ pub struct ChefClientConfig {
     pub json_path: Option<FilePath>,
     /// Path to the encrypted data bag secret file on local machine.
     pub encrypted_data_bag_secret_path: Option<FilePath>,
-    /// Whether to delete the Chef node on error during provisioning.
-    pub delete_node_on_error: bool,
-    /// Whether to delete the Chef client on error during provisioning.
-    pub delete_client_on_error: bool,
     /// Guest OS platform type (e.g. `linux`, `windows`).
     pub guest_os_type: Option<String>,
     /// Custom execute command template.
@@ -43,32 +61,8 @@ pub struct ChefClientConfig {
     pub install_command: Option<String>,
     /// Whether to skip automatic Chef client installation. Defaults to false.
     pub skip_install: bool,
-    /// Whether to delete staging directories and keys on the guest upon completion. Defaults to true.
-    pub clean_up: bool,
-}
-
-impl Default for ChefClientConfig {
-    fn default() -> Self {
-        Self {
-            server_url: String::new(),
-            validation_client_name: String::new(),
-            validation_key_path: None,
-            client_key: None,
-            run_list: Vec::new(),
-            node_name: None,
-            chef_environment: None,
-            json: None,
-            json_path: None,
-            encrypted_data_bag_secret_path: None,
-            delete_node_on_error: false,
-            delete_client_on_error: false,
-            guest_os_type: None,
-            execute_command: None,
-            install_command: None,
-            skip_install: false,
-            clean_up: true,
-        }
-    }
+    /// Cleanup options.
+    pub cleanup: ChefCleanupOptions,
 }
 
 /// The `chef-client` provisioner.
@@ -199,7 +193,7 @@ impl Provisioner for ChefClientProvisioner {
         }
 
         if !merged_attributes.is_null() && merged_attributes != serde_json::json!({}) {
-            cmd_str.push_str(&format!(" -j {node_json_remote}"));
+            let _ = write!(cmd_str, " -j {node_json_remote}");
         }
 
         if !self.config.run_list.is_empty() {
@@ -213,7 +207,7 @@ impl Provisioner for ChefClientProvisioner {
         let node_id = self.config.node_name.as_deref().unwrap_or("packer-node");
 
         if let Err(ref e) = res {
-            if self.config.delete_node_on_error {
+            if self.config.cleanup.delete_node_on_error {
                 ui.say(
                     "chef-client",
                     &format!("Cleaning up node {node_id} on error..."),
@@ -222,7 +216,7 @@ impl Provisioner for ChefClientProvisioner {
                     .execute(&Command::new(format!("knife node delete {node_id} -y")))
                     .await;
             }
-            if self.config.delete_client_on_error {
+            if self.config.cleanup.delete_client_on_error {
                 ui.say(
                     "chef-client",
                     &format!("Cleaning up client {node_id} on error..."),
@@ -236,7 +230,7 @@ impl Provisioner for ChefClientProvisioner {
 
         let exec_result = res.map_err(|e| StampError::Provisioner(e.to_string()))?;
 
-        if self.config.clean_up {
+        if self.config.cleanup.clean_up {
             ui.say(
                 "chef-client",
                 "Cleaning up node registration and staging directory...",
@@ -280,9 +274,11 @@ mod tests {
             validation_key_path: Some(FilePath::new(PathBuf::from("validator.pem"))),
             node_name: Some("test-node-1".to_string()),
             encrypted_data_bag_secret_path: Some(FilePath::new(tmp_secret.clone())),
-            delete_node_on_error: true,
-            delete_client_on_error: true,
-            clean_up: true,
+            cleanup: ChefCleanupOptions {
+                delete_node_on_error: true,
+                delete_client_on_error: true,
+                clean_up: true,
+            },
             ..Default::default()
         };
         let prov = ChefClientProvisioner::new(config);
@@ -383,7 +379,11 @@ mod tests {
             validation_client_name: "chef-validator".to_string(),
             install_command: Some("custom-chef-install".to_string()),
             skip_install: false,
-            clean_up: true,
+            cleanup: ChefCleanupOptions {
+                delete_node_on_error: false,
+                delete_client_on_error: false,
+                clean_up: true,
+            },
             ..Default::default()
         };
         let prov = ChefClientProvisioner::new(config);

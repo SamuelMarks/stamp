@@ -1,4 +1,4 @@
-//! Bidirectional reverse-RPC broker for HashiCorp Packer plugins.
+//! Bidirectional reverse-RPC broker for `HashiCorp` Packer plugins.
 //!
 //! Provides a local gRPC server hosted by Stamp that enables spawned plugin processes
 //! to invoke host-side callbacks:
@@ -40,7 +40,7 @@ impl std::fmt::Debug for PluginBroker {
         f.debug_struct("PluginBroker")
             .field("network_type", &self.network_type)
             .field("address", &self.address)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

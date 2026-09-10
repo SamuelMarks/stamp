@@ -11,7 +11,7 @@ use crate::template::{Template, TestBlock, TestFailureDetails};
 pub struct TestConfig {
     /// Enable verbose output.
     pub verbose: bool,
-    /// Path to output JUnit XML results (optional).
+    /// Path to output `JUnit` XML results (optional).
     pub junit_xml: Option<String>,
 }
 
@@ -35,18 +35,18 @@ impl<'a> Runner<'a> {
     /// # Errors
     ///
     /// Returns `StampError::TestFailure` if any assertion fails.
-    pub async fn run(&self) -> Result<(), StampError> {
+    pub fn run(&self) -> Result<(), StampError> {
         for test in &self.template.tests {
             if self.config.verbose {
                 println!("Running test: {}", test.name);
             }
-            self.run_test_block(test).await?;
+            Self::run_test_block(test)?;
         }
         Ok(())
     }
 
     /// Internal documentation missing.
-    async fn run_test_block(&self, test: &TestBlock) -> Result<(), StampError> {
+    fn run_test_block(test: &TestBlock) -> Result<(), StampError> {
         for assert in &test.assertions {
             // For now, we only support basic matching where condition evaluates to "true"
             // or specific matchers. In a full implementation, we'd use the evaluator.
@@ -79,7 +79,7 @@ impl<'a> Runner<'a> {
 /// Returns `StampError::Io` if the file cannot be read.
 /// Returns `StampError::Parse` if the file cannot be parsed.
 /// Returns `StampError::TestFailure` if any tests fail.
-pub async fn run_tests(template_path: &str, config: &TestConfig) -> Result<(), StampError> {
+pub fn run_tests(template_path: &str, config: &TestConfig) -> Result<(), StampError> {
     let content = std::fs::read_to_string(template_path)?;
     let vars = std::collections::HashMap::new();
 
@@ -94,7 +94,7 @@ pub async fn run_tests(template_path: &str, config: &TestConfig) -> Result<(), S
     };
 
     let runner = Runner::new(&tmpl, config);
-    runner.run().await
+    runner.run()
 }
 
 #[cfg(test)]
@@ -108,7 +108,7 @@ mod tests {
             verbose: false,
             junit_xml: None,
         };
-        let err = run_tests("missing.hcl", &config).await;
+        let err = run_tests("missing.hcl", &config);
         for res in [err, Ok(())] {
             match res {
                 Err(StampError::Io(_)) => assert!(matches!(res, Err(StampError::Io(_)))),
@@ -131,7 +131,7 @@ mod tests {
             junit_xml: None,
         };
         let path_str = path.to_str().unwrap_or("");
-        let res = run_tests(path_str, &config).await;
+        let res = run_tests(path_str, &config);
         let _ = std::fs::remove_file(&path);
         assert!(res.is_ok());
         Ok(())
@@ -151,7 +151,7 @@ mod tests {
             junit_xml: None,
         };
         let path_str = path.to_str().unwrap_or("");
-        let res = run_tests(path_str, &config).await;
+        let res = run_tests(path_str, &config);
         let _ = std::fs::remove_file(&path);
         assert!(res.is_ok());
         Ok(())
@@ -171,7 +171,7 @@ mod tests {
             junit_xml: None,
         };
         let path_str = path.to_str().unwrap_or("");
-        let res = run_tests(path_str, &config).await;
+        let res = run_tests(path_str, &config);
         let _ = std::fs::remove_file(&path);
         assert!(res.is_ok());
         Ok(())
@@ -206,8 +206,8 @@ mod tests {
         let r_fail = Runner::new(&fail_tmpl, &config);
         let r_pass = Runner::new(&pass_tmpl, &config);
 
-        let fail_res = r_fail.run().await;
-        let pass_res = r_pass.run().await;
+        let fail_res = r_fail.run();
+        let pass_res = r_pass.run();
         for (res, expect_fail) in [(fail_res, true), (pass_res, false)] {
             match res {
                 Err(StampError::TestFailure(f)) => {
@@ -231,7 +231,7 @@ mod tests {
             verbose: false,
             junit_xml: None,
         };
-        let err = run_tests(path.to_str().unwrap_or_default(), &config).await;
+        let err = run_tests(path.to_str().unwrap_or_default(), &config);
         for res in [err, Ok(())] {
             match res {
                 Err(StampError::Json(_)) => assert!(matches!(res, Err(StampError::Json(_)))),
@@ -250,7 +250,7 @@ mod tests {
             verbose: false,
             junit_xml: None,
         };
-        let err = run_tests(path.to_str().unwrap_or_default(), &config).await;
+        let err = run_tests(path.to_str().unwrap_or_default(), &config);
         for res in [err, Ok(())] {
             match res {
                 Err(StampError::Parse(_)) => assert!(matches!(res, Err(StampError::Parse(_)))),

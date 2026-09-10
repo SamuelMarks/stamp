@@ -39,8 +39,7 @@ pub fn create_data_source(config: &DataSourceConfig) -> Result<Box<dyn DataSourc
             let with_decryption = config
                 .config
                 .get("with_decryption")
-                .map(|v| v != "false")
-                .unwrap_or(true);
+                .is_none_or(|v| v != "false");
             Ok(Box::new(
                 amazon_parameterstore::AmazonParameterStoreDataSource::new(
                     amazon_parameterstore::AmazonParameterStoreConfig {
@@ -88,8 +87,7 @@ pub fn create_data_source(config: &DataSourceConfig) -> Result<Box<dyn DataSourc
             let allow_revoked = config
                 .config
                 .get("allow_revoked")
-                .map(|v| v == "true")
-                .unwrap_or(false);
+                .is_some_and(|v| v == "true");
             Ok(Box::new(hcp::HcpPackerIterationDataSource::new(
                 hcp::HcpPackerIterationConfig {
                     organization: None,
@@ -120,8 +118,7 @@ pub fn create_data_source(config: &DataSourceConfig) -> Result<Box<dyn DataSourc
             let allow_revoked = config
                 .config
                 .get("allow_revoked")
-                .map(|v| v == "true")
-                .unwrap_or(false);
+                .is_some_and(|v| v == "true");
             Ok(Box::new(hcp::HcpPackerImageDataSource::new(
                 hcp::HcpPackerImageConfig {
                     organization: None,

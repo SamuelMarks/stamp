@@ -119,9 +119,7 @@ impl Step for StepRunSourceInstance {
         };
 
         let instances = res.instances();
-        let instance = if let Some(i) = instances.first() {
-            i
-        } else {
+        let Some(instance) = instances.first() else {
             return Err(StampError::Execution("No instances returned".to_string()));
         };
         let instance_id = instance.instance_id().unwrap_or_default().to_string();
@@ -162,8 +160,8 @@ impl Step for StepRunSourceInstance {
 }
 
 /// Resolves an EC2 device name (such as `/dev/sdf` or `/dev/xvdf`) to its corresponding
-/// NVMe block device on modern Nitro instances (e.g. `/dev/nvme1n1`), or returns the original
-/// path if already an NVMe path or if no Nitro NVMe mapping is detected.
+/// `NVMe` block device on modern Nitro instances (e.g. `/dev/nvme1n1`), or returns the original
+/// path if already an `NVMe` path or if no Nitro `NVMe` mapping is detected.
 #[must_use]
 pub fn resolve_nvme_device_path(device_path: &str) -> String {
     if device_path.starts_with("/dev/nvme") {
@@ -433,7 +431,7 @@ impl Step for StepStopInstance {
             {
                 Ok(_) => (),
                 Err(e) => return Err(StampError::Execution(format!("Stop instance failed: {e}"))),
-            };
+            }
         }
         Ok(StepAction::Continue)
     }

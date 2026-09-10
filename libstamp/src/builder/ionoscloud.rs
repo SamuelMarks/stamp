@@ -13,6 +13,7 @@ use crate::error::StampError;
 use crate::types::{Port, Timeout};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -77,6 +78,50 @@ pub struct IonosServerSpec<'a> {
     pub image_password: Option<&'a str>,
 }
 
+/// Datacenter creation response.
+#[derive(Deserialize)]
+struct DcResp {
+    /// Datacenter identifier.
+    id: String,
+}
+
+/// Volume identifier item.
+#[derive(Deserialize)]
+struct VolumeId {
+    /// Volume identifier.
+    id: String,
+}
+
+/// Volume items collection.
+#[derive(Deserialize)]
+struct VolumeItems {
+    /// List of volumes.
+    items: Option<Vec<VolumeId>>,
+}
+
+/// Server entities envelope.
+#[derive(Deserialize)]
+struct ServerEntities {
+    /// Volumes attached to the server.
+    volumes: Option<VolumeItems>,
+}
+
+/// Server response envelope.
+#[derive(Deserialize)]
+struct ServerResp {
+    /// Server identifier.
+    id: String,
+    /// Server entities.
+    entities: Option<ServerEntities>,
+}
+
+/// Snapshot response payload.
+#[derive(Deserialize)]
+struct SnapResp {
+    /// Snapshot identifier.
+    id: String,
+}
+
 impl IonosClient {
     /// Create a new `IonosClient`.
     #[must_use]
@@ -129,11 +174,6 @@ impl IonosClient {
             .send()
             .await
             .map_err(|e| StampError::Execution(format!("Create datacenter failed: {e}")))?;
-
-        #[derive(Deserialize)]
-        struct DcResp {
-            id: String,
-        }
 
         let dc: DcResp = resp
             .json()
@@ -198,24 +238,6 @@ impl IonosClient {
             .await
             .map_err(|e| StampError::Execution(format!("Create server failed: {e}")))?;
 
-        #[derive(Deserialize)]
-        struct ServerResp {
-            id: String,
-            entities: Option<ServerEntities>,
-        }
-        #[derive(Deserialize)]
-        struct ServerEntities {
-            volumes: Option<VolumeItems>,
-        }
-        #[derive(Deserialize)]
-        struct VolumeItems {
-            items: Option<Vec<VolumeId>>,
-        }
-        #[derive(Deserialize)]
-        struct VolumeId {
-            id: String,
-        }
-
         let srv: ServerResp = resp
             .json()
             .await
@@ -225,8 +247,7 @@ impl IonosClient {
             .and_then(|e| e.volumes)
             .and_then(|v| v.items)
             .and_then(|items| items.into_iter().next())
-            .map(|v| v.id)
-            .unwrap_or_else(|| "vol-mock".to_string());
+            .map_or_else(|| "vol-mock".to_string(), |v| v.id);
 
         Ok((srv.id, vol_id))
     }
@@ -254,7 +275,7 @@ impl IonosClient {
 
         let mut form_str = format!("name={name}");
         if let Some(d) = description {
-            form_str.push_str(&format!("&description={d}"));
+            let _ = write!(form_str, "&description={d}");
         }
 
         let mut req = client
@@ -271,11 +292,6 @@ impl IonosClient {
             .send()
             .await
             .map_err(|e| StampError::Execution(format!("Create snapshot failed: {e}")))?;
-
-        #[derive(Deserialize)]
-        struct SnapResp {
-            id: String,
-        }
 
         let snap: SnapResp = resp
             .json()

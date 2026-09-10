@@ -47,7 +47,6 @@ impl CompressPostProcessor {
 
     /// Perform a tar archiving operation with optional gzip or bzip2 compression.
     fn archive_tar(
-        &self,
         artifact: &Artifact,
         output_path: &str,
         compression: Option<&str>,
@@ -84,7 +83,7 @@ impl CompressPostProcessor {
     }
 
     /// Perform a zip archiving operation with recursive directory handling.
-    fn archive_zip(&self, artifact: &Artifact, output_path: &str) -> Result<(), StampError> {
+    fn archive_zip(artifact: &Artifact, output_path: &str) -> Result<(), StampError> {
         let file = File::create(output_path).map_err(StampError::Io)?;
         let mut zip = zip::ZipWriter::new(file);
 
@@ -121,9 +120,8 @@ impl CompressPostProcessor {
         current_dir: &Path,
         options: zip::write::SimpleFileOptions,
     ) -> Result<(), StampError> {
-        let entries = match fs::read_dir(current_dir) {
-            Ok(e) => e,
-            Err(_) => return Ok(()),
+        let Ok(entries) = fs::read_dir(current_dir) else {
+            return Ok(());
         };
 
         for entry in entries.flatten() {
@@ -162,16 +160,16 @@ impl PostProcessor for CompressPostProcessor {
 
         match self.config.format.as_str() {
             "tar" => {
-                self.archive_tar(&artifact, &output_path, None)?;
+                Self::archive_tar(&artifact, &output_path, None)?;
             }
             "tar.gz" | "tgz" => {
-                self.archive_tar(&artifact, &output_path, Some("gz"))?;
+                Self::archive_tar(&artifact, &output_path, Some("gz"))?;
             }
             "tar.bz2" | "tbz2" => {
-                self.archive_tar(&artifact, &output_path, Some("bz2"))?;
+                Self::archive_tar(&artifact, &output_path, Some("bz2"))?;
             }
             "zip" => {
-                self.archive_zip(&artifact, &output_path)?;
+                Self::archive_zip(&artifact, &output_path)?;
             }
             other => {
                 return Err(StampError::Provisioner(format!(

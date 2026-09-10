@@ -149,25 +149,24 @@ impl WindowsShellProvisioner {
             let command = Command::new(cmd.to_string());
             let exec_fut = comm.execute(&command);
             let res = if let Some(to) = timeout {
-                match tokio::time::timeout(to.0, exec_fut).await {
-                    Ok(r) => r,
-                    Err(_) => {
-                        if attempts < max_retries {
-                            attempts += 1;
-                            ui.say(
-                                "windows-shell",
-                                &format!(
-                                    "Command timed out after {}s, retrying (attempt {attempts}/{max_retries})...",
-                                    to.0.as_secs()
-                                ),
-                            );
-                            continue;
-                        }
-                        return Err(StampError::CommunicatorTimeout {
-                            target: "windows-shell".to_string(),
-                            timeout_secs: to.0.as_secs(),
-                        });
+                if let Ok(r) = tokio::time::timeout(to.0, exec_fut).await {
+                    r
+                } else {
+                    if attempts < max_retries {
+                        attempts += 1;
+                        ui.say(
+                            "windows-shell",
+                            &format!(
+                                "Command timed out after {}s, retrying (attempt {attempts}/{max_retries})...",
+                                to.0.as_secs()
+                            ),
+                        );
+                        continue;
                     }
+                    return Err(StampError::CommunicatorTimeout {
+                        target: "windows-shell".to_string(),
+                        timeout_secs: to.0.as_secs(),
+                    });
                 }
             } else {
                 exec_fut.await

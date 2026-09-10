@@ -134,7 +134,7 @@ pub struct AnsibleConfig {
     pub sftp_command: Option<String>,
     /// Whether to use the native SSH proxy adapter (defaults to true).
     pub use_proxy: bool,
-    /// Whether to configure WinRM connection parameters for Windows targets. Defaults to false.
+    /// Whether to configure `WinRM` connection parameters for Windows targets. Defaults to false.
     pub use_winrm: bool,
     /// Path to an Ansible Galaxy `requirements.yml` file.
     pub galaxy_file: Option<FilePath>,

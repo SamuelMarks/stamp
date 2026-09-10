@@ -1,7 +1,7 @@
 #![cfg_attr(coverage_nightly, coverage(off))]
-//! Implementation of the `cloudsigma` builder for CloudSigma API 2.0.
+//! Implementation of the `cloudsigma` builder for `CloudSigma` API 2.0.
 //!
-//! Provides a REST client for CloudSigma (`https://{region}.cloudsigma.com/api/2.0/`),
+//! Provides a REST client for `CloudSigma` (`https://{region}.cloudsigma.com/api/2.0/`),
 //! managing drive cloning, server orchestration, communicator execution, and drive snapshots.
 
 use crate::builder::Builder;
@@ -20,11 +20,11 @@ use std::time::Duration;
 pub struct CloudSigmaConfig {
     /// Name of the builder instance.
     pub name: String,
-    /// CloudSigma account email / username.
+    /// `CloudSigma` account email / username.
     pub username: Option<String>,
-    /// CloudSigma account password.
+    /// `CloudSigma` account password.
     pub password: Option<String>,
-    /// CloudSigma API endpoint URL (e.g. `https://zrh.cloudsigma.com/api/2.0/`).
+    /// `CloudSigma` API endpoint URL (e.g. `https://zrh.cloudsigma.com/api/2.0/`).
     pub api_endpoint: Option<String>,
     /// Source drive UUID to clone from.
     pub source_drive: String,
@@ -44,7 +44,7 @@ pub struct CloudSigmaConfig {
     pub ssh_password: Option<String>,
 }
 
-/// CloudSigma API 2.0 client.
+/// `CloudSigma` API 2.0 client.
 #[derive(Debug, Clone)]
 pub struct CloudSigmaClient {
     /// Endpoint.
@@ -53,6 +53,34 @@ pub struct CloudSigmaClient {
     pub username: Option<String>,
     /// Password.
     pub password: Option<String>,
+}
+
+/// Drive response payload.
+#[derive(Deserialize)]
+struct DriveResp {
+    /// Drive UUID.
+    uuid: String,
+}
+
+/// Server object summary.
+#[derive(Deserialize)]
+struct ServerObj {
+    /// Server UUID.
+    uuid: String,
+}
+
+/// Server list response payload.
+#[derive(Deserialize)]
+struct ServerListResp {
+    /// List of server objects.
+    objects: Option<Vec<ServerObj>>,
+}
+
+/// Snapshot response payload.
+#[derive(Deserialize)]
+struct SnapResp {
+    /// Snapshot UUID.
+    uuid: String,
 }
 
 impl CloudSigmaClient {
@@ -100,11 +128,6 @@ impl CloudSigmaClient {
             .send()
             .await
             .map_err(|e| StampError::Execution(format!("Clone drive failed: {e}")))?;
-
-        #[derive(Deserialize)]
-        struct DriveResp {
-            uuid: String,
-        }
 
         let drv: DriveResp = resp
             .json()
@@ -155,15 +178,6 @@ impl CloudSigmaClient {
             .await
             .map_err(|e| StampError::Execution(format!("Create server failed: {e}")))?;
 
-        #[derive(Deserialize)]
-        struct ServerListResp {
-            objects: Option<Vec<ServerObj>>,
-        }
-        #[derive(Deserialize)]
-        struct ServerObj {
-            uuid: String,
-        }
-
         let res: ServerListResp = resp
             .json()
             .await
@@ -176,7 +190,7 @@ impl CloudSigmaClient {
             })
     }
 
-    /// Start a CloudSigma server.
+    /// Start a `CloudSigma` server.
     ///
     /// # Errors
     ///
@@ -199,7 +213,7 @@ impl CloudSigmaClient {
         Ok(())
     }
 
-    /// Stop a CloudSigma server.
+    /// Stop a `CloudSigma` server.
     ///
     /// # Errors
     ///
@@ -251,11 +265,6 @@ impl CloudSigmaClient {
             .await
             .map_err(|e| StampError::Execution(format!("Snapshot drive failed: {e}")))?;
 
-        #[derive(Deserialize)]
-        struct SnapResp {
-            uuid: String,
-        }
-
         let snap: SnapResp = resp
             .json()
             .await
@@ -263,7 +272,7 @@ impl CloudSigmaClient {
         Ok(snap.uuid)
     }
 
-    /// Terminate and delete a CloudSigma server.
+    /// Terminate and delete a `CloudSigma` server.
     ///
     /// # Errors
     ///
@@ -302,7 +311,7 @@ impl CloudSigmaBuilder {
     }
 }
 
-/// Step to clone drive and launch CloudSigma server.
+/// Step to clone drive and launch `CloudSigma` server.
 #[derive(Debug, Clone)]
 struct StepCreateCloudSigmaInfrastructure {
     /// UI reference.
@@ -363,7 +372,7 @@ impl Step for StepCreateCloudSigmaInfrastructure {
     }
 }
 
-/// Step to provision the CloudSigma server over SSH.
+/// Step to provision the `CloudSigma` server over SSH.
 #[derive(Clone)]
 struct StepProvisionCloudSigma {
     /// UI reference.
@@ -430,7 +439,7 @@ impl Step for StepProvisionCloudSigma {
     async fn cleanup(&mut self, _state: &StateBag) {}
 }
 
-/// Step to stop server and capture drive snapshot in CloudSigma.
+/// Step to stop server and capture drive snapshot in `CloudSigma`.
 #[derive(Debug, Clone)]
 struct StepCaptureCloudSigmaSnapshot {
     /// UI reference.

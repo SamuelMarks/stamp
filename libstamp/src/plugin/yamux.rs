@@ -1,11 +1,11 @@
 //! Yamux (Yet Another Multiplexer) connection multiplexer implementation.
 //!
-//! Provides connection-level multiplexing matching HashiCorp's `yamux` specification
+//! Provides connection-level multiplexing matching `HashiCorp`'s `yamux` specification
 //! used in `go-plugin`:
 //! - 12-byte header framing with credit-based flow control windows.
 //! - Bidirectional multiplexed logical streams over a single byte transport.
 //! - Stream lifecycle states: SYN (open), ACK, FIN (half-close), RST (reset).
-//! - Periodic keep-alive ping frames and session graceful termination via GoAway.
+//! - Periodic keep-alive ping frames and session graceful termination via `GoAway`.
 
 use crate::error::StampError;
 use std::collections::HashMap;
@@ -97,7 +97,7 @@ impl FrameFlags {
 pub struct Header {
     /// Protocol version (0).
     pub version: u8,
-    /// Frame type (Data, WindowUpdate, Ping, GoAway).
+    /// Frame type (Data, `WindowUpdate`, Ping, `GoAway`).
     pub frame_type: FrameType,
     /// Frame flags (SYN, ACK, FIN, RST).
     pub flags: FrameFlags,
@@ -165,7 +165,7 @@ impl Header {
 }
 
 /// Session configuration options for Yamux multiplexing.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct YamuxConfig {
     /// Initial stream receive window size.
     pub initial_stream_window: u32,
@@ -215,7 +215,7 @@ impl std::fmt::Debug for YamuxStream {
         f.debug_struct("YamuxStream")
             .field("id", &self.id)
             .field("is_closed", &self.is_closed)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -251,23 +251,20 @@ impl YamuxStream {
             return Ok(0);
         }
 
-        match self.rx.recv().await {
-            Some(chunk) => {
-                if chunk.is_empty() {
-                    self.is_closed = true;
-                    return Ok(0);
-                }
-                let to_copy = std::cmp::min(buf.len(), chunk.len());
-                buf[..to_copy].copy_from_slice(&chunk[..to_copy]);
-                if to_copy < chunk.len() {
-                    self.read_buffer.extend_from_slice(&chunk[to_copy..]);
-                }
-                Ok(to_copy)
-            }
-            None => {
+        if let Some(chunk) = self.rx.recv().await {
+            if chunk.is_empty() {
                 self.is_closed = true;
-                Ok(0)
+                return Ok(0);
             }
+            let to_copy = std::cmp::min(buf.len(), chunk.len());
+            buf[..to_copy].copy_from_slice(&chunk[..to_copy]);
+            if to_copy < chunk.len() {
+                self.read_buffer.extend_from_slice(&chunk[to_copy..]);
+            }
+            Ok(to_copy)
+        } else {
+            self.is_closed = true;
+            Ok(0)
         }
     }
 
@@ -334,7 +331,7 @@ impl std::fmt::Debug for YamuxSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("YamuxSession")
             .field("role", &self.role)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -536,7 +533,7 @@ impl YamuxSession {
             .map_err(|e| StampError::Execution(format!("Failed to send ping: {e}")))
     }
 
-    /// Gracefully closes the session by sending a GoAway frame and stopping background workers.
+    /// Gracefully closes the session by sending a `GoAway` frame and stopping background workers.
     pub fn shutdown(&self) {
         let _ = self.shutdown_tx.send(());
     }

@@ -111,10 +111,10 @@ impl Provisioner for GossProvisioner {
         // 3. Upload test files
         for test_file in &self.config.tests {
             let local_fp = FilePath::new(PathBuf::from(test_file));
-            let file_name = PathBuf::from(test_file)
-                .file_name()
-                .map(|f| f.to_string_lossy().to_string())
-                .unwrap_or_else(|| "goss.yaml".to_string());
+            let file_name = PathBuf::from(test_file).file_name().map_or_else(
+                || "goss.yaml".to_string(),
+                |f| f.to_string_lossy().to_string(),
+            );
             let remote_dest = format!("{remote_dir}/{file_name}");
             let remote_fp = FilePath::new(PathBuf::from(&remote_dest));
             ui.say("goss", &format!("Uploading Goss spec: {test_file}"));

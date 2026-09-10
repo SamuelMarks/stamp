@@ -125,9 +125,12 @@ impl Builder for NullBuilder {
                         .unwrap_or("Administrator".to_string()),
                     password: self.config.password.clone(),
                     auth: WinRmAuth::Ntlm,
-                    use_https: false,
+                    tls: crate::communicator::winrm::WinRmTlsConfig {
+                        use_https: false,
+                        insecure_skip_verify: false,
+                        winrm_insecure: false,
+                    },
                     timeout: Timeout::new(Duration::from_secs(10)),
-                    insecure_skip_verify: false,
                     use_powershell_wrapper: false,
                     ..Default::default()
                 };

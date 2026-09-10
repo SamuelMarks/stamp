@@ -10,6 +10,7 @@ use russh::client::{Config, Handler};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 /// Host key verification strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -19,7 +20,7 @@ pub enum HostKeyVerification {
     Off,
     /// Automatically accept new host keys, but reject changed keys.
     AcceptNew,
-    /// Strictly verify against known_hosts; reject unknown or changed keys.
+    /// Strictly verify against `known_hosts`; reject unknown or changed keys.
     Strict,
 }
 
@@ -61,7 +62,7 @@ pub enum FileTransferProtocol {
     Sftp,
 }
 
-/// Configuration for a Bastion (Jump Host) in a ProxyJump chain.
+/// Configuration for a Bastion (Jump Host) in a `ProxyJump` chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BastionConfig {
     /// Bastion hostname or IP address.
@@ -129,7 +130,7 @@ pub struct SshConfig {
     pub retry_backoff: Duration,
     /// Host key verification mode.
     pub host_key_verification: HostKeyVerification,
-    /// Custom path to known_hosts file. If `None`, standard default is used.
+    /// Custom path to `known_hosts` file. If `None`, standard default is used.
     pub known_hosts_file: Option<FilePath>,
     /// File transfer protocol to use (SCP or SFTP).
     pub transfer_protocol: FileTransferProtocol,
@@ -149,7 +150,7 @@ pub struct SshConfig {
     pub agent_forwarding: bool,
     /// Optional custom agent UNIX socket path.
     pub agent_socket_path: Option<FilePath>,
-    /// Optional arbitrary ProxyCommand (e.g. `nc -X 5 -x 127.0.0.1:1080 %h %p`).
+    /// Optional arbitrary `ProxyCommand` (e.g. `nc -X 5 -x 127.0.0.1:1080 %h %p`).
     pub proxy_command: Option<String>,
     /// Configurable SSH ciphers suite (`ssh_ciphers`).
     pub ciphers: Vec<String>,
@@ -209,7 +210,7 @@ impl Default for SshConfig {
     }
 }
 
-/// Interpolates an OpenSSH ProxyCommand with target host and port.
+/// Interpolates an OpenSSH `ProxyCommand` with target host and port.
 #[must_use]
 pub fn interpolate_proxy_command(proxy_cmd: &str, host: &str, port: u16) -> String {
     proxy_cmd
@@ -270,7 +271,7 @@ pub async fn request_channel_pty(
         .map_err(|e| StampError::Execution(format!("PTY request error: {e}")))
 }
 
-/// Append a host key to a known_hosts file.
+/// Append a host key to a `known_hosts` file.
 ///
 /// # Errors
 ///
@@ -327,7 +328,7 @@ pub struct ClientHandler {
     pub host: String,
     /// Destination port.
     pub port: u16,
-    /// Custom path to known_hosts file.
+    /// Custom path to `known_hosts` file.
     pub known_hosts_file: Option<PathBuf>,
 }
 
@@ -339,6 +340,7 @@ impl Handler for ClientHandler {
         &mut self,
         server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
+        tokio::task::yield_now().await;
         match self.host_key_verification {
             HostKeyVerification::Off => Ok(true),
             HostKeyVerification::Strict => {
@@ -357,8 +359,7 @@ impl Handler for ClientHandler {
                 };
                 match check_res {
                     Ok(true) => Ok(true),
-                    Ok(false) => Ok(false),
-                    Err(_) => Ok(false),
+                    Ok(false) | Err(_) => Ok(false),
                 }
             }
             HostKeyVerification::AcceptNew => {
@@ -608,13 +609,15 @@ impl SshCommunicator {
         Err(last_err)
     }
 
-    /// Connect to target host, either directly or by tunneling through a Bastion / ProxyJump chain.
+    /// Connect to target host, either directly or by tunneling through a Bastion / `ProxyJump` chain.
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn connect_inner(&self) -> Result<russh::client::Handle<ClientHandler>, StampError> {
-        let mut ssh_config = Config::default();
-        ssh_config.inactivity_timeout = Some(self.config.timeout.get());
-        ssh_config.keepalive_interval = self.config.keepalive_interval;
-        ssh_config.keepalive_max = self.config.keepalive_max;
+        let ssh_config = Config {
+            inactivity_timeout: Some(self.config.timeout.get()),
+            keepalive_interval: self.config.keepalive_interval,
+            keepalive_max: self.config.keepalive_max,
+            ..Config::default()
+        };
         let config_arc = Arc::new(ssh_config);
 
         // Build list of bastion hops
@@ -816,7 +819,6 @@ impl SshCommunicator {
                 )
                 .await
                 .map_err(|e| StampError::Execution(format!("SFTP open error: {e}")))?;
-            use tokio::io::AsyncWriteExt;
             file.write_all(&content)
                 .await
                 .map_err(|e| StampError::Execution(format!("SFTP write error: {e}")))?;
@@ -861,7 +863,6 @@ impl SshCommunicator {
                     )
                     .await
                     .map_err(|e| StampError::Execution(format!("SFTP open error: {e}")))?;
-                use tokio::io::AsyncWriteExt;
                 file.write_all(&content)
                     .await
                     .map_err(|e| StampError::Execution(format!("SFTP write error: {e}")))?;
@@ -911,7 +912,6 @@ impl SshCommunicator {
                 .open_with_flags(remote_str, russh_sftp::protocol::OpenFlags::READ)
                 .await
                 .map_err(|e| StampError::Execution(format!("SFTP open error: {e}")))?;
-            use tokio::io::AsyncReadExt;
             let mut content = Vec::new();
             file.read_to_end(&mut content)
                 .await
@@ -956,7 +956,6 @@ impl SshCommunicator {
                     .open_with_flags(sub_remote_str, russh_sftp::protocol::OpenFlags::READ)
                     .await
                     .map_err(|e| StampError::Execution(format!("SFTP read error: {e}")))?;
-                use tokio::io::AsyncReadExt;
                 let mut content = Vec::new();
                 file.read_to_end(&mut content)
                     .await
@@ -1029,7 +1028,7 @@ impl Communicator for SshCommunicator {
                     }
                 }
                 ChannelMsg::ExitStatus { exit_status } => {
-                    exit_code = exit_status as i32;
+                    exit_code = i32::try_from(exit_status).unwrap_or(0);
                 }
                 _ => {}
             }

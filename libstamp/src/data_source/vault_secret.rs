@@ -1,7 +1,7 @@
 #![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `vault-secret` data source.
 //!
-//! Fetches dynamic secrets and KV values from HashiCorp Vault.
+//! Fetches dynamic secrets and KV values from `HashiCorp` Vault.
 
 use crate::data_source::DataSource;
 use crate::error::StampError;

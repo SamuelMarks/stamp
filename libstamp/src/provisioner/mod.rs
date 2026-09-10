@@ -45,7 +45,6 @@ use crate::template::ProvisionerConfig;
 /// # Errors
 ///
 /// Returns a `StampError` if the provisioner type is unknown.
-#[allow(clippy::too_many_lines)]
 pub fn create_provisioner(config: &ProvisionerConfig) -> Result<Box<dyn Provisioner>, StampError> {
     match config.provisioner_type.as_str() {
         "ansible" => Ok(Box::new(ansible::AnsibleProvisioner::new(

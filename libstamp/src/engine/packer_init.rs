@@ -19,7 +19,7 @@ pub struct InitOptions {
 }
 
 /// Initializes a template by reading its `required_plugins` declarations,
-/// verifying existing installations against SemVer constraints, and installing missing plugins.
+/// verifying existing installations against `SemVer` constraints, and installing missing plugins.
 ///
 /// # Errors
 /// Returns `StampError` if template parsing, directory access, or plugin installation fails.

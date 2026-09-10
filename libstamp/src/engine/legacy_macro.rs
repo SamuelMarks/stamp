@@ -23,7 +23,7 @@ pub struct LegacyMacroContext {
     pub build_type: String,
     /// Current build ID (`{{ build `ID` }}`).
     pub build_id: String,
-    /// Unique build session UUID (`{{ build `PackerRunUUID` }}`).
+    /// Unique build session UUID (`{{ build ``PackerRunUUID`` }}`).
     pub packer_run_uuid: String,
     /// Directory containing the template file (`{{ template_dir }}` or `{{ .TemplateDir }}`).
     pub template_dir: String,
@@ -37,9 +37,9 @@ pub struct LegacyMacroContext {
     pub port: Option<u16>,
     /// Connection password (`{{ build `Password` }}`).
     pub password: Option<String>,
-    /// Source AMI ID (`{{ build `SourceAMI` }}`).
+    /// Source AMI ID (`{{ build ``SourceAMI`` }}`).
     pub source_ami: Option<String>,
-    /// Source AMI Name (`{{ build `SourceAMIName` }}`).
+    /// Source AMI Name (`{{ build ``SourceAMIName`` }}`).
     pub source_ami_name: Option<String>,
     /// Optional fixed Unix timestamp for deterministic testing.
     pub timestamp: Option<i64>,
@@ -204,7 +204,7 @@ pub fn convert_go_time_format_to_chrono(go_fmt: &str) -> String {
     result
 }
 
-/// Sanitizes a string according to cloud resource naming conventions (CleanResourceName).
+/// Sanitizes a string according to cloud resource naming conventions (`CleanResourceName`).
 #[must_use]
 pub fn clean_resource_name(input: &str) -> String {
     input
@@ -288,8 +288,7 @@ pub fn evaluate_function_tokens(
                 Ok(pwd.clone())
             } else {
                 Ok(std::env::current_dir()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| ".".to_string()))
+                    .map_or_else(|_| ".".to_string(), |p| p.to_string_lossy().to_string()))
             }
         }
         "template_dir" | ".TemplateDir" | ".Path" => Ok(ctx.template_dir.clone()),

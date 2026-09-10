@@ -24,7 +24,7 @@ pub const PACKER_PLUGIN_MIN_PORT_ENV: &str = "PACKER_PLUGIN_MIN_PORT";
 /// Environment variable specifying the maximum port for bounded port allocation.
 pub const PACKER_PLUGIN_MAX_PORT_ENV: &str = "PACKER_PLUGIN_MAX_PORT";
 
-/// Supported core protocol version (always 1 for HashiCorp go-plugin).
+/// Supported core protocol version (always 1 for `HashiCorp` go-plugin).
 pub const CORE_PROTOCOL_VERSION: u32 = 1;
 
 /// Minimum supported app protocol version (Packer legacy).
@@ -321,10 +321,7 @@ pub fn get_bounded_port_range() -> Result<Option<(u16, u16)>, StampError> {
             }
             Ok(Some((min, max)))
         }
-        (Some(_), None) => Err(StampError::PluginHandshake(format!(
-            "Both {PACKER_PLUGIN_MIN_PORT_ENV} and {PACKER_PLUGIN_MAX_PORT_ENV} must be set together"
-        ))),
-        (None, Some(_)) => Err(StampError::PluginHandshake(format!(
+        (Some(_), None) | (None, Some(_)) => Err(StampError::PluginHandshake(format!(
             "Both {PACKER_PLUGIN_MIN_PORT_ENV} and {PACKER_PLUGIN_MAX_PORT_ENV} must be set together"
         ))),
         (None, None) => Ok(None),

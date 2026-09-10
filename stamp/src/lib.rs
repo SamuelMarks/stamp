@@ -278,7 +278,6 @@ pub enum Commands {
 ///
 /// # Errors
 /// Returns `StampError` if the command execution fails.
-#[allow(clippy::too_many_lines, clippy::match_same_arms)]
 pub async fn execute_command(
     command: &Option<Commands>,
     machine_readable: bool,
@@ -571,10 +570,12 @@ pub async fn execute_command(
             println!("Formatting template: {template}");
             let should_write = *write || (!*check && !*diff);
             let config = libstamp::engine::packer::FmtConfig {
-                check: *check,
-                diff: *diff,
                 recursive: *recursive,
-                write: should_write,
+                options: libstamp::engine::packer::FmtOutputOptions {
+                    check: *check,
+                    diff: *diff,
+                    write: should_write,
+                },
             };
             libstamp::engine::packer::fmt(template, &config)?;
         }
@@ -645,8 +646,10 @@ pub async fn execute_command(
             let val_cfg = libstamp::engine::packer::ValidateConfig {
                 syntax_only: *syntax_only,
                 evaluate_datasources: *evaluate_datasources,
-                no_warn_undeclared_var: *no_warn_undeclared_var,
-                warn_on_undeclared_var: false,
+                undeclared_vars: libstamp::engine::packer::UndeclaredVarOptions {
+                    no_warn_undeclared_var: *no_warn_undeclared_var,
+                    warn_on_undeclared_var: false,
+                },
                 only: only.clone(),
                 except: except.clone(),
                 vars,
@@ -665,7 +668,7 @@ pub async fn execute_command(
                 verbose: *verbose,
                 junit_xml: junit_xml.clone(),
             };
-            libstamp::engine::test::run_tests(template, &config).await?;
+            libstamp::engine::test::run_tests(template, &config)?;
             println!("Tests completed.");
         }
         Commands::Plugins { command, .. } => match command {

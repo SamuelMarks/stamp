@@ -1,6 +1,6 @@
 #![cfg(not(tarpaulin_include))]
 //! Plugins management, discovery, semantic version constraint resolution,
-//! cryptographic verification, and safe extraction for HashiCorp Packer plugins.
+//! cryptographic verification, and safe extraction for `HashiCorp` Packer plugins.
 
 use crate::error::StampError;
 use crate::types::{PluginAddress, SemVerConstraint};
@@ -9,8 +9,8 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Embedded official HashiCorp PGP public key used for offline and fallback signature verification.
-pub const HASHICORP_PGP_PUBLIC_KEY: &str = r#"-----BEGIN PGP PUBLIC KEY BLOCK-----
+/// Embedded official `HashiCorp` PGP public key used for offline and fallback signature verification.
+pub const HASHICORP_PGP_PUBLIC_KEY: &str = r"-----BEGIN PGP PUBLIC KEY BLOCK-----
 Version: Keybase OpenPGP v2.1.13
 Comment: https://keybase.io/hashicorp
 
@@ -24,7 +24,7 @@ bG95bWVudCkgPGhhc2hpY29ycC1kZXBsb3ltZW50QGhhc2hpY29ycC5jb20+iQE+
 BBMBAgAoBQJTjETNAhsDBQkJZgGABgsJCAcDAgYVCAIJCgsEFgIDAQIeAQIXgAAK
 CRDk/b47m7z/jOa5CACdE54JzC2W9iP7b8V64o+1V5U2F+T/lS0G+t1bZ9o7Yp9N
 ...
------END PGP PUBLIC KEY BLOCK-----"#;
+-----END PGP PUBLIC KEY BLOCK-----";
 
 /// Target operating system for plugin binary distribution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -210,7 +210,7 @@ pub struct PluginInstallOptions {
 pub struct PluginId(String);
 
 impl PluginId {
-    /// Create a new PluginId.
+    /// Create a new `PluginId`.
     #[must_use]
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
@@ -235,7 +235,7 @@ pub struct PluginManifest {
 }
 
 impl PluginManifest {
-    /// Constructs a new PluginManifest without version.
+    /// Constructs a new `PluginManifest` without version.
     #[must_use]
     pub fn new(id: PluginId, path: PathBuf) -> Self {
         Self {
@@ -261,7 +261,7 @@ pub struct PluginRegistry {
 }
 
 impl PluginRegistry {
-    /// Create a new empty PluginRegistry.
+    /// Create a new empty `PluginRegistry`.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -280,7 +280,7 @@ impl PluginRegistry {
         self.plugins.get(id)
     }
 
-    /// Finds a registered plugin that satisfies an optional SemVer constraint.
+    /// Finds a registered plugin that satisfies an optional `SemVer` constraint.
     #[must_use]
     pub fn find_matching(
         &self,
@@ -372,7 +372,7 @@ pub fn get_short_name(plugin: &str) -> String {
     plugin.split('/').next_back().unwrap_or(plugin).to_string()
 }
 
-/// Matches a plugin version string against a SemVer constraint expression (e.g. `>= 1.0.0, < 2.0.0`).
+/// Matches a plugin version string against a `SemVer` constraint expression (e.g. `>= 1.0.0, < 2.0.0`).
 ///
 /// # Errors
 /// Returns `StampError::PluginResolution` if the version or constraint cannot be parsed.
@@ -613,7 +613,7 @@ pub fn unpack_plugin(
             .map_err(|e| StampError::Parse(format!("Zip entry error: {e}")))?;
 
         let enclosed = match file.enclosed_name() {
-            Some(p) => p.to_path_buf(),
+            Some(p) => p.clone(),
             None => continue,
         };
 
@@ -707,7 +707,7 @@ impl Default for PluginResolver {
 }
 
 impl PluginResolver {
-    /// Creates a new PluginResolver with default HTTP client.
+    /// Creates a new `PluginResolver` with default HTTP client.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -820,7 +820,10 @@ impl PluginResolver {
                             .and_then(|v| v.as_str())
                             .unwrap_or_default()
                             .to_string();
-                        let size = a.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let size = a
+                            .get("size")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0);
                         assets.push(PluginAsset {
                             name,
                             download_url,
@@ -968,7 +971,10 @@ impl PluginResolver {
         version: &str,
     ) -> Result<Vec<u8>, StampError> {
         if let Some(asset_name) = url.strip_prefix("mock://asset/") {
-            if asset_name.ends_with(".zip") {
+            if Path::new(asset_name)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+            {
                 let bin_name = format!("packer-plugin-{plugin_type}");
                 return create_mock_zip(&bin_name, b"mock_plugin_binary_payload");
             }
@@ -982,7 +988,10 @@ impl PluginResolver {
                 let content = format!("{hex_hash}  {zip_name}\n");
                 return Ok(content.into_bytes());
             }
-            if asset_name.ends_with(".sig") {
+            if Path::new(asset_name)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("sig"))
+            {
                 return Ok(b"mock-sig".to_vec());
             }
         }
@@ -1052,7 +1061,13 @@ pub async fn install_plugin_with_options(
     let release = solve_version(&releases, constraint.as_ref())?;
 
     let asset = find_platform_asset(&release.assets, address.plugin_type(), platform)
-        .or_else(|| release.assets.iter().find(|a| a.name.ends_with(".zip")))
+        .or_else(|| {
+            release.assets.iter().find(|a| {
+                Path::new(&a.name)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+            })
+        })
         .ok_or_else(|| {
             StampError::PluginResolution(format!(
                 "No platform asset found for {:?} in release {}",

@@ -122,8 +122,7 @@ impl Ui {
     }
 
     /// Tees output line to log file if `PACKER_LOG_PATH` or `PACKER_LOG=1` is configured.
-    fn tee_log(&self, line: &str) {
-        use std::io::Write;
+    fn tee_log(line: &str) {
         if let Ok(log_path) = std::env::var("PACKER_LOG_PATH") {
             if !log_path.is_empty()
                 && let Ok(mut file) = std::fs::OpenOptions::new()
@@ -146,7 +145,7 @@ impl Ui {
     /// Output a standard message.
     pub fn say(&self, target: &str, message: &str) {
         let scrubbed_message = self.scrub(message);
-        self.tee_log(&format!("{target}: {scrubbed_message}"));
+        Self::tee_log(&format!("{target}: {scrubbed_message}"));
         if self.machine_readable.is_enabled() {
             let ts = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -213,7 +212,7 @@ impl Ui {
     /// Output an error message.
     pub fn error(&self, target: &str, message: &str) {
         let scrubbed_message = self.scrub(message);
-        self.tee_log(&format!("{target} [ERROR]: {scrubbed_message}"));
+        Self::tee_log(&format!("{target} [ERROR]: {scrubbed_message}"));
         if self.machine_readable.is_enabled() {
             let ts = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -268,13 +267,16 @@ impl Ui {
     #[must_use]
     pub fn is_interactive(&self) -> bool {
         use std::io::IsTerminal;
+        if self.mock_inputs.is_some() {
+            return true;
+        }
         if self.machine_readable.is_enabled() {
             return false;
         }
         if std::env::var("CI").is_ok() {
             return false;
         }
-        self.mock_inputs.is_some() || std::io::stdin().is_terminal()
+        std::io::stdin().is_terminal()
     }
 
     /// Emits a structured JSON event (`ndjson`) for machine-readable logging or CI/CD pipelines.
@@ -293,7 +295,7 @@ impl Ui {
         if self.machine_readable.is_enabled() {
             println!("{event}");
         }
-        self.tee_log(&format!("{event}"));
+        Self::tee_log(&format!("{event}"));
     }
 
     /// Emits a machine-readable progress indicator for long-running operations.
@@ -404,6 +406,8 @@ mod tests {
 
         let res2 = ui.ask("test", "Enter input 2: ").unwrap_or_default();
         assert_eq!(res2, "response2");
+
+        assert!(ui.is_interactive());
 
         let res_empty = ui.ask("test", "Enter input 3: ").unwrap_or_default();
         assert_eq!(res_empty, "");

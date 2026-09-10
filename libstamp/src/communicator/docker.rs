@@ -213,9 +213,9 @@ pub fn extract_tar_archive(tar_bytes: &[u8], destination: &Path) -> Result<(), S
     Ok(())
 }
 
-/// Internal Docker exec creation request body.
+/// Standard stream attach flags for Docker exec.
 #[derive(Debug, Serialize)]
-struct CreateExecRequest<'a> {
+struct ExecAttachStreams {
     /// Whether to attach standard input.
     #[serde(rename = "AttachStdin")]
     attach_stdin: bool,
@@ -225,6 +225,14 @@ struct CreateExecRequest<'a> {
     /// Whether to attach standard error.
     #[serde(rename = "AttachStderr")]
     attach_stderr: bool,
+}
+
+/// Internal Docker exec creation request body.
+#[derive(Debug, Serialize)]
+struct CreateExecRequest<'a> {
+    /// Standard stream attachment options.
+    #[serde(flatten)]
+    streams: ExecAttachStreams,
     /// Whether to allocate a pseudo-TTY.
     #[serde(rename = "Tty")]
     tty: bool,
@@ -298,9 +306,11 @@ impl DockerCommunicator {
         full_cmd.push(cmd.command.clone());
 
         let create_req = CreateExecRequest {
-            attach_stdin: false,
-            attach_stdout: true,
-            attach_stderr: true,
+            streams: ExecAttachStreams {
+                attach_stdin: false,
+                attach_stdout: true,
+                attach_stderr: true,
+            },
             tty: self.config.tty,
             user: self.config.user.as_deref(),
             cmd: &full_cmd,

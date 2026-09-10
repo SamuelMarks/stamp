@@ -9,7 +9,7 @@ use async_trait::async_trait;
 pub struct VsphereConfig {
     /// Identifier for this post-processor.
     pub identifier: String,
-    /// Hostname or IP address of the vCenter or ESXi server.
+    /// Hostname or IP address of the vCenter or `ESXi` server.
     pub vcenter_server: Option<String>,
     /// Username for authentication.
     pub username: Option<String>,
@@ -29,7 +29,7 @@ pub struct VsphereConfig {
     pub folder: Option<String>,
     /// Target name for the virtual machine.
     pub vm_name: Option<String>,
-    /// Target ESXi host name.
+    /// Target `ESXi` host name.
     pub host: Option<String>,
     /// Whether to keep the input artifact files. Defaults to true.
     pub keep_input_artifact: bool,

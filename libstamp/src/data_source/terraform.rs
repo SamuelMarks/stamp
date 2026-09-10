@@ -38,8 +38,7 @@ impl DataSource for TerraformDataSource {
             .config
             .state_path
             .as_deref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("terraform.tfstate"));
+            .map_or_else(|| PathBuf::from("terraform.tfstate"), PathBuf::from);
 
         if !state_path.exists() {
             return Err(StampError::Execution(format!(

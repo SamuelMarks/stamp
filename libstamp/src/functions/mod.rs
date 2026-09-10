@@ -42,7 +42,7 @@ impl TemplateFunction for CleanResourceName {
     }
 }
 
-/// The `vault` function for retrieving secrets from HashiCorp Vault.
+/// The `vault` function for retrieving secrets from `HashiCorp` Vault.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Vault;
 

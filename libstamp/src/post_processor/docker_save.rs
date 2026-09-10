@@ -5,6 +5,7 @@ use crate::post_processor::{Artifact, PostProcessor};
 use async_trait::async_trait;
 use std::fs::File;
 use std::io::Write;
+use std::path::Path;
 
 /// Configuration for the `docker-save` post-processor.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -84,8 +85,9 @@ impl PostProcessor for DockerSavePostProcessor {
         let target_ref = format!("{}:{}", self.config.repository, tag);
 
         let is_gzip = self.config.gzip
-            || self.config.path.ends_with(".gz")
-            || self.config.path.ends_with(".tgz");
+            || Path::new(&self.config.path).extension().is_some_and(|ext| {
+                ext.eq_ignore_ascii_case("gz") || ext.eq_ignore_ascii_case("tgz")
+            });
 
         if is_gzip && !cfg!(test) {
             let output = tokio::process::Command::new(cmd_name)

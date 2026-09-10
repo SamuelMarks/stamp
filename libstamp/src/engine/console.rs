@@ -552,11 +552,11 @@ pub fn resolve_history_path() -> Option<PathBuf> {
 /// # Errors
 /// Returns `StampError` if the expression format is invalid.
 pub fn mutate_variable(ctx: &mut Context, expr: &str) -> Result<String, StampError> {
-    let (var_part, val_part) = expr.split_once('=').ok_or_else(|| {
+    let (name_part, value_expr) = expr.split_once('=').ok_or_else(|| {
         StampError::Execution("Missing '=' in variable mutation assignment".to_string())
     })?;
-    let var_name = var_part.trim().trim_start_matches("var.").trim();
-    let val_trimmed = val_part.trim();
+    let var_name = name_part.trim().trim_start_matches("var.").trim();
+    let val_trimmed = value_expr.trim();
 
     let new_val = eval_console_expr(val_trimmed, ctx)
         .unwrap_or_else(|_| val_trimmed.trim_matches('"').to_string());

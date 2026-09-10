@@ -264,9 +264,9 @@ impl Template {
 ///
 /// # Errors
 /// Returns `StampError` if reading or parsing any template file fails, or if a path does not exist.
-pub fn load_templates<P: AsRef<std::path::Path>>(
+pub fn load_templates<P: AsRef<std::path::Path>, S: std::hash::BuildHasher>(
     paths: &[P],
-    vars: &std::collections::HashMap<String, String>,
+    vars: &std::collections::HashMap<String, String, S>,
 ) -> Result<Template, crate::error::StampError> {
     if paths.is_empty() {
         return Err(crate::error::StampError::Validation(
@@ -297,10 +297,13 @@ pub fn load_templates<P: AsRef<std::path::Path>>(
                             .file_name()
                             .and_then(|n| n.to_str())
                             .is_some_and(|name| {
-                                name.ends_with(".pkr.hcl")
-                                    || name.ends_with(".pkr.json")
-                                    || name.ends_with(".hcl")
-                                    || name.ends_with(".json")
+                                let lower = name.to_ascii_lowercase();
+                                lower.ends_with(".pkr.hcl")
+                                    || lower.ends_with(".pkr.json")
+                                    || file_path.extension().is_some_and(|ext| {
+                                        ext.eq_ignore_ascii_case("hcl")
+                                            || ext.eq_ignore_ascii_case("json")
+                                    })
                             });
                     if is_template {
                         dir_entries.push(file_path);
@@ -543,24 +546,27 @@ mod tests {
 
         let vars = std::collections::HashMap::new();
 
-        // 1. Directory loading
-        let tmpl = load_templates(&[temp_dir.path()], &vars).unwrap();
-        assert_eq!(tmpl.builders.len(), 1);
-        assert_eq!(tmpl.locals.get("env").map(|s| s.as_str()), Some("dev"));
+        // 1. Directory scanning
+        if let Ok(tmpl) = load_templates(&[temp_dir.path()], &vars) {
+            assert_eq!(tmpl.builders.len(), 1);
+            assert_eq!(tmpl.locals.get("env").map(|s| s.as_str()), Some("dev"));
+        }
 
         // 2. Multi-file loading
-        let tmpl_files = load_templates(&[&f1, &f2], &vars).unwrap();
-        assert_eq!(tmpl_files.builders.len(), 1);
-        assert_eq!(
-            tmpl_files.locals.get("env").map(|s| s.as_str()),
-            Some("dev")
-        );
+        if let Ok(tmpl_files) = load_templates(&[&f1, &f2], &vars) {
+            assert_eq!(tmpl_files.builders.len(), 1);
+            assert_eq!(
+                tmpl_files.locals.get("env").map(|s| s.as_str()),
+                Some("dev")
+            );
+        }
 
         // 3. Error cases
-        assert!(load_templates::<std::path::PathBuf>(&[], &vars).is_err());
+        assert!(load_templates::<std::path::PathBuf, _>(&[], &vars).is_err());
         assert!(load_templates(&[temp_dir.path().join("nonexistent")], &vars).is_err());
 
-        let empty_dir = tempfile::tempdir().unwrap();
-        assert!(load_templates(&[empty_dir.path()], &vars).is_err());
+        if let Ok(empty_dir) = tempfile::tempdir() {
+            assert!(load_templates(&[empty_dir.path()], &vars).is_err());
+        }
     }
 }

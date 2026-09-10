@@ -9,17 +9,18 @@ use crate::engine::multistep::{Runner, StateBag, Step, StepAction};
 use crate::error::StampError;
 use crate::types::{Port, Timeout};
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Supported automation driver for controlling VMware instances.
+/// Supported automation driver for controlling `VMware` instances.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VmwareDriver {
-    /// Local desktop VMware hypervisor controlled via `vmrun` (Workstation/Fusion/Player).
+    /// Local desktop `VMware` hypervisor controlled via `vmrun` (Workstation/Fusion/Player).
     #[default]
     Vmrun,
-    /// Remote ESXi or vCenter controlled via `govc`.
+    /// Remote `ESXi` or vCenter controlled via `govc`.
     Govc,
 }
 
@@ -152,13 +153,13 @@ pub async fn run_ovftool(source_vmx: &Path, target_ova: &Path) -> Result<(), Sta
 
 /// Generate `.vmx` configuration file text with default and injected parameters.
 #[must_use]
-pub fn generate_vmx_content(
+pub fn generate_vmx_content<S: std::hash::BuildHasher>(
     vm_name: &str,
     guest_os: &str,
     mem_size: u64,
     cpus: u32,
     iso_path: Option<&str>,
-    custom_data: &HashMap<String, String>,
+    custom_data: &HashMap<String, String, S>,
 ) -> String {
     let mut vmx = format!(
         r#".encoding = "UTF-8"
@@ -184,22 +185,23 @@ powerType.suspend = "soft"
     );
 
     if let Some(iso) = iso_path {
-        vmx.push_str(&format!(
+        let _ = write!(
+            vmx,
             r#"ide1:0.present = "TRUE"
 ide1:0.deviceType = "cdrom-image"
 ide1:0.fileName = "{iso}"
 "#
-        ));
+        );
     }
 
     for (k, v) in custom_data {
-        vmx.push_str(&format!("{k} = \"{v}\"\n"));
+        let _ = writeln!(vmx, "{k} = \"{v}\"");
     }
 
     vmx
 }
 
-/// Discover the guest IP address of a running VMware VM.
+/// Discover the guest IP address of a running `VMware` VM.
 ///
 /// Attempts discovery via `vmrun getGuestIPAddress` first, then DHCP lease files.
 ///
@@ -362,7 +364,7 @@ impl Step for StepCreateVM {
     }
 }
 
-/// Step to launch the VMware virtual machine.
+/// Step to launch the `VMware` virtual machine.
 #[derive(Debug, Clone)]
 struct StepRunVM {
     /// UI reference for terminal output.
@@ -497,7 +499,7 @@ impl Step for StepShutdown {
     async fn cleanup(&mut self, _state: &StateBag) {}
 }
 
-/// Step to export the VMware VM to OVA/OVF format via `ovftool`.
+/// Step to export the `VMware` VM to OVA/OVF format via `ovftool`.
 #[derive(Debug, Clone)]
 struct StepExport {
     /// UI reference for terminal output.

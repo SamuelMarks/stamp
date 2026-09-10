@@ -95,6 +95,21 @@ struct AzureTokenResponse {
     access_token: String,
 }
 
+/// Azure CLI token response format.
+#[derive(Debug, Deserialize)]
+struct AzCliToken {
+    /// The bearer access token.
+    #[serde(rename = "accessToken")]
+    access_token: String,
+}
+
+/// Request body for Azure Resource Group creation.
+#[derive(Debug, Serialize)]
+struct CreateRgBody<'a> {
+    /// Azure region location.
+    location: &'a str,
+}
+
 /// Acquire an Azure ARM bearer access token using the configured authentication method.
 ///
 /// # Errors
@@ -228,13 +243,6 @@ pub async fn get_azure_token(auth: &AzureAuthMethod) -> Result<String, StampErro
                 )));
             }
 
-            #[derive(Deserialize)]
-            struct AzCliToken {
-                /// The bearer access token.
-                #[serde(rename = "accessToken")]
-                access_token: String,
-            }
-
             let token_resp: AzCliToken = serde_json::from_slice(&output.stdout).map_err(|e| {
                 StampError::Execution(format!("Failed to parse az cli token JSON: {e}"))
             })?;
@@ -289,11 +297,6 @@ impl Step for StepCreateResourceGroup {
             self.subscription_id, rg_name
         );
 
-        #[derive(Serialize)]
-        struct CreateRgBody<'a> {
-            location: &'a str,
-        }
-
         let resp = client
             .put(&url)
             .bearer_auth(token)
@@ -340,7 +343,7 @@ impl Step for StepCreateResourceGroup {
     }
 }
 
-/// Step to create temporary VNet, Subnet, Public IP, and Network Interface (NIC).
+/// Step to create temporary `VNet`, Subnet, Public IP, and Network Interface (NIC).
 #[derive(Debug, Clone)]
 pub struct StepCreateNetwork {
     /// UI logger.

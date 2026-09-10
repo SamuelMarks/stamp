@@ -20,9 +20,9 @@ pub enum DiskAdapter {
     Sata,
     /// SCSI adapter.
     Scsi,
-    /// NVMe adapter.
+    /// `NVMe` adapter.
     Nvme,
-    /// VirtIO adapter.
+    /// `VirtIO` adapter.
     Virtio,
     /// Other custom adapter.
     Other(String),
@@ -39,7 +39,7 @@ pub enum NetworkAdapter {
     HostOnly(String),
     /// Internal network.
     Internal(String),
-    /// VirtIO network.
+    /// `VirtIO` network.
     Virtio,
     /// Other network type.
     Other(String),
@@ -216,7 +216,7 @@ impl Fat12FloppyDisk {
         // Clean and uppercase ext (up to 3 chars)
         let clean_ext: String = ext
             .chars()
-            .filter(|c| c.is_ascii_alphanumeric())
+            .filter(char::is_ascii_alphanumeric)
             .take(3)
             .collect();
         let ext_upper = clean_ext.to_ascii_uppercase();
@@ -234,7 +234,8 @@ impl Fat12FloppyDisk {
             fat[offset] = (value & 0xFF) as u8;
             fat[offset + 1] = (fat[offset + 1] & 0xF0) | (((value >> 8) & 0x0F) as u8);
         } else {
-            fat[offset] = (fat[offset] & 0x0F) | (((value & 0x0F) << 4) as u8);
+            let low_nibble = ((value & 0x0F) as u8) << 4;
+            fat[offset] = (fat[offset] & 0x0F) | low_nibble;
             fat[offset + 1] = ((value >> 4) & 0xFF) as u8;
         }
     }
@@ -326,7 +327,7 @@ impl Fat12FloppyDisk {
             // Link cluster chains in FAT
             if clusters_needed > 0 {
                 for c in 0..clusters_needed {
-                    let c_num = current_cluster + (c as u16);
+                    let c_num = current_cluster + u16::try_from(c).unwrap_or(0);
                     if c + 1 == clusters_needed {
                         Self::write_fat12_entry(&mut fat, c_num, 0x0FFF); // End of chain
                     } else {
@@ -341,7 +342,7 @@ impl Fat12FloppyDisk {
                     let chunk = &file.data[file_data_start..file_data_end];
                     disk[cluster_offset..cluster_offset + chunk.len()].copy_from_slice(chunk);
                 }
-                current_cluster += clusters_needed as u16;
+                current_cluster += u16::try_from(clusters_needed).unwrap_or(0);
             }
 
             // Write 32-byte Directory Entry in Root Directory Table
@@ -356,7 +357,7 @@ impl Fat12FloppyDisk {
             disk[entry_offset + 26..entry_offset + 28]
                 .copy_from_slice(&start_cluster.to_le_bytes());
             // File size
-            let file_size = file.data.len() as u32;
+            let file_size = u32::try_from(file.data.len()).unwrap_or(0);
             disk[entry_offset + 28..entry_offset + 32].copy_from_slice(&file_size.to_le_bytes());
         }
 
@@ -507,7 +508,7 @@ impl Iso9660Disk {
 
         let clean_ext: String = ext
             .chars()
-            .filter(|c| c.is_ascii_alphanumeric())
+            .filter(char::is_ascii_alphanumeric)
             .take(3)
             .collect();
         let ext_upper = clean_ext.to_ascii_uppercase();
@@ -547,13 +548,13 @@ impl Iso9660Disk {
     ///
     /// # Errors
     /// Returns `StampError::Execution` on serialization failure.
-    #[allow(clippy::too_many_lines)]
     pub fn generate(&self) -> Result<Vec<u8>, StampError> {
         // Calculate file sectors
         let mut file_sectors = Vec::new();
         let mut next_sector = ISO_FIRST_FILE_SECTOR;
         for file in &self.files {
-            let sectors_needed = file.data.len().div_ceil(ISO_SECTOR_SIZE).max(1) as u32;
+            let sectors_needed =
+                u32::try_from(file.data.len().div_ceil(ISO_SECTOR_SIZE).max(1)).unwrap_or(1);
             file_sectors.push((next_sector, sectors_needed, file));
             next_sector += sectors_needed;
         }
@@ -590,8 +591,9 @@ impl Iso9660Disk {
         // Volume Sequence Number = 1 (both-endian u16)
         image[pvd_offset + 124..pvd_offset + 128].copy_from_slice(&Self::both_endian_u16(1));
         // Logical Block Size = 2048 (both-endian u16)
+        let sector_size_u16 = u16::try_from(ISO_SECTOR_SIZE).unwrap_or(2048);
         image[pvd_offset + 128..pvd_offset + 132]
-            .copy_from_slice(&Self::both_endian_u16(ISO_SECTOR_SIZE as u16));
+            .copy_from_slice(&Self::both_endian_u16(sector_size_u16));
 
         // Path Table Size: 10 bytes (both-endian u32)
         let path_table_size = 10u32;
@@ -605,11 +607,12 @@ impl Iso9660Disk {
             .copy_from_slice(&ISO_PATH_TABLE_M_SECTOR.to_be_bytes());
 
         // Root Directory Record in PVD (34 bytes at offset 156..190)
+        let sector_size_u32 = u32::try_from(ISO_SECTOR_SIZE).unwrap_or(2048);
         let root_rec = &mut image[pvd_offset + 156..pvd_offset + 190];
         root_rec[0] = 34; // Record Length
         root_rec[1] = 0; // Extended Attribute Record Length
         root_rec[2..10].copy_from_slice(&Self::both_endian_u32(ISO_ROOT_DIR_SECTOR));
-        root_rec[10..18].copy_from_slice(&Self::both_endian_u32(ISO_SECTOR_SIZE as u32));
+        root_rec[10..18].copy_from_slice(&Self::both_endian_u32(sector_size_u32));
         root_rec[18..25].copy_from_slice(&[126, 9, 6, 12, 0, 0, 0]); // Date
         root_rec[25] = 0x02; // File Flags: Directory
         root_rec[28..32].copy_from_slice(&Self::both_endian_u16(1)); // Volume Seq
@@ -658,13 +661,14 @@ impl Iso9660Disk {
         // 5. Root Directory (Sector 20)
         let root_dir_offset = (ISO_ROOT_DIR_SECTOR as usize) * ISO_SECTOR_SIZE;
         let mut root_cursor = root_dir_offset;
+        let sector_size_u32 = u32::try_from(ISO_SECTOR_SIZE).unwrap_or(2048);
 
         // Entry "."
         image[root_cursor] = 34;
         image[root_cursor + 2..root_cursor + 10]
             .copy_from_slice(&Self::both_endian_u32(ISO_ROOT_DIR_SECTOR));
         image[root_cursor + 10..root_cursor + 18]
-            .copy_from_slice(&Self::both_endian_u32(ISO_SECTOR_SIZE as u32));
+            .copy_from_slice(&Self::both_endian_u32(sector_size_u32));
         image[root_cursor + 25] = 0x02; // Directory
         image[root_cursor + 28..root_cursor + 32].copy_from_slice(&Self::both_endian_u16(1));
         image[root_cursor + 32] = 1;
@@ -676,7 +680,7 @@ impl Iso9660Disk {
         image[root_cursor + 2..root_cursor + 10]
             .copy_from_slice(&Self::both_endian_u32(ISO_ROOT_DIR_SECTOR));
         image[root_cursor + 10..root_cursor + 18]
-            .copy_from_slice(&Self::both_endian_u32(ISO_SECTOR_SIZE as u32));
+            .copy_from_slice(&Self::both_endian_u32(sector_size_u32));
         image[root_cursor + 25] = 0x02; // Directory
         image[root_cursor + 28..root_cursor + 32].copy_from_slice(&Self::both_endian_u16(1));
         image[root_cursor + 32] = 1;
@@ -687,36 +691,37 @@ impl Iso9660Disk {
         for (sector, _, file) in &file_sectors {
             let id_bytes = file.iso_id.as_bytes();
             let base_rec_len = 33 + id_bytes.len();
-            let pad = if base_rec_len % 2 == 1 { 1 } else { 0 };
+            let pad = usize::from(base_rec_len % 2 == 1);
 
             // Rock Ridge NM (Alternate Name)
             let name_bytes = file.name.as_bytes();
             let nm_len = 5 + name_bytes.len();
 
-            // Rock Ridge PX (POSIX attributes: mode 0o100644)
+            // Rock Ridge PX (POSIX attributes: mode 0o100_644)
             let px_len = 36;
 
             let total_rec_len = base_rec_len + pad + nm_len + px_len;
-            let final_pad = if total_rec_len % 2 == 1 { 1 } else { 0 };
-            let record_len = (total_rec_len + final_pad) as u8;
+            let final_pad = usize::from(total_rec_len % 2 == 1);
+            let record_len = u8::try_from(total_rec_len + final_pad).unwrap_or(0);
 
             let rec_start = root_cursor;
             image[rec_start] = record_len;
             image[rec_start + 1] = 0; // Extended attr
             image[rec_start + 2..rec_start + 10].copy_from_slice(&Self::both_endian_u32(*sector));
+            let file_data_len_u32 = u32::try_from(file.data.len()).unwrap_or(0);
             image[rec_start + 10..rec_start + 18]
-                .copy_from_slice(&Self::both_endian_u32(file.data.len() as u32));
+                .copy_from_slice(&Self::both_endian_u32(file_data_len_u32));
             image[rec_start + 18..rec_start + 25].copy_from_slice(&[126, 9, 6, 12, 0, 0, 0]);
             image[rec_start + 25] = 0x00; // Normal file
             image[rec_start + 28..rec_start + 32].copy_from_slice(&Self::both_endian_u16(1));
-            image[rec_start + 32] = id_bytes.len() as u8;
+            image[rec_start + 32] = u8::try_from(id_bytes.len()).unwrap_or(0);
             image[rec_start + 33..rec_start + 33 + id_bytes.len()].copy_from_slice(id_bytes);
 
             let mut sua_offset = rec_start + 33 + id_bytes.len() + pad;
 
             // Write NM Record
             image[sua_offset..sua_offset + 2].copy_from_slice(b"NM");
-            image[sua_offset + 2] = nm_len as u8;
+            image[sua_offset + 2] = u8::try_from(nm_len).unwrap_or(0);
             image[sua_offset + 3] = 1; // Version
             image[sua_offset + 4] = 0; // Flags
             image[sua_offset + 5..sua_offset + 5 + name_bytes.len()].copy_from_slice(name_bytes);
@@ -724,11 +729,11 @@ impl Iso9660Disk {
 
             // Write PX Record
             image[sua_offset..sua_offset + 2].copy_from_slice(b"PX");
-            image[sua_offset + 2] = px_len as u8;
+            image[sua_offset + 2] = u8::try_from(px_len).unwrap_or(0);
             image[sua_offset + 3] = 1; // Version
             // POSIX file mode (0o100644 = 0x81A4 regular file rw-r--r--)
             image[sua_offset + 4..sua_offset + 12]
-                .copy_from_slice(&Self::both_endian_u32(0o100644));
+                .copy_from_slice(&Self::both_endian_u32(0o100_644));
             // File links (1)
             image[sua_offset + 12..sua_offset + 20].copy_from_slice(&Self::both_endian_u32(1));
             // UID (0)
@@ -782,7 +787,7 @@ pub async fn generate_cdrom_iso(
     iso.write_to_file(dest).await
 }
 
-/// Helper function to generate a Cloud-init `cidata` NoCloud seed ISO.
+/// Helper function to generate a Cloud-init `cidata` `NoCloud` seed ISO.
 ///
 /// Creates an ISO9660 volume labeled `cidata` containing `meta-data`, `user-data`,
 /// and optionally `network-config`.
@@ -815,7 +820,7 @@ pub enum BootAction {
     KeyUp(u32),
     /// Pause execution for a given duration.
     Wait(Duration),
-    /// Raw PS/2 scancode for VirtualBox / hypervisor direct input.
+    /// Raw PS/2 scancode for `VirtualBox` / hypervisor direct input.
     Scancode(u8),
 }
 
@@ -833,7 +838,6 @@ impl BootCommandParser {
     /// - Template macro substitutions: `{{ .HTTPIP }}` and `{{ .HTTPPort }}`
     /// - Configurable key typing delay between regular keystrokes.
     #[must_use]
-    #[allow(clippy::too_many_lines)]
     pub fn parse(
         tokens: &[String],
         http_ip: Option<&str>,
@@ -1067,9 +1071,9 @@ pub async fn send_spice_boot_command(
     let mut stream = TcpStream::connect(spice_addr)
         .await
         .map_err(StampError::Io)?;
-    // SPICE protocol magic: REDQ (0x51444552)
+    // SPICE protocol magic: REDQ (0x5144_4552)
     stream
-        .write_all(&0x51444552u32.to_le_bytes())
+        .write_all(&0x5144_4552_u32.to_le_bytes())
         .await
         .map_err(StampError::Io)?;
     stream

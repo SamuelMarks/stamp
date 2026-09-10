@@ -1,7 +1,7 @@
 #![cfg_attr(coverage_nightly, coverage(off))]
-//! Implementation of the `opennebula` builder via XML-RPC / OneFlow API.
+//! Implementation of the `opennebula` builder via XML-RPC / `OneFlow` API.
 //!
-//! Provides a client for OpenNebula RPC2 endpoints (`http://host:2633/RPC2`),
+//! Provides a client for `OpenNebula` RPC2 endpoints (`http://host:2633/RPC2`),
 //! managing template instantiation, VM lifecycle control, communicator provisioning,
 //! and disk save-as (`one.vm.disksaveas`) image publishing.
 
@@ -21,7 +21,7 @@ use std::time::Duration;
 pub struct OpenNebulaConfig {
     /// Name of the builder instance.
     pub name: String,
-    /// OpenNebula XML-RPC endpoint URL (e.g. `http://opennebula:2633/RPC2`).
+    /// `OpenNebula` XML-RPC endpoint URL (e.g. `http://opennebula:2633/RPC2`).
     pub endpoint: String,
     /// Authentication credentials formatted as `username:password` or `username:token`.
     pub auth: String,
@@ -47,7 +47,7 @@ pub struct OpenNebulaConfig {
     pub ssh_password: Option<String>,
 }
 
-/// OpenNebula XML-RPC client.
+/// `OpenNebula` XML-RPC client.
 #[derive(Debug, Clone)]
 pub struct OpenNebulaClient {
     /// RPC endpoint.
@@ -147,7 +147,7 @@ impl OpenNebulaClient {
         Ok(())
     }
 
-    /// Save a VM disk as a new image in OpenNebula via `one.vm.disksaveas`.
+    /// Save a VM disk as a new image in `OpenNebula` via `one.vm.disksaveas`.
     ///
     /// # Errors
     ///
@@ -246,7 +246,7 @@ impl OpenNebulaBuilder {
     }
 }
 
-/// Step to instantiate a VM from an OpenNebula template.
+/// Step to instantiate a VM from an `OpenNebula` template.
 #[derive(Debug, Clone)]
 struct StepInstantiateOpenNebulaVm {
     /// UI reference.
@@ -288,7 +288,7 @@ impl Step for StepInstantiateOpenNebulaVm {
     }
 }
 
-/// Step to provision OpenNebula VM over SSH.
+/// Step to provision `OpenNebula` VM over SSH.
 #[derive(Clone)]
 struct StepProvisionOpenNebula {
     /// UI reference.
@@ -355,7 +355,7 @@ impl Step for StepProvisionOpenNebula {
     async fn cleanup(&mut self, _state: &StateBag) {}
 }
 
-/// Step to poweroff VM and save disk as a new OpenNebula image.
+/// Step to poweroff VM and save disk as a new `OpenNebula` image.
 #[derive(Debug, Clone)]
 struct StepSaveOpenNebulaImage {
     /// UI reference.

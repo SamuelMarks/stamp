@@ -84,9 +84,9 @@ impl FileProvisioner {
     #[must_use]
     pub fn normalize_path_separators(path: &str, target_windows: bool) -> String {
         if target_windows {
-            path.replace('/', r#"\"#)
+            path.replace('/', r"\")
         } else {
-            path.replace(r#"\"#, "/")
+            path.replace('\\', "/")
         }
     }
 
@@ -148,9 +148,8 @@ impl FileProvisioner {
             return Ok(());
         }
 
-        let entries = match fs::read_dir(current) {
-            Ok(e) => e,
-            Err(_) => return Ok(()),
+        let Ok(entries) = fs::read_dir(current) else {
+            return Ok(());
         };
 
         for entry in entries.flatten() {

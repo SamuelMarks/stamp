@@ -68,9 +68,9 @@ pub struct AmazonEbsConfig {
     pub placement: Option<AmazonPlacementConfig>,
     /// Custom Elastic Network Interface (ENI) specifications.
     pub network_interfaces: Vec<NetworkInterfaceConfig>,
-    /// IMDSv2 metadata options token requirement (`required`, `optional`).
+    /// `IMDSv2` metadata options token requirement (`required`, `optional`).
     pub http_tokens: Option<String>,
-    /// IMDSv2 HTTP PUT response hop limit.
+    /// `IMDSv2` HTTP PUT response hop limit.
     pub http_put_response_hop_limit: Option<u32>,
     /// IMDS HTTP endpoint state (`enabled`, `disabled`).
     pub http_endpoint: Option<String>,
@@ -182,7 +182,7 @@ impl Step for StepRunSourceInstance {
             for mapping in &self.config.launch_block_device_mappings {
                 let mut ebs_builder = aws_sdk_ec2::types::EbsBlockDevice::builder();
                 if let Some(sz) = mapping.volume_size_gb {
-                    ebs_builder = ebs_builder.volume_size(sz as i32);
+                    ebs_builder = ebs_builder.volume_size(i32::try_from(sz).unwrap_or(8));
                 }
                 if let Some(ref vt) = mapping.volume_type {
                     let vol_type_str = match vt {
@@ -202,10 +202,10 @@ impl Step for StepRunSourceInstance {
                     ebs_builder = ebs_builder.delete_on_termination(del);
                 }
                 if let Some(iops) = mapping.iops {
-                    ebs_builder = ebs_builder.iops(iops as i32);
+                    ebs_builder = ebs_builder.iops(i32::try_from(iops).unwrap_or(3000));
                 }
                 if let Some(tp) = mapping.throughput {
-                    ebs_builder = ebs_builder.throughput(tp as i32);
+                    ebs_builder = ebs_builder.throughput(i32::try_from(tp).unwrap_or(125));
                 }
                 if let Some(enc) = mapping.encrypted {
                     ebs_builder = ebs_builder.encrypted(enc);
@@ -232,7 +232,8 @@ impl Step for StepRunSourceInstance {
             });
         }
         if let Some(hops) = self.config.http_put_response_hop_limit {
-            meta_builder = meta_builder.http_put_response_hop_limit(hops as i32);
+            meta_builder =
+                meta_builder.http_put_response_hop_limit(i32::try_from(hops).unwrap_or(1));
         }
         if let Some(ref ep) = self.config.http_endpoint {
             meta_builder = meta_builder.http_endpoint(if ep == "disabled" {
@@ -386,9 +387,7 @@ impl Step for StepRunSourceInstance {
         };
 
         let instances = res.instances();
-        let instance = if let Some(i) = instances.first() {
-            i
-        } else {
+        let Some(instance) = instances.first() else {
             return Err(StampError::Execution("No instances returned".to_string()));
         };
         let instance_id = instance.instance_id().unwrap_or_default().to_string();
@@ -550,7 +549,7 @@ impl Step for StepStopInstance {
             {
                 Ok(_) => (),
                 Err(e) => return Err(StampError::Execution(format!("Stop instance failed: {e}"))),
-            };
+            }
         }
         Ok(StepAction::Continue)
     }

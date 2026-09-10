@@ -1,6 +1,6 @@
 //! Plugin subprocess lifecycle management, health monitoring, and graceful termination.
 //!
-//! Handles spawning child plugin processes with the HashiCorp magic cookie,
+//! Handles spawning child plugin processes with the `HashiCorp` magic cookie,
 //! reading the handshake, monitoring health via watchdog pings, capturing stderr streams,
 //! and ensuring clean termination without orphaned zombie processes.
 
@@ -40,7 +40,7 @@ impl std::fmt::Debug for PluginSubprocess {
         f.debug_struct("PluginSubprocess")
             .field("binary_path", &self.binary_path)
             .field("handshake", &self.handshake)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -70,9 +70,9 @@ impl PluginSubprocess {
             cmd.env(k, v);
         }
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| StampError::Execution(format!("Failed to spawn plugin {path:?}: {e}")))?;
+        let mut child = cmd.spawn().map_err(|e| {
+            StampError::Execution(format!("Failed to spawn plugin {}: {e}", path.display()))
+        })?;
 
         let stderr_buf = Arc::new(Mutex::new(String::new()));
         if let Some(stderr) = child.stderr.take() {
@@ -92,7 +92,10 @@ impl PluginSubprocess {
         }
 
         let stdout = child.stdout.take().ok_or_else(|| {
-            StampError::Execution(format!("Failed to capture stdout for plugin {path:?}"))
+            StampError::Execution(format!(
+                "Failed to capture stdout for plugin {}",
+                path.display()
+            ))
         })?;
 
         let mut reader = BufReader::new(stdout);
@@ -112,11 +115,13 @@ impl PluginSubprocess {
                     });
                 }
                 Err(StampError::PluginHandshake(format!(
-                    "Timed out waiting for handshake from plugin {path:?}"
+                    "Timed out waiting for handshake from plugin {}",
+                    path.display()
                 )))
             }
             Ok(Err(e)) => Err(StampError::PluginHandshake(format!(
-                "Failed to read handshake stdout from plugin {path:?}: {e}"
+                "Failed to read handshake stdout from plugin {}: {e}",
+                path.display()
             ))),
             Ok(Ok(_)) => {
                 let trimmed = line.trim();
@@ -131,7 +136,8 @@ impl PluginSubprocess {
                         });
                     }
                     return Err(StampError::PluginHandshake(format!(
-                        "Plugin {path:?} terminated without emitting handshake line"
+                        "Plugin {} terminated without emitting handshake line",
+                        path.display()
                     )));
                 }
 

@@ -183,9 +183,9 @@ pub struct AmiConfig {
     pub snapshot_groups: Vec<String>,
     /// AMI deprecation timestamp in RFC3339 format (`deprecate_at`).
     pub deprecate_at: Option<String>,
-    /// IMDSv2 token requirement (e.g. "required" or "optional").
+    /// `IMDSv2` token requirement (e.g. "required" or "optional").
     pub http_tokens: Option<String>,
-    /// IMDSv2 HTTP PUT response hop limit.
+    /// `IMDSv2` HTTP PUT response hop limit.
     pub http_put_response_hop_limit: Option<u32>,
     /// SSM Parameter Store name to publish the resulting AMI ID to.
     pub ssm_parameter_name: Option<String>,
@@ -209,7 +209,7 @@ pub enum AwsPartition {
     /// AWS standard commercial partition (`aws`).
     #[default]
     Aws,
-    /// AWS GovCloud (US) partition (`aws-us-gov`).
+    /// AWS `GovCloud` (US) partition (`aws-us-gov`).
     AwsUsGov,
     /// AWS China partition (`aws-cn`).
     AwsCn,
@@ -239,7 +239,7 @@ impl AwsPartition {
     }
 }
 
-/// Obtain an AWS SdkConfig with optional region, profile, STS AssumeRole, and Web Identity Federation support.
+/// Obtain an AWS `SdkConfig` with optional region, profile, STS `AssumeRole`, and Web Identity Federation support.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn get_aws_config_with_web_identity(
     region: Option<&str>,
@@ -270,7 +270,7 @@ pub async fn get_aws_config_with_web_identity(
             req = req.external_id(ext_id);
         }
         if let Some(dur) = role.duration_seconds {
-            req = req.duration_seconds(dur as i32);
+            req = req.duration_seconds(i32::try_from(dur).unwrap_or(3600));
         }
 
         if let Ok(resp) = req.send().await
@@ -280,7 +280,8 @@ pub async fn get_aws_config_with_web_identity(
                 .expiration()
                 .to_millis()
                 .ok()
-                .map(|ms| std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms as u64));
+                .and_then(|ms| u64::try_from(ms).ok())
+                .map(|ms| std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms));
             let aws_creds = aws_sdk_ec2::config::Credentials::new(
                 creds.access_key_id(),
                 creds.secret_access_key(),
@@ -319,10 +320,12 @@ pub async fn get_aws_config_with_web_identity(
             if let Ok(resp) = req.send().await
                 && let Some(creds) = resp.credentials()
             {
-                let expiration =
-                    creds.expiration().to_millis().ok().map(|ms| {
-                        std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms as u64)
-                    });
+                let expiration = creds
+                    .expiration()
+                    .to_millis()
+                    .ok()
+                    .and_then(|ms| u64::try_from(ms).ok())
+                    .map(|ms| std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms));
                 let aws_creds = aws_sdk_ec2::config::Credentials::new(
                     creds.access_key_id(),
                     creds.secret_access_key(),
@@ -343,7 +346,7 @@ pub async fn get_aws_config_with_web_identity(
     base_config
 }
 
-/// Obtain an AWS SdkConfig with optional region, profile, and STS AssumeRole support.
+/// Obtain an AWS `SdkConfig` with optional region, profile, and STS `AssumeRole` support.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn get_aws_config(
     region: Option<&str>,
@@ -370,7 +373,7 @@ pub struct StepCreateSecurityGroup {
     pub security_group_ids: Vec<String>,
     /// Allowed CIDR blocks for temporary ingress rules.
     pub temporary_security_group_source_cidrs: Vec<String>,
-    /// Ingress port to open (e.g. 22 for SSH, 5985 for WinRM).
+    /// Ingress port to open (e.g. 22 for SSH, 5985 for `WinRM`).
     pub port: u16,
     /// Assume role config.
     pub assume_role: Option<AssumeRoleConfig>,

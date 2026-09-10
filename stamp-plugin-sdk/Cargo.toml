@@ -4,6 +4,9 @@ version = "0.0.1"
 edition = "2024"
 authors = ["Samuel Marks"]
 description = "SDK for authoring native Stamp and Packer plugins in Rust"
+readme = "../README.md"
+keywords = ["packer", "plugin", "sdk", "virtualization", "infrastructure"]
+categories = ["development-tools"]
 license = "CC0 OR MIT OR Apache-2.0"
 repository = "https://github.com/SamuelMarks/stamp"
 

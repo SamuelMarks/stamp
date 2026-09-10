@@ -36,8 +36,7 @@ impl DataSource for GitDataSource {
             .config
             .path
             .as_deref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
+            .map_or_else(|| PathBuf::from("."), PathBuf::from);
 
         if !repo_dir.exists() {
             return Err(StampError::Execution(format!(

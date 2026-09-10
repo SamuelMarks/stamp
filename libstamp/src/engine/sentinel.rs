@@ -2,7 +2,7 @@
 //! Sentinel Policy evaluation hooks and import exporter for Stamp templates.
 //!
 //! Evaluates Stamp templates, planned builds, and produced machine image artifacts
-//! against HashiCorp Sentinel policy rules with advisory, soft-mandatory, and
+//! against `HashiCorp` Sentinel policy rules with advisory, soft-mandatory, and
 //! hard-mandatory enforcement levels.
 
 use crate::artifact::Artifact;

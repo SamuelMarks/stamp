@@ -1,6 +1,5 @@
 #![cfg(not(tarpaulin_include))]
 #![cfg_attr(coverage_nightly, coverage(off))]
-#![allow(clippy::collapsible_if)]
 //! HCL parser for Packer templates.
 
 use crate::error::StampError;
@@ -288,7 +287,8 @@ fn expr_to_string(expr: &Expression) -> String {
                         i,
                         _,
                     ) => out.push_str(&expr_to_string(i)),
-                    _ => {}
+                    hashicorp_configuration_language_rs::ast::expr::TemplatePart::Directive(..) => {
+                    }
                 }
             }
             out
@@ -321,7 +321,7 @@ fn expr_to_vec_string(expr: &Expression) -> Vec<String> {
     }
 }
 
-/// Converts an HCL object expression into a HashMap of key-value string pairs.
+/// Converts an HCL object expression into a `HashMap` of key-value string pairs.
 fn expr_to_map_string(expr: &Expression) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
     if let Expression::Object(entries, _) = expr {
@@ -505,11 +505,11 @@ pub fn parse_hcl<S: ::std::hash::BuildHasher>(
         builders,
         provisioners,
         error_cleanup_provisioners,
-        required_plugins,
-        variables,
         post_processors,
         locals,
+        variables,
         data_sources,
+        required_plugins,
         packer,
         tests,
         builds,

@@ -168,9 +168,7 @@ impl Step for StepRunSourceInstance {
         };
 
         let instances = res.instances();
-        let instance = if let Some(i) = instances.first() {
-            i
-        } else {
+        let Some(instance) = instances.first() else {
             return Err(StampError::Execution("No instances returned".to_string()));
         };
         let instance_id = instance.instance_id().unwrap_or_default().to_string();
@@ -193,7 +191,7 @@ impl Step for StepRunSourceInstance {
             .and_then(|p| p.availability_zone())
             .unwrap_or("us-east-1a");
 
-        let size = self.config.surrogate_volume_size.unwrap_or(8) as i32;
+        let size = i32::try_from(self.config.surrogate_volume_size.unwrap_or(8)).unwrap_or(8);
         let vol_res = client
             .create_volume()
             .availability_zone(availability_zone)
@@ -382,7 +380,7 @@ impl Step for StepStopInstance {
             {
                 Ok(_) => (),
                 Err(e) => return Err(StampError::Execution(format!("Stop instance failed: {e}"))),
-            };
+            }
         }
         Ok(StepAction::Continue)
     }

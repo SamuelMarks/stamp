@@ -75,6 +75,35 @@ pub struct DiskEncryptionKey {
     pub kms_key_service_account: Option<String>,
 }
 
+/// Shielded VM configuration options for Google Compute Engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ShieldedVmConfig {
+    /// Whether Secure Boot is enabled (Shielded VM).
+    pub enable_secure_boot: Option<bool>,
+    /// Whether vTPM is enabled (Shielded VM).
+    pub enable_vtpm: Option<bool>,
+    /// Whether Integrity Monitoring is enabled (Shielded VM).
+    pub enable_integrity_monitoring: Option<bool>,
+}
+
+/// Spot and Preemptible VM scheduling options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SpotVmOptions {
+    /// Whether the instance should be preemptible.
+    pub preemptible: bool,
+    /// Whether the instance should be a Spot VM (`spot`).
+    pub spot: bool,
+}
+
+/// Service account key JSON structure.
+#[derive(Deserialize)]
+struct ServiceAccountKey {
+    /// Client email.
+    client_email: String,
+    /// Private key PEM.
+    private_key: String,
+}
+
 /// Configuration for the `googlecompute` builder.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct GoogleComputeConfig {
@@ -122,18 +151,12 @@ pub struct GoogleComputeConfig {
     pub snapshot_disk: bool,
     /// Name of the disk snapshot if enabled.
     pub snapshot_name: Option<String>,
-    /// Whether the instance should be preemptible.
-    pub preemptible: bool,
-    /// Whether the instance should be a Spot VM (`spot`).
-    pub spot: bool,
+    /// Spot and Preemptible VM options.
+    pub spot_options: SpotVmOptions,
     /// Scheduling provisioning model (`SPOT` or `STANDARD`).
     pub provisioning_model: Option<String>,
-    /// Whether Secure Boot is enabled (Shielded VM).
-    pub enable_secure_boot: Option<bool>,
-    /// Whether vTPM is enabled (Shielded VM).
-    pub enable_vtpm: Option<bool>,
-    /// Whether Integrity Monitoring is enabled (Shielded VM).
-    pub enable_integrity_monitoring: Option<bool>,
+    /// Shielded VM options.
+    pub shielded_vm: Option<ShieldedVmConfig>,
     /// Network interface card type (e.g. `GVNIC` or `VIRTIO_NET`).
     pub nic_type: Option<String>,
     /// Customer-Supplied Encryption Key (CSEK) or Cloud KMS key configuration.
@@ -199,12 +222,6 @@ pub async fn get_gcp_token(credentials: &Option<GoogleCredentials>) -> Result<St
         let key_content = tokio::fs::read_to_string(file_path)
             .await
             .map_err(StampError::Io)?;
-
-        #[derive(Deserialize)]
-        struct ServiceAccountKey {
-            client_email: String,
-            private_key: String,
-        }
 
         let sa_key: ServiceAccountKey = serde_json::from_str(&key_content)
             .map_err(|e| StampError::Parse(format!("Invalid service account key JSON: {e}")))?;
@@ -316,19 +333,21 @@ impl Step for StepCreateGceInstance {
         state.put("disk_name", instance_name.clone());
 
         if cfg!(test) {
-            if let Some(sb) = self.config.enable_secure_boot {
-                state.put("enable_secure_boot", sb);
-            }
-            if let Some(vt) = self.config.enable_vtpm {
-                state.put("enable_vtpm", vt);
-            }
-            if let Some(im) = self.config.enable_integrity_monitoring {
-                state.put("enable_integrity_monitoring", im);
+            if let Some(ref svm) = self.config.shielded_vm {
+                if let Some(sb) = svm.enable_secure_boot {
+                    state.put("enable_secure_boot", sb);
+                }
+                if let Some(vt) = svm.enable_vtpm {
+                    state.put("enable_vtpm", vt);
+                }
+                if let Some(im) = svm.enable_integrity_monitoring {
+                    state.put("enable_integrity_monitoring", im);
+                }
             }
             if let Some(ref nic) = self.config.nic_type {
                 state.put("nic_type", nic.clone());
             }
-            if self.config.spot {
+            if self.config.spot_options.spot {
                 state.put("spot", true);
             }
             if let Some(ref pm) = self.config.provisioning_model {
@@ -395,7 +414,7 @@ impl Step for StepCreateGceInstance {
             }
         }
 
-        let is_spot = self.config.spot || self.config.preemptible;
+        let is_spot = self.config.spot_options.spot || self.config.spot_options.preemptible;
         let prov_model = self
             .config
             .provisioning_model
@@ -427,18 +446,15 @@ impl Step for StepCreateGceInstance {
             body["tags"] = serde_json::json!({ "items": self.config.tags });
         }
 
-        if self.config.enable_secure_boot.is_some()
-            || self.config.enable_vtpm.is_some()
-            || self.config.enable_integrity_monitoring.is_some()
-        {
+        if let Some(ref svm) = self.config.shielded_vm {
             let mut shielded = serde_json::json!({});
-            if let Some(sb) = self.config.enable_secure_boot {
+            if let Some(sb) = svm.enable_secure_boot {
                 shielded["enableSecureBoot"] = serde_json::json!(sb);
             }
-            if let Some(vt) = self.config.enable_vtpm {
+            if let Some(vt) = svm.enable_vtpm {
                 shielded["enableVtpm"] = serde_json::json!(vt);
             }
-            if let Some(im) = self.config.enable_integrity_monitoring {
+            if let Some(im) = svm.enable_integrity_monitoring {
                 shielded["enableIntegrityMonitoring"] = serde_json::json!(im);
             }
             body["shieldedInstanceConfig"] = shielded;
@@ -958,12 +974,16 @@ mod tests {
             image_licenses: vec!["https://www.googleapis.com/compute/v1/projects/vm-options/global/licenses/enable-vmx".to_string()],
             snapshot_disk: true,
             snapshot_name: Some("my-snap".to_string()),
-            preemptible: true,
-            spot: true,
+            spot_options: SpotVmOptions {
+                preemptible: true,
+                spot: true,
+            },
             provisioning_model: Some("SPOT".to_string()),
-            enable_secure_boot: Some(true),
-            enable_vtpm: Some(true),
-            enable_integrity_monitoring: Some(true),
+            shielded_vm: Some(ShieldedVmConfig {
+                enable_secure_boot: Some(true),
+                enable_vtpm: Some(true),
+                enable_integrity_monitoring: Some(true),
+            }),
             nic_type: Some("GVNIC".to_string()),
             disk_encryption_key: Some(DiskEncryptionKey {
                 raw_key: Some("raw-key-123".to_string()),

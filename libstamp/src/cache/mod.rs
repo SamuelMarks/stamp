@@ -1,6 +1,6 @@
 //! ISO and file download cache subsystem with inter-process file locking and verification.
 //!
-//! Provides production-grade ISO download and caching parity with HashiCorp Packer:
+//! Provides production-grade ISO download and caching parity with `HashiCorp` Packer:
 //! - Respects `PACKER_CACHE_DIR` environment variable, falling back to `./packer_cache`.
 //! - Multi-protocol support (`http://`, `https://`, `file://`, `s3://`, `gs://`).
 //! - Fallback URL array resolution (`iso_urls`).
@@ -115,7 +115,6 @@ impl ChecksumSpec {
             let algo = match trimmed.len() {
                 32 => ChecksumAlgorithm::Md5,
                 40 => ChecksumAlgorithm::Sha1,
-                64 => ChecksumAlgorithm::Sha256,
                 128 => ChecksumAlgorithm::Sha512,
                 _ => ChecksumAlgorithm::Sha256,
             };
@@ -284,6 +283,14 @@ pub struct CacheManager {
     config: CacheConfig,
 }
 
+/// RAII unlock guard for inter-process file locks.
+struct UnlockGuard<'a>(&'a File);
+impl Drop for UnlockGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
 impl CacheManager {
     /// Creates a new `CacheManager` with default configuration.
     #[must_use]
@@ -356,13 +363,6 @@ impl CacheManager {
 
         lock_file.lock_exclusive().map_err(StampError::Io)?;
 
-        // RAII unlock guard
-        struct UnlockGuard<'a>(&'a File);
-        impl<'a> Drop for UnlockGuard<'a> {
-            fn drop(&mut self) {
-                let _ = self.0.unlock();
-            }
-        }
         let _guard = UnlockGuard(&lock_file);
 
         // Check if existing cached file is valid

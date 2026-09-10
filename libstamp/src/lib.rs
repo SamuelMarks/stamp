@@ -1,9 +1,7 @@
 #![cfg_attr(coverage_nightly, coverage(off))]
-#![allow(clippy::field_reassign_with_default)]
 #![deny(missing_docs)]
 #![deny(clippy::missing_docs_in_private_items)]
 #![deny(clippy::unwrap_used, clippy::expect_used)]
-#![allow(clippy::pedantic)]
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 //! `libstamp` is the core library for Stamp, a tool to replicate Packer functionality.

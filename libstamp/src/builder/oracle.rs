@@ -11,6 +11,7 @@ use rsa::pkcs8::DecodePrivateKey;
 use rsa::traits::SignatureScheme;
 use rsa::{Pkcs1v15Sign, RsaPrivateKey};
 use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -89,26 +90,27 @@ host: {}",
     if let Some(b) = body {
         let digest = Sha256::digest(b);
         let b64_digest = base64::engine::general_purpose::STANDARD.encode(digest);
-        signing_string.push_str(&format!(
+        let _ = write!(
+            signing_string,
             "
 x-content-sha256: {b64_digest}
 content-length: {}",
             b.len()
-        ));
+        );
         headers_list.push("x-content-sha256");
         headers_list.push("content-length");
     }
 
     let mut hasher = Sha256::new();
     hasher.update(signing_string.as_bytes());
-    let hashed = hasher.finalize();
+    let signature_digest = hasher.finalize();
 
     let signing_scheme = Pkcs1v15Sign::new_unprefixed();
     let signature = signing_scheme
         .sign(
             Option::<&mut rsa::rand_core::OsRng>::None,
             &rsa_key,
-            &hashed,
+            &signature_digest,
         )
         .map_err(|e| StampError::Execution(format!("OCI RSA signing failed: {e}")))?;
 

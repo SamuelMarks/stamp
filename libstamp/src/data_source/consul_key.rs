@@ -1,7 +1,7 @@
 #![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `consul-key` data source.
 //!
-//! Fetches key-value configuration values from HashiCorp Consul KV store.
+//! Fetches key-value configuration values from `HashiCorp` Consul KV store.
 
 use crate::data_source::DataSource;
 use crate::error::StampError;

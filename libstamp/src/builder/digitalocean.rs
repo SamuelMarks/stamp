@@ -1,4 +1,4 @@
-//! Implementation of the `digitalocean` builder using the DigitalOcean v2 API.
+//! Implementation of the `digitalocean` builder using the `DigitalOcean` v2 API.
 
 use crate::builder::Builder;
 use crate::communicator::ssh::{SshCommunicator, SshConfig};
@@ -9,7 +9,7 @@ use crate::types::{FilePath, Port, Timeout};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Strictly typed region identifier for DigitalOcean (e.g. `nyc3`, `sfo3`, `ams3`).
+/// Strictly typed region identifier for `DigitalOcean` (e.g. `nyc3`, `sfo3`, `ams3`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DropletRegion(pub String);
 
@@ -33,7 +33,7 @@ impl Default for DropletRegion {
     }
 }
 
-/// Strictly typed size identifier for DigitalOcean (e.g. `s-1vcpu-1gb`).
+/// Strictly typed size identifier for `DigitalOcean` (e.g. `s-1vcpu-1gb`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DropletSize(pub String);
 
@@ -71,7 +71,7 @@ pub struct SnapshotConfig {
 pub struct DigitalOceanConfig {
     /// Name of the builder instance.
     pub name: String,
-    /// Personal access token for the DigitalOcean API.
+    /// Personal access token for the `DigitalOcean` API.
     pub api_token: Option<String>,
     /// Base image slug or image ID (e.g. `ubuntu-22-04-x64`).
     pub image: Option<String>,
@@ -81,7 +81,7 @@ pub struct DigitalOceanConfig {
     pub size: Option<DropletSize>,
     /// SSH username for communicating with the Droplet. Defaults to `root`.
     pub ssh_username: Option<String>,
-    /// Optional SSH key name if pre-existing in DigitalOcean account.
+    /// Optional SSH key name if pre-existing in `DigitalOcean` account.
     pub ssh_key_name: Option<String>,
     /// Optional private key file path for SSH authentication.
     pub ssh_private_key_file: Option<FilePath>,
@@ -121,7 +121,7 @@ impl DigitalOceanConfig {
     }
 }
 
-/// Retrieve the effective DigitalOcean API token.
+/// Retrieve the effective `DigitalOcean` API token.
 ///
 /// # Errors
 ///
@@ -165,7 +165,7 @@ impl DigitalOceanBuilder {
     }
 }
 
-/// Step to register a temporary SSH key with DigitalOcean.
+/// Step to register a temporary SSH key with `DigitalOcean`.
 #[derive(Debug, Clone)]
 struct StepCreateSshKey {
     /// UI logger.
@@ -272,7 +272,7 @@ impl Step for StepCreateSshKey {
     }
 }
 
-/// Step to launch the temporary Droplet in DigitalOcean.
+/// Step to launch the temporary Droplet in `DigitalOcean`.
 #[derive(Debug, Clone)]
 struct StepCreateDroplet {
     /// UI logger.
@@ -561,7 +561,7 @@ impl Step for StepSnapshotDroplet {
 
         if cfg!(test) {
             state.put("snapshot_image_id", 99999u64);
-            state.put("artifact_id", format!("do-snapshot-{}", snap_name));
+            state.put("artifact_id", format!("do-snapshot-{snap_name}"));
             return Ok(StepAction::Continue);
         }
 
@@ -635,7 +635,7 @@ impl Step for StepSnapshotDroplet {
         self.ui
             .say(&self.name, &format!("Snapshot completed: ID {image_id}"));
         state.put("snapshot_image_id", image_id);
-        state.put("artifact_id", format!("do-snapshot-{}", image_id));
+        state.put("artifact_id", format!("do-snapshot-{image_id}"));
 
         Ok(StepAction::Continue)
     }

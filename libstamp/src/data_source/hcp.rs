@@ -67,8 +67,7 @@ async fn hcp_client() -> Result<reqwest::Client, StampError> {
     let mut headers = reqwest::header::HeaderMap::new();
     let client_id = std::env::var("HCP_CLIENT_ID").unwrap_or_default();
     let client_secret = std::env::var("HCP_CLIENT_SECRET")
-        .map(SecretString::new)
-        .unwrap_or_else(|_| SecretString::new(String::new()));
+        .map_or_else(|_| SecretString::new(String::new()), SecretString::new);
 
     if !cfg!(test) {
         if client_id.is_empty() || client_secret.expose_secret().is_empty() {
@@ -188,8 +187,7 @@ impl super::DataSource for HcpPackerIterationDataSource {
         let is_revoked = json["revoked"].as_bool().unwrap_or(false)
             || json["status"]
                 .as_str()
-                .map(|s| s.eq_ignore_ascii_case("revoked"))
-                .unwrap_or(false)
+                .is_some_and(|s| s.eq_ignore_ascii_case("revoked"))
             || json.get("revoked_at").is_some();
 
         if is_revoked && !self.config.allow_revoked {
@@ -318,8 +316,7 @@ impl super::DataSource for HcpPackerImageDataSource {
         let is_revoked = json["revoked"].as_bool().unwrap_or(false)
             || json["status"]
                 .as_str()
-                .map(|s| s.eq_ignore_ascii_case("revoked"))
-                .unwrap_or(false)
+                .is_some_and(|s| s.eq_ignore_ascii_case("revoked"))
             || json.get("revoked_at").is_some();
 
         if is_revoked && !self.config.allow_revoked {

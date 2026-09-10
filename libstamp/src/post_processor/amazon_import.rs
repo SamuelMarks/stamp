@@ -38,7 +38,7 @@ impl AmazonImportPostProcessor {
         Self { config }
     }
 
-    /// Polls the EC2 ImportImage task until it completes, returning the imported AMI ID.
+    /// Polls the EC2 `ImportImage` task until it completes, returning the imported AMI ID.
     async fn poll_import_task(cmd_name: &str, task_id: &str) -> Result<String, StampError> {
         if cfg!(test) {
             return Ok("ami-0123456789abcdef0".to_string());

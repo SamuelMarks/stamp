@@ -132,7 +132,7 @@ impl OpaEvaluator {
 
         // 1. Evaluate inline policy if provided
         if let Some(inline) = &self.config.inline_policy {
-            self.evaluate_rego_source("inline.rego", inline, input, &mut violations)?;
+            Self::evaluate_rego_source("inline.rego", inline, input, &mut violations);
         }
 
         // 2. Evaluate policy files
@@ -201,7 +201,8 @@ impl OpaEvaluator {
         }
 
         // Native built-in Rego compliance engine
-        self.evaluate_rego_source(&path.display().to_string(), &content, input, violations)
+        Self::evaluate_rego_source(&path.display().to_string(), &content, input, violations);
+        Ok(())
     }
 
     /// Evaluates Rego policy using the external `opa` binary.
@@ -279,12 +280,11 @@ impl OpaEvaluator {
 
     /// Evaluates Rego source code rules using Stamp's embedded rule engine.
     fn evaluate_rego_source(
-        &self,
         policy_name: &str,
         source: &str,
         input: &serde_json::Value,
         violations: &mut Vec<OpaViolation>,
-    ) -> Result<(), StampError> {
+    ) {
         let lines: Vec<&str> = source.lines().map(str::trim).collect();
 
         // Helper to extract attribute whether flattened or nested in "config"
@@ -310,7 +310,7 @@ impl OpaEvaluator {
                 let rule_block = lines[idx..]
                     .iter()
                     .take(20)
-                    .cloned()
+                    .copied()
                     .collect::<Vec<_>>()
                     .join("\n");
 
@@ -427,8 +427,6 @@ impl OpaEvaluator {
                 });
             }
         }
-
-        Ok(())
     }
 }
 

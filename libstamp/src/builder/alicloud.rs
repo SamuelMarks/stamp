@@ -77,8 +77,9 @@ pub fn alicloud_sign(params: &BTreeMap<String, String>, method: &str, secret_key
     let key = format!("{secret_key}&");
     let mut mac = Hmac::<Sha1>::new_from_slice(key.as_bytes()).unwrap_or_else(|_| {
         let empty = [0u8; 0];
-        Hmac::<Sha1>::new_from_slice(&empty)
-            .unwrap_or_else(|_| Hmac::<Sha1>::new(&Default::default()))
+        Hmac::<Sha1>::new_from_slice(&empty).unwrap_or_else(|_| {
+            Hmac::<Sha1>::new(&hmac::digest::generic_array::GenericArray::default())
+        })
     });
     mac.update(string_to_sign.as_bytes());
     let result = mac.finalize();

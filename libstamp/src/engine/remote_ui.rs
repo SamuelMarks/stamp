@@ -2,7 +2,7 @@
 //! Remote UI gRPC service and client adapter.
 //!
 //! Provides bidirectional streaming and remote invocation of `Ui` events
-//! (say, message, error, ask, stream_events) between Stamp and out-of-process plugins.
+//! (say, message, error, ask, `stream_events`) between Stamp and out-of-process plugins.
 
 use crate::engine::ui::Ui;
 use crate::error::StampError;

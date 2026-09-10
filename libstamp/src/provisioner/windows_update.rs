@@ -5,6 +5,7 @@ use crate::error::StampError;
 use crate::provisioner::Provisioner;
 use crate::types::Timeout;
 use async_trait::async_trait;
+use std::fmt::Write as _;
 use std::time::Duration;
 
 /// Configuration for the `windows-update` provisioner.
@@ -63,7 +64,7 @@ impl WindowsUpdateProvisioner {
 
         let mut script = String::new();
         script.push_str("$ErrorActionPreference = 'Stop';\n");
-        script.push_str(&format!("$criteria = '{criteria}';\n"));
+        let _ = writeln!(script, "$criteria = '{criteria}';");
         script.push_str("$session = New-Object -ComObject Microsoft.Update.Session;\n");
         script.push_str("$searcher = $session.CreateUpdateSearcher();\n");
         script.push_str("Write-Output 'Searching for Windows updates...';\n");
@@ -77,10 +78,7 @@ impl WindowsUpdateProvisioner {
                 .map(|c| format!("'{c}'"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            script.push_str(&format!(
-                "$allowedCats = @({cat_array});
-"
-            ));
+            let _ = writeln!(script, "$allowedCats = @({cat_array});");
         } else {
             script.push_str(
                 "$allowedCats = $null;
@@ -94,10 +92,7 @@ impl WindowsUpdateProvisioner {
                 .map(|s| format!("'{s}'"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            script.push_str(&format!(
-                "$allowedSevs = @({sev_array});
-"
-            ));
+            let _ = writeln!(script, "$allowedSevs = @({sev_array});");
         } else {
             script.push_str(
                 "$allowedSevs = $null;
@@ -109,10 +104,7 @@ impl WindowsUpdateProvisioner {
             .config
             .update_limit
             .map_or_else(|| "$null".to_string(), |l| l.to_string());
-        script.push_str(&format!(
-            "$limit = {limit_str};
-"
-        ));
+        let _ = writeln!(script, "$limit = {limit_str};");
 
         script.push_str(
             r#"foreach ($u in $searchResult.Updates) {

@@ -67,6 +67,9 @@ impl OpenstackBuilder {
 }
 
 /// Helper function to create an authenticated HTTP client with an `X-Auth-Token` header.
+///
+/// # Errors
+/// Returns `StampError::Execution` if the token header or HTTP client cannot be constructed.
 pub fn openstack_client(token: &str) -> Result<reqwest::Client, StampError> {
     let mut headers = reqwest::header::HeaderMap::new();
     let auth_value = reqwest::header::HeaderValue::from_str(token)

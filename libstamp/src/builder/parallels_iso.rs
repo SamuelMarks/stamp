@@ -11,7 +11,6 @@ pub struct ParallelsIsoConfig {
     pub name: String,
 
     /// Overrides the command for testing purposes.
-    #[cfg(test)]
     pub test_cmd: Option<String>,
 }
 

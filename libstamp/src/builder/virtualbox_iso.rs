@@ -1,5 +1,5 @@
 #![cfg(not(tarpaulin_include))]
-//! Implementation of the `virtualbox-iso` builder with VBoxManage driver,
+//! Implementation of the `virtualbox-iso` builder with `VBoxManage` driver,
 //! hardware configuration, Guest Additions mounting, scancode typing, and OVA/OVF export.
 
 use crate::builder::Builder;
@@ -180,8 +180,12 @@ pub fn boot_action_to_vbox_scancodes(
             0xFFC8 => &["57", "d7"], // F11
             0xFFC9 => &["58", "d8"], // F12
             other => {
-                if other <= 0x7F {
-                    char_to_vbox_scancodes((other as u8) as char)
+                if let Ok(b) = u8::try_from(other) {
+                    if b <= 0x7F {
+                        char_to_vbox_scancodes(b as char)
+                    } else {
+                        &[]
+                    }
                 } else {
                     &[]
                 }
@@ -453,7 +457,7 @@ impl Step for StepCreateVM {
     }
 }
 
-/// Step to run the VirtualBox VM and execute boot commands via scancodes.
+/// Step to run the `VirtualBox` VM and execute boot commands via scancodes.
 #[derive(Debug, Clone)]
 struct StepRunVM {
     /// UI reference for terminal output.
@@ -484,19 +488,15 @@ impl Step for StepRunVM {
             let actions =
                 crate::builder::virtualization::BootCommandParser::parse(cmds, None, None, None);
             for action in &actions {
-                match action {
-                    crate::builder::virtualization::BootAction::Wait(d) => {
-                        tokio::time::sleep(*d).await;
-                    }
-                    _ => {
-                        let scancodes = boot_action_to_vbox_scancodes(action);
-                        if !scancodes.is_empty() {
-                            let mut args =
-                                vec!["controlvm", vm_name.as_str(), "keyboardputscancode"];
-                            args.extend(scancodes);
-                            let _ = vboxmanage(&args).await;
-                            tokio::time::sleep(Duration::from_millis(50)).await;
-                        }
+                if let crate::builder::virtualization::BootAction::Wait(d) = action {
+                    tokio::time::sleep(*d).await;
+                } else {
+                    let scancodes = boot_action_to_vbox_scancodes(action);
+                    if !scancodes.is_empty() {
+                        let mut args = vec!["controlvm", vm_name.as_str(), "keyboardputscancode"];
+                        args.extend(scancodes);
+                        let _ = vboxmanage(&args).await;
+                        tokio::time::sleep(Duration::from_millis(50)).await;
                     }
                 }
             }

@@ -22,11 +22,9 @@ pub struct TelemetryConfig {
 impl Default for TelemetryConfig {
     fn default() -> Self {
         let checkpoint_disabled = std::env::var("CHECKPOINT_DISABLE")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
         let telemetry_disabled = std::env::var("PACKER_TELEMETRY")
-            .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
-            .unwrap_or(false);
+            .is_ok_and(|v| v == "0" || v.eq_ignore_ascii_case("false"));
 
         Self {
             enabled: !checkpoint_disabled && !telemetry_disabled,
@@ -68,6 +66,13 @@ pub struct Client {
     config: TelemetryConfig,
     /// HTTP client used to perform outbound requests.
     http: reqwest::Client,
+}
+
+/// Checkpoint API response payload.
+#[derive(Deserialize)]
+struct CheckpointResponse {
+    /// Upstream version string.
+    current_version: String,
 }
 
 impl Client {
@@ -116,16 +121,10 @@ impl Client {
         current_version: &str,
     ) -> Result<Option<Version>, StampError> {
         let current = Version::parse(current_version)
-            .map_err(|e| StampError::Telemetry(format!("Invalid current version: {}", e)))?;
+            .map_err(|e| StampError::Telemetry(format!("Invalid current version: {e}")))?;
 
         if !self.config.enabled {
             return Ok(None);
-        }
-
-        // Mocking the checkpoint response format for now, just to show strongly-typed parsing.
-        #[derive(Deserialize)]
-        struct CheckpointResponse {
-            current_version: String,
         }
 
         // We check the specific checkpoint endpoint
@@ -155,7 +154,7 @@ impl Client {
             .await
             .map_err(|e| StampError::Telemetry(e.to_string()))?;
         let latest = Version::parse(&body.current_version)
-            .map_err(|e| StampError::Telemetry(format!("Invalid upstream version: {}", e)))?;
+            .map_err(|e| StampError::Telemetry(format!("Invalid upstream version: {e}")))?;
 
         if latest > current {
             Ok(Some(latest))
@@ -257,8 +256,14 @@ pub async fn check_for_updates(current_version: &str) -> Result<Option<Version>,
 mod tests {
     use super::*;
 
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_telemetry_config_default() {
+        let _guard = match ENV_MUTEX.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
         unsafe {
             std::env::set_var("PACKER_TELEMETRY", "0");
         }
@@ -446,6 +451,10 @@ mod tests {
 
     #[test]
     fn test_checkpoint_disable_env() {
+        let _guard = match ENV_MUTEX.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
         unsafe {
             std::env::set_var("CHECKPOINT_DISABLE", "1");
         }
@@ -482,12 +491,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_for_updates_disabled() {
+        let _guard = match ENV_MUTEX.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
         unsafe {
             std::env::set_var("CHECKPOINT_DISABLE", "1");
         }
         let res = check_for_updates("0.0.1").await;
         assert!(res.is_ok());
-        assert_eq!(res.unwrap(), None);
+        if let Ok(update_opt) = res {
+            assert_eq!(update_opt, None);
+        }
         unsafe {
             std::env::remove_var("CHECKPOINT_DISABLE");
         }

@@ -1,6 +1,6 @@
-//! Implementation of the VMware vSphere ISO (`vsphere-iso`) and Clone (`vsphere-clone`) builders.
+//! Implementation of the `VMware` vSphere ISO (`vsphere-iso`) and Clone (`vsphere-clone`) builders.
 //!
-//! Provides a full vSphere REST and SOAP (govmomi parity) client abstraction for vCenter and ESXi,
+//! Provides a full vSphere REST and SOAP (govmomi parity) client abstraction for vCenter and `ESXi`,
 //! supporting datacenter/cluster discovery, datastore file uploads, virtual hardware specifications,
 //! network adapter bindings, VM power lifecycles, template conversions, linked clones, and Storage vMotion.
 
@@ -19,14 +19,14 @@ use std::time::Duration;
 /// Supported virtual disk controllers in vSphere.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum VsphereDiskController {
-    /// VMware Paravirtual SCSI controller (PVSCSI).
+    /// `VMware` Paravirtual SCSI controller (PVSCSI).
     #[default]
     Pvscsi,
     /// LSI Logic Parallel or SAS controller.
     LsiLogic,
     /// Serial ATA (SATA) AHCI controller.
     Sata,
-    /// Non-Volatile Memory Express (NVMe) controller.
+    /// Non-Volatile Memory Express (`NVMe`) controller.
     Nvme,
 }
 
@@ -109,10 +109,10 @@ pub struct VsphereHardwareConfig {
     pub network: Option<String>,
 }
 
-/// Full vSphere REST and SOAP client communicating with vCenter or ESXi.
+/// Full vSphere REST and SOAP client communicating with vCenter or `ESXi`.
 #[derive(Debug, Clone)]
 pub struct VsphereClient {
-    /// vCenter or ESXi hostname or IP address.
+    /// vCenter or `ESXi` hostname or IP address.
     pub vcenter_server: String,
     /// Username for authentication.
     pub username: Option<String>,
@@ -120,6 +120,48 @@ pub struct VsphereClient {
     pub password: Option<String>,
     /// Whether to bypass TLS certificate verification.
     pub insecure_connection: bool,
+}
+
+/// Datacenter summary response.
+#[derive(Deserialize)]
+struct DatacenterSummary {
+    /// Datacenter identifier.
+    datacenter: String,
+}
+
+/// Cluster summary response.
+#[derive(Deserialize)]
+struct ClusterSummary {
+    /// Cluster identifier.
+    cluster: String,
+}
+
+/// Host summary response.
+#[derive(Deserialize)]
+struct HostSummary {
+    /// Host identifier.
+    host: String,
+}
+
+/// Datastore summary response.
+#[derive(Deserialize)]
+struct DatastoreSummary {
+    /// Datastore identifier.
+    datastore: String,
+}
+
+/// Guest IP item.
+#[derive(Deserialize)]
+struct GuestIp {
+    /// Assigned IP address.
+    ip_address: String,
+}
+
+/// Guest networking configuration response.
+#[derive(Deserialize)]
+struct GuestNetworking {
+    /// List of IP addresses.
+    ip_addresses: Option<Vec<GuestIp>>,
 }
 
 impl VsphereClient {
@@ -219,11 +261,6 @@ impl VsphereClient {
             )));
         }
 
-        #[derive(Deserialize)]
-        struct DatacenterSummary {
-            datacenter: String,
-        }
-
         let dcs: Vec<DatacenterSummary> = resp
             .json()
             .await
@@ -267,10 +304,6 @@ impl VsphereClient {
                 .await
                 .map_err(|e| StampError::Execution(format!("Cluster discovery failed: {e}")))?;
 
-            #[derive(Deserialize)]
-            struct ClusterSummary {
-                cluster: String,
-            }
             if let Ok(clusters) = resp.json::<Vec<ClusterSummary>>().await
                 && let Some(c) = clusters.into_iter().next()
             {
@@ -290,10 +323,6 @@ impl VsphereClient {
                 .await
                 .map_err(|e| StampError::Execution(format!("Host discovery failed: {e}")))?;
 
-            #[derive(Deserialize)]
-            struct HostSummary {
-                host: String,
-            }
             if let Ok(hosts) = resp.json::<Vec<HostSummary>>().await
                 && let Some(h) = hosts.into_iter().next()
             {
@@ -334,11 +363,6 @@ impl VsphereClient {
             .send()
             .await
             .map_err(|e| StampError::Execution(format!("Datastore discovery failed: {e}")))?;
-
-        #[derive(Deserialize)]
-        struct DatastoreSummary {
-            datastore: String,
-        }
 
         let dss: Vec<DatastoreSummary> = resp
             .json()
@@ -550,7 +574,7 @@ impl VsphereClient {
         Ok(())
     }
 
-    /// Discover or wait for guest IP via VMware Tools guest networking info.
+    /// Discover or wait for guest IP via `VMware` Tools guest networking info.
     ///
     /// # Errors
     ///
@@ -574,16 +598,6 @@ impl VsphereClient {
             "https://{}/api/vcenter/vm/{vm_id}/guest/networking",
             self.vcenter_server
         );
-
-        #[derive(Deserialize)]
-        struct GuestNetworking {
-            ip_addresses: Option<Vec<GuestIp>>,
-        }
-
-        #[derive(Deserialize)]
-        struct GuestIp {
-            ip_address: String,
-        }
 
         // Poll up to 60 iterations
         for _ in 0..60 {
@@ -724,7 +738,7 @@ impl VsphereClient {
 pub struct VsphereIsoConfig {
     /// Name of the builder.
     pub name: String,
-    /// vCenter or ESXi hostname / IP address.
+    /// vCenter or `ESXi` hostname / IP address.
     pub vcenter_server: Option<String>,
     /// Username for vCenter/ESXi authentication.
     pub username: Option<String>,
@@ -736,7 +750,7 @@ pub struct VsphereIsoConfig {
     pub datacenter: Option<String>,
     /// Target cluster name.
     pub cluster: Option<String>,
-    /// Target ESXi host name.
+    /// Target `ESXi` host name.
     pub host: Option<String>,
     /// Target datastore name.
     pub datastore: Option<String>,
@@ -783,7 +797,7 @@ impl VsphereIsoBuilder {
     }
 }
 
-/// Step to connect and authenticate against VMware vSphere.
+/// Step to connect and authenticate against `VMware` vSphere.
 #[derive(Debug, Clone)]
 struct StepConnectVsphere {
     /// UI reference for terminal output.
@@ -812,11 +826,11 @@ impl Step for StepConnectVsphere {
         let token = self.client.login().await?;
         state.put("vsphere_token", token.clone());
 
-        let dc_id = self
+        let datacenter_id = self
             .client
             .discover_datacenter(&token, self.datacenter.as_deref())
             .await?;
-        state.put("datacenter_id", dc_id.clone());
+        state.put("datacenter_id", datacenter_id.clone());
 
         let compute_id = self
             .client
@@ -824,11 +838,11 @@ impl Step for StepConnectVsphere {
             .await?;
         state.put("compute_id", compute_id);
 
-        let ds_id = self
+        let datastore_id = self
             .client
             .discover_datastore(&token, self.datastore.as_deref())
             .await?;
-        state.put("datastore_id", ds_id);
+        state.put("datastore_id", datastore_id);
 
         Ok(StepAction::Continue)
     }
@@ -878,10 +892,10 @@ impl Step for StepUploadMedia {
 
         for file in &self.floppy_files {
             let path = Path::new(file);
-            let file_name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "floppy.img".to_string());
+            let file_name = path.file_name().map_or_else(
+                || "floppy.img".to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            );
             let remote_path = format!("stamp-uploads/{file_name}");
             let _ = self
                 .client
@@ -1235,7 +1249,7 @@ impl Builder for VsphereIsoBuilder {
 pub struct VsphereCloneConfig {
     /// Name of the builder.
     pub name: String,
-    /// vCenter or ESXi server hostname / IP address.
+    /// vCenter or `ESXi` server hostname / IP address.
     pub vcenter_server: Option<String>,
     /// Username for authentication.
     pub username: Option<String>,
