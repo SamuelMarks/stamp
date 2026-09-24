@@ -342,8 +342,73 @@ mod tests {
             .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
             .await;
         assert!(artifact.is_ok());
-        let art = artifact.unwrap();
+        assert!(artifact.is_ok());
+        let art = match artifact {
+            Ok(a) => a,
+            Err(e) => panic!("{e}"),
+        };
         assert_eq!(art.builder_id(), "tencentcloud.cvm");
         assert!(art.state("foo").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_tencentcloud_edge_cases() {
+        let ui = Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+
+        // StepCreateInstance cleanup (with and without instance_id)
+        let mut step_inst = StepCreateInstance {
+            ui: ui.clone(),
+            name: "test-tc".to_string(),
+            config: TencentCloudConfig::default(),
+        };
+        let mut state = StateBag::new();
+        step_inst.cleanup(&state).await;
+        state.put("instance_id", "ins-12345".to_string());
+        step_inst.cleanup(&state).await;
+
+        // StepProvision missing IP error & cleanup
+        let mut step_prov = StepProvision {
+            ui: ui.clone(),
+            name: "test-prov".to_string(),
+            config: TencentCloudConfig::default(),
+            hook: Arc::new(crate::engine::hook::DefaultProvisionHook {
+                provisioners: Arc::new(Vec::new()),
+                error_cleanup_provisioners: Arc::new(Vec::new()),
+            }),
+        };
+        let mut empty_state = StateBag::new();
+        assert!(step_prov.run(&mut empty_state).await.is_err());
+        step_prov.cleanup(&empty_state).await;
+
+        // StepCreateImage cleanup
+        let mut step_img = StepCreateImage {
+            ui: ui.clone(),
+            name: "test-img".to_string(),
+            config: TencentCloudConfig::default(),
+        };
+        step_img.cleanup(&empty_state).await;
+
+        // builder.name() when config.name is empty
+        let empty_b = TencentCloudBuilder::new(TencentCloudConfig::default());
+        assert_eq!(empty_b.name(), "tencentcloud-cvm");
+
+        // builder.run() with region: None
+        let b_no_reg = TencentCloudBuilder::new(TencentCloudConfig {
+            name: "tc-no-reg".to_string(),
+            region: None,
+            ..Default::default()
+        });
+        let hook = Arc::new(crate::engine::hook::DefaultProvisionHook {
+            provisioners: Arc::new(Vec::new()),
+            error_cleanup_provisioners: Arc::new(Vec::new()),
+        });
+        let res = b_no_reg
+            .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
+            .await;
+        assert!(res.is_ok());
     }
 }

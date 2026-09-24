@@ -193,16 +193,16 @@ impl Ui {
             return Ok(String::new());
         }
 
-        if cfg!(test) {
-            return Ok(String::new());
-        }
-
         let mut prefix = String::new();
         if !target.is_empty() {
             prefix = format!("==> {target}: ");
         }
         print!("{prefix}{message}");
         std::io::stdout().flush()?;
+
+        if cfg!(test) {
+            return Ok(String::new());
+        }
 
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
@@ -364,6 +364,9 @@ mod tests {
 
     #[test]
     fn test_scrubber() {
+        let scrubber_new = Scrubber::new();
+        assert_eq!(scrubber_new.scrub("clean"), "clean");
+
         let scrubber = Scrubber::default();
         scrubber.add("secret123".to_string());
         scrubber.add("".to_string()); // empty add test
@@ -411,6 +414,30 @@ mod tests {
 
         let res_empty = ui.ask("test", "Enter input 3: ").unwrap_or_default();
         assert_eq!(res_empty, "");
+
+        // ask with None mock_inputs in test mode (with and without target)
+        let ui_none = Ui::new(
+            FeatureState::Disabled,
+            FeatureState::Disabled,
+            FeatureState::Disabled,
+        );
+        let res_none = ui_none.ask("test", "No mock: ").unwrap_or_default();
+        assert_eq!(res_none, "");
+        let res_no_target = ui_none.ask("", "No target: ").unwrap_or_default();
+        assert_eq!(res_no_target, "");
+
+        // is_interactive without mock_inputs
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        unsafe {
+            std::env::set_var("CI", "true");
+        }
+        assert!(!ui_none.is_interactive());
+        unsafe {
+            std::env::remove_var("CI");
+        }
+        let _ = ui_none.is_interactive();
     }
 
     #[test]
@@ -438,9 +465,14 @@ mod tests {
 
     #[test]
     fn test_ui_tee_log() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
         let temp_log = std::env::temp_dir().join("test_ui_packer.log");
         unsafe {
             std::env::set_var("PACKER_LOG_PATH", temp_log.to_string_lossy().to_string());
+            std::env::set_var("PACKER_LOG", "1");
         }
 
         let ui = Ui::new(
@@ -453,12 +485,34 @@ mod tests {
 
         unsafe {
             std::env::remove_var("PACKER_LOG_PATH");
+            std::env::remove_var("PACKER_LOG");
         }
 
         let content = std::fs::read_to_string(&temp_log).unwrap_or_default();
         assert!(content.contains("builder-1: hello from log test"));
         assert!(content.contains("builder-1 [ERROR]: error from log test"));
         let _ = std::fs::remove_file(&temp_log);
+    }
+
+    #[test]
+    fn test_ui_tee_log_packer_log_only() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        unsafe {
+            std::env::remove_var("PACKER_LOG_PATH");
+            std::env::set_var("PACKER_LOG", "1");
+        }
+        let ui = Ui::new(
+            FeatureState::Disabled,
+            FeatureState::Disabled,
+            FeatureState::Disabled,
+        );
+        ui.say("builder-only", "packer log only");
+        unsafe {
+            std::env::remove_var("PACKER_LOG");
+        }
+        let _ = std::fs::remove_file("packer.log");
     }
 }
 
@@ -474,6 +528,16 @@ pub struct UiTargetWriter {
     is_error: bool,
     /// Internal buffering for incomplete lines.
     buffer: String,
+}
+
+impl std::fmt::Debug for UiTargetWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UiTargetWriter")
+            .field("target", &self.target)
+            .field("is_error", &self.is_error)
+            .field("buffer", &self.buffer)
+            .finish_non_exhaustive()
+    }
 }
 
 impl UiTargetWriter {
@@ -530,19 +594,40 @@ mod tests_writer {
     use super::*;
 
     #[test]
-    fn test_ui_target_writer() {
+    fn test_ui_target_writer() -> Result<(), std::io::Error> {
         let ui = Arc::new(Ui::new(
             FeatureState::Disabled,
             FeatureState::Disabled,
             FeatureState::Disabled,
         ));
         let mut writer = UiTargetWriter::new(ui.clone(), "target".to_string(), false);
-        let _ = writer.write(b"hello\nworld\n");
-        let _ = writer.write(b"no newline");
-        let _ = writer.flush();
+        let _ = writer.write(b"hello\nworld\n")?;
+        let _ = writer.write(b"no newline")?;
+        writer.flush()?;
+        let dbg = format!("{writer:?}");
+        assert!(dbg.contains("UiTargetWriter"));
 
-        let mut err_writer = UiTargetWriter::new(ui.clone(), "target".to_string(), true);
-        let _ = err_writer.write(b"error line\n");
+        let mut err_writer = UiTargetWriter::new(ui, "target".to_string(), true);
+        let _ = err_writer.write(b"error line\n")?;
+        let _ = err_writer.write(b"unterminated error")?;
+        err_writer.flush()?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ui_target_writer_async() -> Result<(), std::io::Error> {
+        use tokio::io::AsyncWriteExt;
+
+        let ui = Arc::new(Ui::new(
+            FeatureState::Disabled,
+            FeatureState::Disabled,
+            FeatureState::Disabled,
+        ));
+        let mut writer = UiTargetWriter::new(ui, "async_target".to_string(), false);
+        AsyncWriteExt::write_all(&mut writer, b"async write line\n").await?;
+        AsyncWriteExt::flush(&mut writer).await?;
+        AsyncWriteExt::shutdown(&mut writer).await?;
+        Ok(())
     }
 }
 
@@ -562,6 +647,17 @@ pub struct UiMultiplexer {
     color_index: AtomicUsize,
     /// Optional mock input queue for simulating user stdin in automated test environments.
     mock_inputs: Option<Arc<std::sync::Mutex<std::collections::VecDeque<String>>>>,
+}
+
+impl std::fmt::Debug for UiMultiplexer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UiMultiplexer")
+            .field("machine_readable", &self.machine_readable)
+            .field("color", &self.color)
+            .field("timestamp_ui", &self.timestamp_ui)
+            .field("color_index", &self.color_index.load(Ordering::SeqCst))
+            .finish_non_exhaustive()
+    }
 }
 
 impl UiMultiplexer {
@@ -624,6 +720,8 @@ mod tests_multiplexer {
             FeatureState::Disabled,
             None,
         );
+        let dbg = format!("{multi:?}");
+        assert!(dbg.contains("UiMultiplexer"));
 
         let ui1 = multi.get_ui();
         assert_eq!(ui1.color_code.as_deref(), Some("32"));
@@ -631,10 +729,26 @@ mod tests_multiplexer {
         let ui2 = multi.get_ui();
         assert_eq!(ui2.color_code.as_deref(), Some("36"));
 
+        let ui3 = multi.get_ui();
+        assert_eq!(ui3.color_code.as_deref(), Some("35"));
+
+        let ui4 = multi.get_ui();
+        assert_eq!(ui4.color_code.as_deref(), Some("33"));
+
+        let ui5 = multi.get_ui();
+        assert_eq!(ui5.color_code.as_deref(), Some("34"));
+
+        let ui6 = multi.get_ui();
+        assert_eq!(ui6.color_code.as_deref(), Some("31"));
+
+        // Wrap around to first color
+        let ui7 = multi.get_ui();
+        assert_eq!(ui7.color_code.as_deref(), Some("32"));
+
         let queue = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
         let multi_mock = multi.with_mock_inputs(queue);
-        let ui3 = multi_mock.get_ui();
-        assert!(ui3.mock_inputs.is_some());
+        let ui_mock = multi_mock.get_ui();
+        assert!(ui_mock.mock_inputs.is_some());
     }
 }
 

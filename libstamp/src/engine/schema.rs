@@ -228,8 +228,19 @@ pub struct RemoteSchemaServer {
     schemas: Arc<HashMap<String, PluginSchema>>,
 }
 
+impl std::fmt::Debug for RemoteSchemaServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteSchemaServer")
+            .field("schemas_count", &self.schemas.len())
+            .finish()
+    }
+}
+
 impl RemoteSchemaServer {
     /// Creates a new `RemoteSchemaServer` with the provided component schemas.
+    ///
+    /// # Arguments
+    /// * `schemas` - Map of component keys to `PluginSchema` definitions.
     #[must_use]
     pub fn new(schemas: HashMap<String, PluginSchema>) -> Self {
         Self {
@@ -280,6 +291,9 @@ pub struct RemoteSchemaClient {
 impl RemoteSchemaClient {
     /// Connects to a remote Schema gRPC server over TCP.
     ///
+    /// # Arguments
+    /// * `address` - Host:port or URL string to connect to.
+    ///
     /// # Errors
     /// Returns `StampError::Execution` if connection fails.
     pub async fn connect_tcp(address: &str) -> Result<Self, StampError> {
@@ -295,6 +309,10 @@ impl RemoteSchemaClient {
     }
 
     /// Fetches the schema for a component from the remote plugin.
+    ///
+    /// # Arguments
+    /// * `component_type` - Component type (e.g. "builder", "provisioner").
+    /// * `component_name` - Component name (e.g. "amazon-ebs").
     ///
     /// # Errors
     /// Returns `StampError` if the RPC fails or schema deserialization fails.
@@ -324,7 +342,6 @@ impl RemoteSchemaClient {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
     use hashicorp_configuration_language_rs::ast::expr::Expression;
@@ -337,57 +354,76 @@ mod tests {
             .add_field("sleep_delay", SchemaType::Int)
             .add_field("ratio", SchemaType::Float)
             .add_field("disable", SchemaType::Bool)
+            .add_field("active", SchemaType::Bool)
+            .add_field("paused", SchemaType::Bool)
+            .add_field("stopped", SchemaType::Bool)
             .add_field("name", SchemaType::String)
-            .add_field("tags", SchemaType::List);
+            .add_field("tags", SchemaType::List)
+            .add_field("meta", SchemaType::Map);
 
         let mut config = HashMap::new();
         config.insert("sleep_delay".to_string(), "5".to_string());
         config.insert("ratio".to_string(), "1.25".to_string());
         config.insert("disable".to_string(), "true".to_string());
+        config.insert("active".to_string(), "1".to_string());
+        config.insert("paused".to_string(), "false".to_string());
+        config.insert("stopped".to_string(), "0".to_string());
         config.insert("name".to_string(), "test".to_string());
         config.insert("tags".to_string(), "a,b".to_string());
+        config.insert("meta".to_string(), "k=v".to_string());
         config.insert("unknown".to_string(), "untyped".to_string());
 
         let result = schema.coerce(&config)?;
-        if let Some(val) = result.get("sleep_delay") {
-            if let ValueData::Number(ref num) = *val.data {
-                assert_eq!(num.to_string(), "5");
-            } else {
-                panic!("Expected number");
-            }
-        } else {
-            panic!("Missing sleep_delay");
-        }
 
-        if let Some(val) = result.get("disable") {
-            if let ValueData::Bool(b) = *val.data {
-                assert!(b);
-            } else {
-                panic!("Expected bool");
-            }
-        } else {
-            panic!("Missing disable");
-        }
+        let val_sleep = result
+            .get("sleep_delay")
+            .ok_or_else(|| StampError::Validation("missing sleep_delay".to_string()))?;
+        assert!(matches!(&*val_sleep.data, ValueData::Number(num) if num.to_string() == "5"));
 
-        if let Some(val) = result.get("name") {
-            if let ValueData::String(ref s) = *val.data {
-                assert_eq!(s, "test");
-            } else {
-                panic!("Expected string");
-            }
-        } else {
-            panic!("Missing name");
-        }
+        let val_ratio = result
+            .get("ratio")
+            .ok_or_else(|| StampError::Validation("missing ratio".to_string()))?;
+        assert!(matches!(&*val_ratio.data, ValueData::Number(_)));
 
-        if let Some(val) = result.get("unknown") {
-            if let ValueData::String(ref s) = *val.data {
-                assert_eq!(s, "untyped");
-            } else {
-                panic!("Expected string");
-            }
-        } else {
-            panic!("Missing unknown");
-        }
+        let val_disable = result
+            .get("disable")
+            .ok_or_else(|| StampError::Validation("missing disable".to_string()))?;
+        assert_eq!(*val_disable.data, ValueData::Bool(true));
+
+        let val_active = result
+            .get("active")
+            .ok_or_else(|| StampError::Validation("missing active".to_string()))?;
+        assert_eq!(*val_active.data, ValueData::Bool(true));
+
+        let val_paused = result
+            .get("paused")
+            .ok_or_else(|| StampError::Validation("missing paused".to_string()))?;
+        assert_eq!(*val_paused.data, ValueData::Bool(false));
+
+        let val_stopped = result
+            .get("stopped")
+            .ok_or_else(|| StampError::Validation("missing stopped".to_string()))?;
+        assert_eq!(*val_stopped.data, ValueData::Bool(false));
+
+        let val_name = result
+            .get("name")
+            .ok_or_else(|| StampError::Validation("missing name".to_string()))?;
+        assert_eq!(*val_name.data, ValueData::String("test".to_string()));
+
+        let val_tags = result
+            .get("tags")
+            .ok_or_else(|| StampError::Validation("missing tags".to_string()))?;
+        assert_eq!(*val_tags.data, ValueData::String("a,b".to_string()));
+
+        let val_meta = result
+            .get("meta")
+            .ok_or_else(|| StampError::Validation("missing meta".to_string()))?;
+        assert_eq!(*val_meta.data, ValueData::String("k=v".to_string()));
+
+        let val_unknown = result
+            .get("unknown")
+            .ok_or_else(|| StampError::Validation("missing unknown".to_string()))?;
+        assert_eq!(*val_unknown.data, ValueData::String("untyped".to_string()));
 
         Ok(())
     }
@@ -397,8 +433,8 @@ mod tests {
         let schema = PluginSchema::new().add_field("sleep_delay", SchemaType::Int);
         let mut config = HashMap::new();
         config.insert("sleep_delay".to_string(), "not_an_int".to_string());
-        let err = schema.coerce(&config).unwrap_err();
-        assert!(matches!(err, StampError::Validation(_)));
+        let err = schema.coerce(&config);
+        assert!(matches!(err, Err(StampError::Validation(_))));
     }
 
     #[test]
@@ -406,8 +442,8 @@ mod tests {
         let schema = PluginSchema::new().add_field("disable", SchemaType::Bool);
         let mut config = HashMap::new();
         config.insert("disable".to_string(), "not_a_bool".to_string());
-        let err = schema.coerce(&config).unwrap_err();
-        assert!(matches!(err, StampError::Validation(_)));
+        let err = schema.coerce(&config);
+        assert!(matches!(err, Err(StampError::Validation(_))));
     }
 
     #[test]
@@ -415,12 +451,12 @@ mod tests {
         let schema = PluginSchema::new().add_field("rate", SchemaType::Float);
         let mut config = HashMap::new();
         config.insert("rate".to_string(), "invalid_float".to_string());
-        let err = schema.coerce(&config).unwrap_err();
-        assert!(matches!(err, StampError::Validation(_)));
+        let err = schema.coerce(&config);
+        assert!(matches!(err, Err(StampError::Validation(_))));
     }
 
     #[test]
-    fn test_schema_json_roundtrip_and_validation() {
+    fn test_schema_json_roundtrip_and_validation() -> Result<(), Box<dyn std::error::Error>> {
         let attr = SchemaAttribute::new("ami_id", SchemaType::String)
             .required()
             .with_description("Target AMI")
@@ -430,8 +466,8 @@ mod tests {
             .add_attribute(attr)
             .add_field("region", SchemaType::String);
 
-        let json = schema.to_json().unwrap();
-        let decoded = PluginSchema::from_json(&json).unwrap();
+        let json = schema.to_json()?;
+        let decoded = PluginSchema::from_json(&json)?;
         assert_eq!(decoded.attributes.len(), 2);
         assert!(decoded.attributes["ami_id"].required);
 
@@ -439,6 +475,10 @@ mod tests {
         let span = Span::default();
         let empty_body = Body::new(span.clone());
         assert!(decoded.validate_body(&empty_body).is_err());
+
+        // Test validate_body on empty schema (no attributes)
+        let empty_schema = PluginSchema::new();
+        assert!(empty_schema.validate_body(&empty_body).is_ok());
 
         // Test validate_body success
         let mut valid_body = Body::new(span.clone());
@@ -462,10 +502,16 @@ mod tests {
             ),
         );
         assert!(decoded.validate_body(&valid_body).is_err());
+
+        // Invalid JSON deserialization
+        assert!(PluginSchema::from_json("not-valid-json").is_err());
+
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_remote_schema_server_and_client_roundtrip() {
+    async fn test_remote_schema_server_and_client_roundtrip()
+    -> Result<(), Box<dyn std::error::Error>> {
         use crate::r#gen::packer::schema_server::SchemaServer;
         use tokio_stream::wrappers::TcpListenerStream;
 
@@ -475,27 +521,36 @@ mod tests {
             .add_attribute(SchemaAttribute::new("region", SchemaType::String).required());
         schemas.insert("builder.amazon-ebs".to_string(), test_schema);
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        let server = RemoteSchemaServer::new(schemas);
+        let server_dbg = format!("{server:?}");
+        assert!(server_dbg.contains("RemoteSchemaServer"));
+        let server_clone = server.clone();
+        assert!(format!("{server_clone:?}").contains("RemoteSchemaServer"));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
         let incoming = TcpListenerStream::new(listener);
 
-        let server = RemoteSchemaServer::new(schemas);
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-        tokio::spawn(async move {
-            tonic::transport::Server::builder()
+        let server_handle = tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
                 .add_service(SchemaServer::new(server))
                 .serve_with_incoming_shutdown(incoming, async {
                     let _ = shutdown_rx.await;
                 })
-                .await
-                .unwrap();
+                .await;
         });
 
-        let mut client = RemoteSchemaClient::connect_tcp(&addr.to_string())
-            .await
-            .unwrap();
-        let fetched = client.get_schema("builder", "amazon-ebs").await.unwrap();
+        // Connection failure
+        assert!(
+            RemoteSchemaClient::connect_tcp("127.0.0.1:1")
+                .await
+                .is_err()
+        );
+
+        let mut client = RemoteSchemaClient::connect_tcp(&addr.to_string()).await?;
+        let fetched = client.get_schema("builder", "amazon-ebs").await?;
         assert!(fetched.attributes.contains_key("region"));
         assert!(fetched.attributes["region"].required);
 
@@ -504,20 +559,17 @@ mod tests {
         assert!(err.is_err());
 
         // Connect with http:// prefix
-        let mut client_http = RemoteSchemaClient::connect_tcp(&format!("http://{addr}"))
-            .await
-            .unwrap();
-        let fetched2 = client_http
-            .get_schema("builder", "amazon-ebs")
-            .await
-            .unwrap();
+        let mut client_http = RemoteSchemaClient::connect_tcp(&format!("http://{addr}")).await?;
+        let fetched2 = client_http.get_schema("builder", "amazon-ebs").await?;
         assert!(fetched2.attributes.contains_key("region"));
 
         let _ = shutdown_tx.send(());
+        let _ = server_handle.await;
+        Ok(())
     }
 
     #[test]
-    fn test_schema_types_and_coerce_invalid_int() {
+    fn test_schema_types() {
         let types = vec![
             SchemaType::String,
             SchemaType::Bool,
@@ -531,11 +583,5 @@ mod tests {
             assert_eq!(t, cloned);
             assert!(!format!("{t:?}").is_empty());
         }
-
-        let schema = PluginSchema::new().add_field("count", SchemaType::Int);
-        let mut config = HashMap::new();
-        config.insert("count".to_string(), "not_an_int".to_string());
-        let err = schema.coerce(&config).unwrap_err();
-        assert!(matches!(err, StampError::Validation(_)));
     }
 }

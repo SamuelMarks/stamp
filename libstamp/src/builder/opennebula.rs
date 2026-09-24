@@ -73,10 +73,6 @@ impl OpenNebulaClient {
         template_id: u32,
         vm_name: &str,
     ) -> Result<u32, StampError> {
-        if cfg!(test) {
-            return Ok(1001);
-        }
-
         let client = reqwest::Client::new();
         let xml_body = format!(
             r#"<?xml version="1.0"?>
@@ -120,10 +116,6 @@ impl OpenNebulaClient {
     ///
     /// Returns `StampError::Execution` if power off fails.
     pub async fn poweroff_vm(&self, vm_id: u32) -> Result<(), StampError> {
-        if cfg!(test) {
-            return Ok(());
-        }
-
         let client = reqwest::Client::new();
         let xml_body = format!(
             r#"<?xml version="1.0"?>
@@ -158,10 +150,6 @@ impl OpenNebulaClient {
         disk_id: u32,
         image_name: &str,
     ) -> Result<u32, StampError> {
-        if cfg!(test) {
-            return Ok(2002);
-        }
-
         let client = reqwest::Client::new();
         let xml_body = format!(
             r#"<?xml version="1.0"?>
@@ -203,10 +191,6 @@ impl OpenNebulaClient {
     ///
     /// Returns `StampError::Execution` if termination fails.
     pub async fn terminate_vm(&self, vm_id: u32) -> Result<(), StampError> {
-        if cfg!(test) {
-            return Ok(());
-        }
-
         let client = reqwest::Client::new();
         let xml_body = format!(
             r#"<?xml version="1.0"?>
@@ -475,7 +459,7 @@ impl Builder for OpenNebulaBuilder {
         let artifact_id = state
             .get::<String>("artifact_id")
             .cloned()
-            .unwrap_or_else(|| format!("opennebula:{}", self.name()));
+            .unwrap_or_default();
 
         Ok(Box::new(crate::artifact::MockArtifact {
             builder_id: self.name(),
@@ -490,9 +474,27 @@ impl Builder for OpenNebulaBuilder {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[allow(
+    clippy::unwrap_used,
+    clippy::pedantic,
+    clippy::all,
+    for_loops_over_fallibles
+)]
 mod tests {
     use super::*;
+
+    struct FailingProvisioner;
+    #[async_trait]
+    impl crate::provisioner::Provisioner for FailingProvisioner {
+        async fn provision(
+            &self,
+            _comm: &dyn crate::communicator::Communicator,
+            _ui: Arc<crate::engine::ui::Ui>,
+        ) -> Result<(), StampError> {
+            Err(StampError::Execution("mock provision failure".to_string()))
+        }
+    }
 
     #[test]
     fn test_opennebula_name() {
@@ -530,31 +532,166 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_opennebula_client_mocked() -> Result<(), StampError> {
+    async fn test_opennebula_client_mocked() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _m_inst = server
+            .mock("POST", "/RPC2")
+            .match_header("content-type", "text/xml")
+            .match_body(mockito::Matcher::Regex(
+                r"one\.template\.instantiate".to_string(),
+            ))
+            .with_status(200)
+            .with_body(
+                r#"<?xml version="1.0"?><methodResponse><params><param><value><array><data><value><boolean>1</boolean></value><value><int>1001</int></value></data></array></value></param></params></methodResponse>"#,
+            )
+            .create_async()
+            .await;
+
+        let _m_poweroff = server
+            .mock("POST", "/RPC2")
+            .match_header("content-type", "text/xml")
+            .match_body(mockito::Matcher::Regex("poweroff".to_string()))
+            .with_status(200)
+            .with_body(
+                r#"<?xml version="1.0"?><methodResponse><params><param><value><boolean>1</boolean></value></param></params></methodResponse>"#,
+            )
+            .create_async()
+            .await;
+
+        let _m_save = server
+            .mock("POST", "/RPC2")
+            .match_header("content-type", "text/xml")
+            .match_body(mockito::Matcher::Regex(r"one\.vm\.disksaveas".to_string()))
+            .with_status(200)
+            .with_body(
+                r#"<?xml version="1.0"?><methodResponse><params><param><value><array><data><value><boolean>1</boolean></value><value><int>2002</int></value></data></array></value></param></params></methodResponse>"#,
+            )
+            .create_async()
+            .await;
+
+        let _m_term = server
+            .mock("POST", "/RPC2")
+            .match_header("content-type", "text/xml")
+            .match_body(mockito::Matcher::Regex("terminate-hard".to_string()))
+            .with_status(200)
+            .with_body(
+                r#"<?xml version="1.0"?><methodResponse><params><param><value><boolean>1</boolean></value></param></params></methodResponse>"#,
+            )
+            .create_async()
+            .await;
+
         let client = OpenNebulaClient::new(
-            "http://one:2633/RPC2".to_string(),
+            format!("{}/RPC2", server.url()),
             "oneadmin:pass".to_string(),
         );
-        let vm_id = client.instantiate_template(1, "test-vm").await?;
-        assert_eq!(vm_id, 1001);
-
-        client.poweroff_vm(vm_id).await?;
-        let img_id = client.disk_save_as(vm_id, 0, "test-img").await?;
-        assert_eq!(img_id, 2002);
-
-        client.terminate_vm(vm_id).await?;
-        Ok(())
+        let vm_id = client.instantiate_template(1, "test-vm").await;
+        assert!(vm_id.is_ok());
+        for id in vm_id {
+            assert_eq!(id, 1001);
+            let po = client.poweroff_vm(id).await;
+            assert!(po.is_ok());
+            let img_id = client.disk_save_as(id, 0, "test-img").await;
+            assert!(img_id.is_ok());
+            for i_id in img_id {
+                assert_eq!(i_id, 2002);
+            }
+            let term = client.terminate_vm(id).await;
+            assert!(term.is_ok());
+        }
     }
 
     #[tokio::test]
-    async fn test_opennebula_builder_run() -> Result<(), StampError> {
+    async fn test_opennebula_client_fault_and_errors() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _m_inst_fault = server
+            .mock("POST", "/RPC2_fault")
+            .match_body(mockito::Matcher::Regex(
+                r"one\.template\.instantiate".to_string(),
+            ))
+            .with_status(200)
+            .with_body(r#"<methodResponse><fault><value><boolean>0</boolean></value></fault></methodResponse>"#)
+            .create_async()
+            .await;
+
+        let _m_save_fault = server
+            .mock("POST", "/RPC2_fault")
+            .match_body(mockito::Matcher::Regex(r"one\.vm\.disksaveas".to_string()))
+            .with_status(200)
+            .with_body(r#"<methodResponse><fault><value><boolean>0</boolean></value></fault></methodResponse>"#)
+            .create_async()
+            .await;
+
+        let client = OpenNebulaClient::new(
+            format!("{}/RPC2_fault", server.url()),
+            "oneadmin:pass".to_string(),
+        );
+        let inst_fault = client.instantiate_template(1, "vm").await;
+        assert!(inst_fault.is_err());
+
+        let save_fault = client.disk_save_as(1001, 0, "img").await;
+        assert!(save_fault.is_err());
+
+        // Connection error with invalid endpoint
+        let bad_client = OpenNebulaClient::new(
+            "http://invalid.domain.that.does.not.exist:9999/RPC2".to_string(),
+            "a".to_string(),
+        );
+        assert!(bad_client.instantiate_template(1, "vm").await.is_err());
+        assert!(bad_client.disk_save_as(1, 0, "img").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_opennebula_builder_run() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _m_inst = server
+            .mock("POST", "/RPC2")
+            .match_body(mockito::Matcher::Regex(
+                r"one\.template\.instantiate".to_string(),
+            ))
+            .with_status(200)
+            .with_body(r#"<methodResponse><params><param><value><boolean>1</boolean></value></param></params></methodResponse>"#)
+            .create_async()
+            .await;
+
+        let _m_poweroff = server
+            .mock("POST", "/RPC2")
+            .match_body(mockito::Matcher::Regex("poweroff".to_string()))
+            .with_status(200)
+            .create_async()
+            .await;
+
+        let _m_save = server
+            .mock("POST", "/RPC2")
+            .match_body(mockito::Matcher::Regex(r"one\.vm\.disksaveas".to_string()))
+            .with_status(200)
+            .with_body(r#"<methodResponse><params><param><value><boolean>1</boolean></value></param></params></methodResponse>"#)
+            .create_async()
+            .await;
+
+        let _m_term = server
+            .mock("POST", "/RPC2")
+            .match_body(mockito::Matcher::Regex("terminate-hard".to_string()))
+            .with_status(200)
+            .create_async()
+            .await;
+
         let config = OpenNebulaConfig {
             name: "test-one".to_string(),
-            endpoint: "http://one:2633/RPC2".to_string(),
+            endpoint: format!("{}/RPC2", server.url()),
             auth: "user:pass".to_string(),
             template_id: Some(5),
+            template_name: Some("tpl-base".to_string()),
+            vm_name: Some("custom-vm".to_string()),
             disk_save_as_name: "saved-image".to_string(),
-            ..Default::default()
+            disk_id: Some(1),
+            cpu: Some(2.0),
+            vcpu: Some(2),
+            memory_mb: Some(4096),
+            ssh_username: Some("root".to_string()),
+            ssh_password: Some("secret".to_string()),
         };
         let b = OpenNebulaBuilder::new(config);
         let hook = Arc::new(crate::engine::hook::DefaultProvisionHook {
@@ -568,20 +705,176 @@ mod tests {
         ));
         let artifact = b
             .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
-            .await?;
-        assert_eq!(artifact.id(), "opennebula:2002");
-        b.cancel().await?;
-        Ok(())
+            .await;
+        assert!(artifact.is_ok());
+        for art in artifact {
+            assert_eq!(art.id(), "opennebula:2002");
+        }
+        assert!(b.cancel().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_opennebula_builder_run_failures() {
+        let config_fail = OpenNebulaConfig {
+            name: "test-fail".to_string(),
+            endpoint: "http://invalid.endpoint:9999/RPC2".to_string(),
+            auth: "user:pass".to_string(),
+            disk_save_as_name: "saved-image".to_string(),
+            ..Default::default()
+        };
+        let b_fail = OpenNebulaBuilder::new(config_fail);
+        let hook = Arc::new(crate::engine::hook::DefaultProvisionHook {
+            provisioners: Arc::new(vec![]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let ui = Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+
+        // Cleanup strategy on error
+        let res_cleanup = b_fail
+            .run(
+                hook.clone(),
+                ui.clone(),
+                crate::engine::packer::OnErrorStrategy::Cleanup,
+            )
+            .await;
+        assert!(res_cleanup.is_err());
+
+        // Abort strategy on error
+        let res_abort = b_fail
+            .run(
+                hook,
+                ui.clone(),
+                crate::engine::packer::OnErrorStrategy::Abort,
+            )
+            .await;
+        assert!(res_abort.is_err());
+
+        // Provisioner failure
+        let fail_hook = Arc::new(crate::engine::hook::DefaultProvisionHook {
+            provisioners: Arc::new(vec![Box::new(FailingProvisioner)]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let mut step_prov = StepProvisionOpenNebula {
+            ui,
+            name: "test-prov".to_string(),
+            hook: fail_hook,
+            ssh_username: None,
+            ssh_password: None,
+        };
+        let mut prov_state = StateBag::new();
+        // Missing vm_ip falls back to 127.0.0.1
+        let prov_res = step_prov.run(&mut prov_state).await;
+        assert!(prov_res.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_step_cleanups_and_edges() {
+        let mut server = mockito::Server::new_async().await;
+        let _m_term = server
+            .mock("POST", "/RPC2")
+            .with_status(200)
+            .create_async()
+            .await;
+
+        let client = OpenNebulaClient::new(format!("{}/RPC2", server.url()), "auth".to_string());
+        let ui = Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+
+        // StepInstantiateOpenNebulaVm cleanup with and without vm_id
+        let mut step_inst = StepInstantiateOpenNebulaVm {
+            ui: ui.clone(),
+            name: "test".to_string(),
+            client: client.clone(),
+            config: OpenNebulaConfig::default(),
+        };
+        let mut state = StateBag::new();
+        step_inst.cleanup(&state).await;
+        state.put("vm_id", 1001u32);
+        step_inst.cleanup(&state).await;
+
+        // StepSaveOpenNebulaImage run with default disk_id (None) and default vm_id (None)
+        let _m_poweroff = server
+            .mock("POST", "/RPC2")
+            .with_status(200)
+            .create_async()
+            .await;
+        let _m_save = server
+            .mock("POST", "/RPC2")
+            .with_status(200)
+            .with_body(r#"<methodResponse><params><param><value><boolean>1</boolean></value></param></params></methodResponse>"#)
+            .create_async()
+            .await;
+
+        let mut step_save = StepSaveOpenNebulaImage {
+            ui: ui.clone(),
+            name: "test".to_string(),
+            client,
+            config: OpenNebulaConfig {
+                disk_id: None,
+                disk_save_as_name: "default-disk-save".to_string(),
+                ..Default::default()
+            },
+        };
+        let mut empty_state = StateBag::new();
+        let save_res = step_save.run(&mut empty_state).await;
+        assert!(save_res.is_ok());
+        step_save.cleanup(&empty_state).await;
+
+        // StepProvisionOpenNebula run with vm_ip in state
+        let hook = Arc::new(crate::engine::hook::DefaultProvisionHook {
+            provisioners: Arc::new(vec![]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let mut step_prov = StepProvisionOpenNebula {
+            ui,
+            name: "test".to_string(),
+            hook,
+            ssh_username: Some("root".to_string()),
+            ssh_password: None,
+        };
+        let mut state_with_ip = StateBag::new();
+        state_with_ip.put("vm_ip", "10.0.0.1".to_string());
+        let prov_ok = step_prov.run(&mut state_with_ip).await;
+        assert!(prov_ok.is_ok());
+        step_prov.cleanup(&state_with_ip).await;
     }
 
     #[test]
     fn test_derived_traits() {
         let config = OpenNebulaConfig {
             name: "test".to_string(),
-            ..Default::default()
+            endpoint: "http://one:2633/RPC2".to_string(),
+            auth: "oneadmin:pass".to_string(),
+            template_id: Some(1),
+            template_name: Some("tpl".to_string()),
+            vm_name: Some("vm".to_string()),
+            cpu: Some(1.0),
+            vcpu: Some(1),
+            memory_mb: Some(1024),
+            disk_save_as_name: "img".to_string(),
+            disk_id: Some(0),
+            ssh_username: Some("root".to_string()),
+            ssh_password: Some("pass".to_string()),
         };
         assert_eq!(config.clone(), config);
         assert_eq!(format!("{config:?}"), format!("{config:?}"));
+
+        let serialized = serde_json::to_string(&config);
+        assert!(serialized.is_ok());
+        for json in serialized {
+            let deserialized: Result<OpenNebulaConfig, _> = serde_json::from_str(&json);
+            assert!(deserialized.is_ok());
+        }
+
+        let builder = OpenNebulaBuilder::new(config);
+        assert_eq!(format!("{builder:?}"), format!("{builder:?}"));
 
         let client = OpenNebulaClient::new("endpoint".to_string(), "auth".to_string());
         assert_eq!(format!("{client:?}"), format!("{client:?}"));

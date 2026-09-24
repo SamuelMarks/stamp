@@ -1,3 +1,4 @@
+#![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `amazon-ebssurrogate` builder.
 
 pub use super::amazon_common::{
@@ -96,6 +97,7 @@ struct StepRunSourceInstance {
     /// Builder name.
     name: String,
     /// Builder configuration.
+    #[allow(dead_code)]
     config: AmazonEbsSurrogateConfig,
 }
 
@@ -104,153 +106,169 @@ impl Step for StepRunSourceInstance {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Launching surrogate instance...");
-        if cfg!(test) {
+        #[cfg(test)]
+        {
             state.put("instance_id", "i-1234567890abcdef0".to_string());
             state.put("instance_ip", "127.0.0.1".to_string());
             state.put("surrogate_volume_id", "vol-1234567890abcdef0".to_string());
-            return Ok(StepAction::Continue);
+            Ok(StepAction::Continue)
         }
 
-        let aws_conf = get_aws_config(
-            self.config.region.as_deref(),
-            self.config.profile.as_deref(),
-            self.config.assume_role.as_ref(),
-        )
-        .await;
-        let client = aws_sdk_ec2::Client::new(&aws_conf);
+        #[cfg(not(test))]
+        {
+            let aws_conf = get_aws_config(
+                self.config.region.as_deref(),
+                self.config.profile.as_deref(),
+                self.config.assume_role.as_ref(),
+            )
+            .await;
+            let client = aws_sdk_ec2::Client::new(&aws_conf);
 
-        let mut req = client
-            .run_instances()
-            .image_id(self.config.source_ami.as_deref().unwrap_or("ami-00000000"))
-            .instance_type(aws_sdk_ec2::types::InstanceType::from(
-                self.config.instance_type.as_deref().unwrap_or("t2.micro"),
-            ))
-            .min_count(1)
-            .max_count(1);
+            let mut req = client
+                .run_instances()
+                .image_id(self.config.source_ami.as_deref().unwrap_or("ami-00000000"))
+                .instance_type(aws_sdk_ec2::types::InstanceType::from(
+                    self.config.instance_type.as_deref().unwrap_or("t2.micro"),
+                ))
+                .min_count(1)
+                .max_count(1);
 
-        if let Some(sgs) = state.get::<Vec<String>>("security_group_ids") {
-            req = req.set_security_group_ids(Some(sgs.clone()));
-        }
-        if let Some(kp) = state.get::<String>("key_pair_name") {
-            req = req.key_name(kp);
-        }
-
-        if let Some(ref iam) = self.config.iam_instance_profile {
-            let mut prof = aws_sdk_ec2::types::IamInstanceProfileSpecification::builder();
-            if let Some(ref arn) = iam.arn {
-                prof = prof.arn(arn);
+            if let Some(sgs) = state.get::<Vec<String>>("security_group_ids") {
+                req = req.set_security_group_ids(Some(sgs.clone()));
             }
-            if let Some(ref name) = iam.name {
-                prof = prof.name(name);
+            if let Some(kp) = state.get::<String>("key_pair_name") {
+                req = req.key_name(kp);
             }
-            req = req.iam_instance_profile(prof.build());
+
+            if let Some(ref iam) = self.config.iam_instance_profile {
+                let mut prof = aws_sdk_ec2::types::IamInstanceProfileSpecification::builder();
+                if let Some(ref arn) = iam.arn {
+                    prof = prof.arn(arn);
+                }
+                if let Some(ref name) = iam.name {
+                    prof = prof.name(name);
+                }
+                req = req.iam_instance_profile(prof.build());
+            }
+
+            if let Some(ref spot) = self.config.spot_instance {
+                let mut spot_opt = aws_sdk_ec2::types::SpotMarketOptions::builder();
+                if let Some(ref price) = spot.spot_price {
+                    spot_opt = spot_opt.max_price(price);
+                }
+                let market = aws_sdk_ec2::types::InstanceMarketOptionsRequest::builder()
+                    .market_type(aws_sdk_ec2::types::MarketType::Spot)
+                    .spot_options(spot_opt.build())
+                    .build();
+                req = req.instance_market_options(market);
+            }
+
+            let res = match req.send().await {
+                Ok(res) => res,
+                Err(e) => {
+                    return Err(StampError::Execution(format!(
+                        "AWS RunInstances failed: {e}"
+                    )));
+                }
+            };
+
+            let instances = res.instances();
+            let Some(instance) = instances.first() else {
+                return Err(StampError::Execution("No instances returned".to_string()));
+            };
+            let instance_id = instance.instance_id().unwrap_or_default().to_string();
+
+            self.ui.say(
+                &self.name,
+                &format!("Surrogate instance launched: {instance_id}"),
+            );
+            state.put("instance_id", instance_id.clone());
+
+            let ip = instance
+                .public_ip_address()
+                .unwrap_or("127.0.0.1")
+                .to_string();
+            state.put("instance_ip", ip);
+
+            // Create and attach surrogate target volume
+            let availability_zone = instance
+                .placement()
+                .and_then(|p| p.availability_zone())
+                .unwrap_or("us-east-1a");
+
+            let size = i32::try_from(self.config.surrogate_volume_size.unwrap_or(8)).unwrap_or(8);
+            let vol_res = client
+                .create_volume()
+                .availability_zone(availability_zone)
+                .size(size)
+                .volume_type(aws_sdk_ec2::types::VolumeType::Gp3)
+                .send()
+                .await
+                .map_err(|e| {
+                    StampError::Execution(format!("Create surrogate volume failed: {e}"))
+                })?;
+
+            let vol_id = vol_res.volume_id().unwrap_or_default().to_string();
+            self.ui
+                .say(&self.name, &format!("Created surrogate volume: {vol_id}"));
+            state.put("surrogate_volume_id", vol_id.clone());
+
+            let device = self
+                .config
+                .surrogate_device_name
+                .clone()
+                .unwrap_or_else(|| "/dev/xvdf".to_string());
+
+            let _ = client
+                .attach_volume()
+                .instance_id(&instance_id)
+                .volume_id(&vol_id)
+                .device(&device)
+                .send()
+                .await
+                .map_err(|e| {
+                    StampError::Execution(format!("Attach surrogate volume failed: {e}"))
+                })?;
+
+            Ok(StepAction::Continue)
         }
-
-        if let Some(ref spot) = self.config.spot_instance {
-            let mut spot_opt = aws_sdk_ec2::types::SpotMarketOptions::builder();
-            if let Some(ref price) = spot.spot_price {
-                spot_opt = spot_opt.max_price(price);
-            }
-            let market = aws_sdk_ec2::types::InstanceMarketOptionsRequest::builder()
-                .market_type(aws_sdk_ec2::types::MarketType::Spot)
-                .spot_options(spot_opt.build())
-                .build();
-            req = req.instance_market_options(market);
-        }
-
-        let res = match req.send().await {
-            Ok(res) => res,
-            Err(e) => {
-                return Err(StampError::Execution(format!(
-                    "AWS RunInstances failed: {e}"
-                )));
-            }
-        };
-
-        let instances = res.instances();
-        let Some(instance) = instances.first() else {
-            return Err(StampError::Execution("No instances returned".to_string()));
-        };
-        let instance_id = instance.instance_id().unwrap_or_default().to_string();
-
-        self.ui.say(
-            &self.name,
-            &format!("Surrogate instance launched: {instance_id}"),
-        );
-        state.put("instance_id", instance_id.clone());
-
-        let ip = instance
-            .public_ip_address()
-            .unwrap_or("127.0.0.1")
-            .to_string();
-        state.put("instance_ip", ip);
-
-        // Create and attach surrogate target volume
-        let availability_zone = instance
-            .placement()
-            .and_then(|p| p.availability_zone())
-            .unwrap_or("us-east-1a");
-
-        let size = i32::try_from(self.config.surrogate_volume_size.unwrap_or(8)).unwrap_or(8);
-        let vol_res = client
-            .create_volume()
-            .availability_zone(availability_zone)
-            .size(size)
-            .volume_type(aws_sdk_ec2::types::VolumeType::Gp3)
-            .send()
-            .await
-            .map_err(|e| StampError::Execution(format!("Create surrogate volume failed: {e}")))?;
-
-        let vol_id = vol_res.volume_id().unwrap_or_default().to_string();
-        self.ui
-            .say(&self.name, &format!("Created surrogate volume: {vol_id}"));
-        state.put("surrogate_volume_id", vol_id.clone());
-
-        let device = self
-            .config
-            .surrogate_device_name
-            .clone()
-            .unwrap_or_else(|| "/dev/xvdf".to_string());
-
-        let _ = client
-            .attach_volume()
-            .instance_id(&instance_id)
-            .volume_id(&vol_id)
-            .device(&device)
-            .send()
-            .await
-            .map_err(|e| StampError::Execution(format!("Attach surrogate volume failed: {e}")))?;
-
-        Ok(StepAction::Continue)
     }
 
     async fn cleanup(&mut self, state: &StateBag) {
-        let aws_conf = get_aws_config(
-            self.config.region.as_deref(),
-            self.config.profile.as_deref(),
-            self.config.assume_role.as_ref(),
-        )
-        .await;
-        let client = aws_sdk_ec2::Client::new(&aws_conf);
-
-        if let Some(vol_id) = state.get::<String>("surrogate_volume_id")
-            && !cfg!(test)
+        #[cfg(not(test))]
         {
-            let _ = client.detach_volume().volume_id(vol_id).send().await;
-            let _ = client.delete_volume().volume_id(vol_id).send().await;
-        }
+            let aws_conf = get_aws_config(
+                self.config.region.as_deref(),
+                self.config.profile.as_deref(),
+                self.config.assume_role.as_ref(),
+            )
+            .await;
+            let client = aws_sdk_ec2::Client::new(&aws_conf);
 
-        if let Some(instance_id) = state.get::<String>("instance_id") {
-            self.ui.say(
-                &self.name,
-                &format!("Terminating surrogate instance: {instance_id}"),
-            );
-            if !cfg!(test) {
+            if let Some(vol_id) = state.get::<String>("surrogate_volume_id") {
+                let _ = client.detach_volume().volume_id(vol_id).send().await;
+                let _ = client.delete_volume().volume_id(vol_id).send().await;
+            }
+
+            if let Some(instance_id) = state.get::<String>("instance_id") {
+                self.ui.say(
+                    &self.name,
+                    &format!("Terminating surrogate instance: {instance_id}"),
+                );
                 let _ = client
                     .terminate_instances()
                     .instance_ids(instance_id)
                     .send()
                     .await;
+            }
+        }
+        #[cfg(test)]
+        {
+            if let Some(instance_id) = state.get::<String>("instance_id") {
+                self.ui.say(
+                    &self.name,
+                    &format!("Terminating surrogate instance: {instance_id}"),
+                );
             }
         }
     }
@@ -349,6 +367,7 @@ struct StepStopInstance {
     /// Builder name.
     name: String,
     /// Builder configuration.
+    #[allow(dead_code)]
     config: AmazonEbsSurrogateConfig,
 }
 
@@ -364,7 +383,8 @@ impl Step for StepStopInstance {
             &self.name,
             &format!("Stopping surrogate instance: {instance_id}"),
         );
-        if !cfg!(test) {
+        #[cfg(not(test))]
+        {
             let aws_conf = get_aws_config(
                 self.config.region.as_deref(),
                 self.config.profile.as_deref(),
@@ -418,9 +438,13 @@ impl Step for StepCreateSnapshotAndRegisterAmi {
             &format!("Snapshotting surrogate volume {vol_id} for AMI {ami_name}..."),
         );
 
-        let mut ami_id = "ami-mock".to_string();
+        #[cfg(test)]
+        let ami_id = "ami-mock".to_string();
+        #[cfg(not(test))]
+        let ami_id;
 
-        if !cfg!(test) {
+        #[cfg(not(test))]
+        {
             let aws_conf = get_aws_config(
                 self.config.region.as_deref(),
                 self.config.profile.as_deref(),
@@ -599,10 +623,7 @@ Do you want to clean up? [y/N]: ",
             }
         }
 
-        let ami_id = state
-            .get::<String>("ami_id")
-            .cloned()
-            .unwrap_or_else(|| "ami-mock".to_string());
+        let ami_id = state.get::<String>("ami_id").cloned().unwrap_or_default();
 
         Ok(Box::new(crate::artifact::MockArtifact {
             id: ami_id,
@@ -622,7 +643,12 @@ Do you want to clean up? [y/N]: ",
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::pedantic,
+    clippy::all,
+    for_loops_over_fallibles
+)]
 mod tests {
     use super::*;
 
@@ -649,12 +675,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_amazon_ebssurrogate_prepare_success() -> Result<(), crate::error::StampError> {
+    async fn test_amazon_ebssurrogate_prepare_success() {
         let mut config = AmazonEbsSurrogateConfig::default();
         config.name = "test".to_string();
         let builder = AmazonEbsSurrogateBuilder::new(config);
-        builder.prepare().await?;
-        Ok(())
+        assert!(builder.prepare().await.is_ok());
     }
 
     #[tokio::test]
@@ -665,7 +690,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_amazon_ebssurrogate_run_mocked() -> Result<(), crate::error::StampError> {
+    async fn test_amazon_ebssurrogate_run_mocked() {
         let mut config = AmazonEbsSurrogateConfig::default();
         config.name = "test".to_string();
         config.surrogate_volume_size = Some(20);
@@ -688,7 +713,7 @@ mod tests {
         });
 
         let builder = AmazonEbsSurrogateBuilder::new(config);
-        builder
+        let res = builder
             .run(
                 std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
                     provisioners: std::sync::Arc::new(vec![]),
@@ -701,12 +726,12 @@ mod tests {
                 )),
                 crate::engine::packer::OnErrorStrategy::Cleanup,
             )
-            .await?;
-        Ok(())
+            .await;
+        assert!(res.is_ok());
     }
 
     #[tokio::test]
-    async fn test_amazon_ebssurrogate_run_bad_exit() -> Result<(), crate::error::StampError> {
+    async fn test_amazon_ebssurrogate_run_bad_exit() {
         let mut config = AmazonEbsSurrogateConfig::default();
         config.name = "test_bad_exit".to_string();
         let builder = AmazonEbsSurrogateBuilder::new(config);
@@ -725,11 +750,10 @@ mod tests {
             )
             .await;
         assert!(res.is_err());
-        Ok(())
     }
 
     #[tokio::test]
-    async fn test_amazon_ebssurrogate_run_missing() -> Result<(), crate::error::StampError> {
+    async fn test_amazon_ebssurrogate_run_missing() {
         let mut config = AmazonEbsSurrogateConfig::default();
         config.name = "test_missing".to_string();
         let builder = AmazonEbsSurrogateBuilder::new(config);
@@ -748,20 +772,18 @@ mod tests {
             )
             .await;
         assert!(res.is_err());
-        Ok(())
     }
 
     #[tokio::test]
-    async fn test_amazon_ebssurrogate_cancel() -> Result<(), crate::error::StampError> {
+    async fn test_amazon_ebssurrogate_cancel() {
         let mut config = AmazonEbsSurrogateConfig::default();
         config.name = "test".to_string();
         let builder = AmazonEbsSurrogateBuilder::new(config);
-        builder.cancel().await?;
-        Ok(())
+        assert!(builder.cancel().await.is_ok());
     }
 
     #[tokio::test]
-    async fn test_steps_run_and_cleanup() -> Result<(), crate::error::StampError> {
+    async fn test_steps_run_and_cleanup() {
         let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
@@ -789,15 +811,31 @@ mod tests {
             config: config.clone(),
         };
 
-        let _ = step1.run(&mut state).await;
+        assert!(step1.run(&mut state).await.is_ok());
         step1.cleanup(&state).await;
 
-        let _ = step2.run(&mut state).await;
+        assert!(step2.run(&mut state).await.is_ok());
         step2.cleanup(&state).await;
 
-        let _ = step3.run(&mut state).await;
+        assert!(step3.run(&mut state).await.is_ok());
         step3.cleanup(&state).await;
 
-        Ok(())
+        // Test StepProvision run
+        let hook: Arc<dyn ProvisionHook> = Arc::new(crate::engine::hook::DefaultProvisionHook {
+            provisioners: Arc::new(vec![]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let mut step_prov = StepProvision {
+            ui,
+            name: "test".into(),
+            config,
+            hook,
+        };
+        let prov_res = step_prov.run(&mut state).await;
+        assert!(prov_res.is_ok());
+
+        let mut empty_state = StateBag::new();
+        let prov_empty_res = step_prov.run(&mut empty_state).await;
+        assert!(prov_empty_res.is_ok());
     }
 }

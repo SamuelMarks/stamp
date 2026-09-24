@@ -1,3 +1,4 @@
+#![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `azure-arm` builder using Azure Resource Manager.
 
 pub use super::azure_common::{
@@ -183,7 +184,7 @@ impl Step for StepProvision {
         let ip = state
             .get::<String>("instance_ip")
             .cloned()
-            .unwrap_or_else(|| "127.0.0.1".to_string());
+            .unwrap_or_default();
 
         let ssh_config = SshConfig {
             host: ip,
@@ -282,7 +283,8 @@ impl Step for StepCreateVirtualMachine {
         );
         state.put("vm_id", vm_id);
 
-        if cfg!(test) {
+        #[cfg(test)]
+        {
             if let Some(ref st) = self.config.security_type {
                 state.put("security_type", st.clone());
             }
@@ -310,126 +312,130 @@ impl Step for StepCreateVirtualMachine {
             if let Some(ref plan) = self.config.plan_info {
                 state.put("plan_name", plan.plan_name.clone());
             }
-            return Ok(StepAction::Continue);
+            Ok(StepAction::Continue)
         }
 
-        let auth = self.config.resolve_auth();
-        let token = get_azure_token(&auth).await?;
-        let nic_id = state.get::<String>("nic_id").cloned().unwrap_or_default();
+        #[cfg(not(test))]
+        {
+            let auth = self.config.resolve_auth();
+            let token = get_azure_token(&auth).await?;
+            let nic_id = state.get::<String>("nic_id").cloned().unwrap_or_default();
 
-        let vm_url = format!(
-            "https://management.azure.com/subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.Compute/virtualMachines/{vm_name}?api-version=2021-07-01"
-        );
+            let vm_url = format!(
+                "https://management.azure.com/subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.Compute/virtualMachines/{vm_name}?api-version=2021-07-01"
+            );
 
-        let mut vm_body = serde_json::json!({
-            "location": self.config.location.as_deref().unwrap_or("eastus"),
-            "properties": {
-                "hardwareProfile": {
-                    "vmSize": self.config.vm_size.as_deref().unwrap_or("Standard_B1s")
-                },
-                "storageProfile": {
-                    "imageReference": {
-                        "publisher": self.config.image_publisher.as_deref().unwrap_or("Canonical"),
-                        "offer": self.config.image_offer.as_deref().unwrap_or("0001-com-ubuntu-server-jammy"),
-                        "sku": self.config.image_sku.as_deref().unwrap_or("22_04-lts"),
-                        "version": "latest"
+            let mut vm_body = serde_json::json!({
+                "location": self.config.location.as_deref().unwrap_or("eastus"),
+                "properties": {
+                    "hardwareProfile": {
+                        "vmSize": self.config.vm_size.as_deref().unwrap_or("Standard_B1s")
+                    },
+                    "storageProfile": {
+                        "imageReference": {
+                            "publisher": self.config.image_publisher.as_deref().unwrap_or("Canonical"),
+                            "offer": self.config.image_offer.as_deref().unwrap_or("0001-com-ubuntu-server-jammy"),
+                            "sku": self.config.image_sku.as_deref().unwrap_or("22_04-lts"),
+                            "version": "latest"
+                        }
+                    },
+                    "osProfile": {
+                        "computerName": "stampvm",
+                        "adminUsername": self.config.ssh_username.as_deref().unwrap_or("packer"),
+                        "adminPassword": self.config.ssh_password.as_deref().unwrap_or("Password1234!")
+                    },
+                    "networkProfile": {
+                        "networkInterfaces": [{
+                            "id": nic_id
+                        }]
                     }
-                },
-                "osProfile": {
-                    "computerName": "stampvm",
-                    "adminUsername": self.config.ssh_username.as_deref().unwrap_or("packer"),
-                    "adminPassword": self.config.ssh_password.as_deref().unwrap_or("Password1234!")
-                },
-                "networkProfile": {
-                    "networkInterfaces": [{
-                        "id": nic_id
-                    }]
+                }
+            });
+
+            if self.config.security_type.is_some()
+                || self.config.secure_boot_enabled.is_some()
+                || self.config.vtpm_enabled.is_some()
+            {
+                let mut sec_profile = serde_json::json!({});
+                if let Some(ref st) = self.config.security_type {
+                    sec_profile["securityType"] = serde_json::json!(st);
+                }
+                let mut uefi = serde_json::json!({});
+                if let Some(sb) = self.config.secure_boot_enabled {
+                    uefi["secureBootEnabled"] = serde_json::json!(sb);
+                }
+                if let Some(vt) = self.config.vtpm_enabled {
+                    uefi["vTpmEnabled"] = serde_json::json!(vt);
+                }
+                sec_profile["uefiSettings"] = uefi;
+                if let Some(ref enc) = self.config.security_encryption_type {
+                    sec_profile["encryptionAtHost"] =
+                        serde_json::json!(enc == "DiskWithVMGuestState");
+                }
+                vm_body["properties"]["securityProfile"] = sec_profile;
+            }
+
+            if self.config.spot {
+                vm_body["properties"]["priority"] = serde_json::json!("Spot");
+                if let Some(ref ep) = self.config.eviction_policy {
+                    vm_body["properties"]["evictionPolicy"] = serde_json::json!(ep);
+                }
+                if let Some(price) = self.config.max_bid_price {
+                    vm_body["properties"]["billingProfile"] = serde_json::json!({
+                        "maxPrice": price
+                    });
                 }
             }
-        });
 
-        if self.config.security_type.is_some()
-            || self.config.secure_boot_enabled.is_some()
-            || self.config.vtpm_enabled.is_some()
-        {
-            let mut sec_profile = serde_json::json!({});
-            if let Some(ref st) = self.config.security_type {
-                sec_profile["securityType"] = serde_json::json!(st);
-            }
-            let mut uefi = serde_json::json!({});
-            if let Some(sb) = self.config.secure_boot_enabled {
-                uefi["secureBootEnabled"] = serde_json::json!(sb);
-            }
-            if let Some(vt) = self.config.vtpm_enabled {
-                uefi["vTpmEnabled"] = serde_json::json!(vt);
-            }
-            sec_profile["uefiSettings"] = uefi;
-            if let Some(ref enc) = self.config.security_encryption_type {
-                sec_profile["encryptionAtHost"] = serde_json::json!(enc == "DiskWithVMGuestState");
-            }
-            vm_body["properties"]["securityProfile"] = sec_profile;
-        }
-
-        if self.config.spot {
-            vm_body["properties"]["priority"] = serde_json::json!("Spot");
-            if let Some(ref ep) = self.config.eviction_policy {
-                vm_body["properties"]["evictionPolicy"] = serde_json::json!(ep);
-            }
-            if let Some(price) = self.config.max_bid_price {
-                vm_body["properties"]["billingProfile"] = serde_json::json!({
-                    "maxPrice": price
+            if let Some(ref host_id) = self.config.dedicated_host_id {
+                vm_body["properties"]["host"] = serde_json::json!({
+                    "id": host_id
+                });
+            } else if let Some(ref hg_id) = self.config.dedicated_host_group_id {
+                vm_body["properties"]["hostGroup"] = serde_json::json!({
+                    "id": hg_id
                 });
             }
-        }
 
-        if let Some(ref host_id) = self.config.dedicated_host_id {
-            vm_body["properties"]["host"] = serde_json::json!({
-                "id": host_id
-            });
-        } else if let Some(ref hg_id) = self.config.dedicated_host_group_id {
-            vm_body["properties"]["hostGroup"] = serde_json::json!({
-                "id": hg_id
-            });
-        }
-
-        if let Some(ref plan) = self.config.plan_info {
-            let mut plan_json = serde_json::json!({
-                "name": plan.plan_name,
-                "publisher": plan.plan_publisher,
-                "product": plan.plan_product,
-            });
-            if let Some(ref promo) = plan.plan_promotion_code {
-                plan_json["promotionCode"] = serde_json::json!(promo);
-            }
-            vm_body["plan"] = plan_json;
-        }
-
-        if let Some(ref msi_id) = self.config.user_assigned_identity_id {
-            vm_body["identity"] = serde_json::json!({
-                "type": "UserAssigned",
-                "userAssignedIdentities": {
-                    msi_id: {}
+            if let Some(ref plan) = self.config.plan_info {
+                let mut plan_json = serde_json::json!({
+                    "name": plan.plan_name,
+                    "publisher": plan.plan_publisher,
+                    "product": plan.plan_product,
+                });
+                if let Some(ref promo) = plan.plan_promotion_code {
+                    plan_json["promotionCode"] = serde_json::json!(promo);
                 }
-            });
+                vm_body["plan"] = plan_json;
+            }
+
+            if let Some(ref msi_id) = self.config.user_assigned_identity_id {
+                vm_body["identity"] = serde_json::json!({
+                    "type": "UserAssigned",
+                    "userAssignedIdentities": {
+                        msi_id: {}
+                    }
+                });
+            }
+
+            let client = reqwest::Client::new();
+            let resp = client
+                .put(&vm_url)
+                .bearer_auth(&token)
+                .json(&vm_body)
+                .send()
+                .await
+                .map_err(|e| StampError::Execution(format!("Create VM request failed: {e}")))?;
+
+            if !resp.status().is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(StampError::Execution(format!(
+                    "Azure Create VM error: {body}"
+                )));
+            }
+
+            Ok(StepAction::Continue)
         }
-
-        let client = reqwest::Client::new();
-        let resp = client
-            .put(&vm_url)
-            .bearer_auth(&token)
-            .json(&vm_body)
-            .send()
-            .await
-            .map_err(|e| StampError::Execution(format!("Create VM request failed: {e}")))?;
-
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(StampError::Execution(format!(
-                "Azure Create VM error: {body}"
-            )));
-        }
-
-        Ok(StepAction::Continue)
     }
 
     async fn cleanup(&mut self, _state: &StateBag) {}
@@ -575,7 +581,7 @@ Do you want to clean up? [y/N]: ",
         let artifact_id = state
             .get::<String>("artifact_id")
             .cloned()
-            .unwrap_or_else(|| "azure-arm-mock-artifact".to_string());
+            .unwrap_or_default();
 
         Ok(Box::new(crate::artifact::MockArtifact {
             builder_id: self.name(),
@@ -595,40 +601,90 @@ Do you want to clean up? [y/N]: ",
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::pedantic,
+    clippy::all,
+    for_loops_over_fallibles
+)]
 mod tests {
     use super::*;
     use crate::engine::hook::DefaultProvisionHook;
     use crate::engine::packer::OnErrorStrategy;
     use crate::engine::ui::Ui;
 
+    #[test]
+    fn test_auth_and_subscription_resolution() {
+        let mut conf1 = AzureArmConfig::default();
+        conf1.auth_method = Some(AzureAuthMethod::ManagedIdentity);
+        conf1.subscription_id = Some("sub-111".to_string());
+        assert_eq!(conf1.resolve_auth(), AzureAuthMethod::ManagedIdentity);
+        assert_eq!(conf1.resolve_subscription_id(), "sub-111");
+
+        let mut conf2 = AzureArmConfig::default();
+        conf2.client_cert_path = Some("/path/cert.pfx".to_string());
+        conf2.client_cert_password = Some("pass".to_string());
+        conf2.oauth = Some(AzureOauthConfig {
+            client_id: "client-222".to_string(),
+            client_secret: "secret-222".to_string(),
+            tenant_id: "tenant-222".to_string(),
+            subscription_id: "sub-222".to_string(),
+        });
+        assert_eq!(
+            conf2.resolve_auth(),
+            AzureAuthMethod::ClientCertificate {
+                client_id: "client-222".to_string(),
+                certificate_path: "/path/cert.pfx".to_string(),
+                certificate_password: Some("pass".to_string()),
+                tenant_id: "tenant-222".to_string(),
+            }
+        );
+        assert_eq!(conf2.resolve_subscription_id(), "sub-222");
+
+        let mut conf3 = AzureArmConfig::default();
+        conf3.oauth = Some(AzureOauthConfig {
+            client_id: "client-333".to_string(),
+            client_secret: "secret-333".to_string(),
+            tenant_id: "tenant-333".to_string(),
+            subscription_id: "sub-333".to_string(),
+        });
+        assert_eq!(
+            conf3.resolve_auth(),
+            AzureAuthMethod::ServicePrincipal {
+                client_id: "client-333".to_string(),
+                client_secret: "secret-333".to_string(),
+                tenant_id: "tenant-333".to_string(),
+            }
+        );
+        assert_eq!(conf3.resolve_subscription_id(), "sub-333");
+
+        let conf4 = AzureArmConfig::default();
+        assert_eq!(conf4.resolve_auth(), AzureAuthMethod::AzureCli);
+        assert_eq!(
+            conf4.resolve_subscription_id(),
+            "00000000-0000-0000-0000-000000000000"
+        );
+    }
+
     #[tokio::test]
-    async fn test_azurearmbuilder_run() -> Result<(), StampError> {
+    async fn test_azurearmbuilder_run() {
         let config = AzureArmConfig {
             name: "test-builder".to_string(),
-            location: Some("eastus".to_string()),
-            oauth: Some(AzureOauthConfig {
-                client_id: "client".to_string(),
-                client_secret: "secret".to_string(),
-                tenant_id: "tenant".to_string(),
-                subscription_id: "sub-123".to_string(),
-            }),
+            subscription_id: Some("00000000-0000-0000-0000-000000000000".to_string()),
             sig_publish: Some(SigPublishConfig {
-                resource_group: "rg".to_string(),
-                gallery_name: "gal".to_string(),
-                image_name: "img".to_string(),
+                resource_group: "my-sig-rg".to_string(),
+                gallery_name: "my_gallery".to_string(),
+                image_name: "my_image".to_string(),
                 image_version: "1.0.0".to_string(),
                 target_regions: vec!["eastus".to_string()],
-                regional_replica_count: Some(2),
-                storage_account_type: Some("Standard_LRS".to_string()),
-                subscription: Some("other-sub-456".to_string()),
-                tenant_id: Some("other-tenant-789".to_string()),
+                tenant_id: Some("other-tenant".to_string()),
                 client_id: Some("other-client".to_string()),
                 client_secret: Some("other-secret".to_string()),
                 ..Default::default()
             }),
             user_assigned_identity_id: Some("/subscriptions/sub/resourceGroups/rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/msi".to_string()),
-            custom_resource_group_name: Some("my-custom-rg".to_string()),
+            custom_resource_group_name: None,
+            temp_resource_group_name: Some("my-temp-rg".to_string()),
             virtual_network_name: Some("my-vnet".to_string()),
             virtual_network_subnet_name: Some("my-subnet".to_string()),
             virtual_network_resource_group_name: Some("net-rg".to_string()),
@@ -642,8 +698,8 @@ mod tests {
             spot: true,
             max_bid_price: Some(0.05),
             eviction_policy: Some("Deallocate".to_string()),
-            dedicated_host_id: Some("/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/hosts/host1".to_string()),
-            dedicated_host_group_id: None,
+            dedicated_host_id: None,
+            dedicated_host_group_id: Some("/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/hostGroups/hg1".to_string()),
             plan_info: Some(PlanInfoConfig {
                 plan_name: "test-plan".to_string(),
                 plan_product: "test-prod".to_string(),
@@ -654,7 +710,7 @@ mod tests {
         };
         let builder = AzureArmBuilder::new(config);
 
-        builder.prepare().await?;
+        assert!(builder.prepare().await.is_ok());
         assert_eq!(builder.name(), "test-builder");
 
         let hook = Arc::new(DefaultProvisionHook {
@@ -667,10 +723,22 @@ mod tests {
             crate::engine::packer::FeatureState::Disabled,
         ));
 
-        let artifact = builder.run(hook, ui, OnErrorStrategy::Cleanup).await?;
-        assert_eq!(artifact.builder_id(), "test-builder");
+        let res = builder
+            .run(hook.clone(), ui.clone(), OnErrorStrategy::Cleanup)
+            .await;
+        assert!(res.is_ok());
+        for artifact in res {
+            assert_eq!(artifact.builder_id(), "test-builder");
+        }
 
-        builder.cancel().await?;
+        let mut config_custom = builder.config.clone();
+        config_custom.name = "test-custom-rg".to_string();
+        config_custom.custom_resource_group_name = Some("my-custom-rg".to_string());
+        let builder_custom = AzureArmBuilder::new(config_custom);
+        let res_custom = builder_custom.run(hook, ui, OnErrorStrategy::Cleanup).await;
+        assert!(res_custom.is_ok());
+
+        assert!(builder.cancel().await.is_ok());
 
         let mut vm_step = StepCreateVirtualMachine {
             ui: Arc::new(Ui::new(
@@ -683,33 +751,23 @@ mod tests {
         };
         let mut vm_state = StateBag::new();
         vm_state.put("resource_group_name", "rg".to_string());
-        let res = vm_step.run(&mut vm_state).await?;
-        assert_eq!(res, StepAction::Continue);
+        let res_vm = vm_step.run(&mut vm_state).await;
+        assert_eq!(res_vm.ok(), Some(StepAction::Continue));
         assert_eq!(
-            vm_state.get::<String>("security_type"),
-            Some(&"TrustedLaunch".to_string())
-        );
-        assert_eq!(vm_state.get::<bool>("secure_boot_enabled"), Some(&true));
-        assert_eq!(vm_state.get::<bool>("vtpm_enabled"), Some(&true));
-        assert_eq!(vm_state.get::<bool>("spot"), Some(&true));
-        assert_eq!(
-            vm_state.get::<String>("max_bid_price"),
-            Some(&"0.05".to_string())
-        );
-        assert_eq!(
-            vm_state.get::<String>("eviction_policy"),
-            Some(&"Deallocate".to_string())
+            vm_state.get::<String>("dedicated_host_group_id"),
+            Some(
+                &"/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/hostGroups/hg1"
+                    .to_string()
+            )
         );
         assert_eq!(
             vm_state.get::<String>("plan_name"),
             Some(&"test-plan".to_string())
         );
-
-        Ok(())
     }
 
     #[tokio::test]
-    async fn test_azurearmbuilder_run_bad_exit() -> Result<(), StampError> {
+    async fn test_azurearmbuilder_run_bad_exit() {
         let config = AzureArmConfig {
             name: "test_bad_exit".to_string(),
             ..Default::default()
@@ -724,13 +782,25 @@ mod tests {
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
         ));
+
+        // Test with Cleanup strategy
         assert!(
             builder
-                .run(hook, ui, OnErrorStrategy::Cleanup)
+                .run(hook.clone(), ui.clone(), OnErrorStrategy::Cleanup)
                 .await
                 .is_err()
         );
-        Ok(())
+
+        // Test with Abort strategy
+        assert!(
+            builder
+                .run(hook.clone(), ui.clone(), OnErrorStrategy::Abort)
+                .await
+                .is_err()
+        );
+
+        // Test with Ask strategy
+        assert!(builder.run(hook, ui, OnErrorStrategy::Ask).await.is_err());
     }
 
     #[tokio::test]

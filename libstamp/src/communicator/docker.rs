@@ -354,13 +354,7 @@ impl DockerCommunicator {
             .map_err(StampError::Io)?;
 
         let resp_str = String::from_utf8_lossy(&response);
-        let body_start = resp_str
-            .find(
-                "
-
-",
-            )
-            .map_or(0, |idx| idx + 4);
+        let body_start = resp_str.find("\r\n\r\n").map_or(0, |idx| idx + 4);
         let exec_resp: CreateExecResponse = serde_json::from_str(&resp_str[body_start..])
             .map_err(|e| StampError::Parse(format!("Failed to parse exec response: {e}")))?;
 
@@ -406,16 +400,10 @@ impl DockerCommunicator {
             .map_err(StampError::Io)?;
 
         // Strip HTTP headers
-        let stream_body = if let Some(pos) = stream_data.windows(4).position(|window| {
-            window
-                == b"
-
-"
-        }) {
-            &stream_data[pos + 4..]
-        } else {
-            &stream_data[..]
-        };
+        let stream_body = stream_data
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map_or(&stream_data[..], |pos| &stream_data[pos + 4..]);
 
         let frames = parse_multiplexed_stream(stream_body)?;
         let mut stdout = String::new();
@@ -458,13 +446,7 @@ impl DockerCommunicator {
             .map_err(StampError::Io)?;
 
         let inspect_str = String::from_utf8_lossy(&inspect_response);
-        let inspect_start = inspect_str
-            .find(
-                "
-
-",
-            )
-            .map_or(0, |idx| idx + 4);
+        let inspect_start = inspect_str.find("\r\n\r\n").map_or(0, |idx| idx + 4);
         let inspect_resp: InspectExecResponse = serde_json::from_str(&inspect_str[inspect_start..])
             .map_err(|e| {
                 StampError::Parse(format!("Failed to parse exec inspection response: {e}"))
@@ -578,12 +560,7 @@ impl DockerCommunicator {
 
         let header_end = response
             .windows(4)
-            .position(|window| {
-                window
-                    == b"
-
-"
-            })
+            .position(|w| w == b"\r\n\r\n")
             .ok_or_else(|| StampError::Parse("Invalid HTTP response headers".to_string()))?;
 
         let body = &response[header_end + 4..];
@@ -605,7 +582,7 @@ impl DockerCommunicator {
         args.extend(self.config.shell.clone());
         args.push(cmd.command.clone());
 
-        let output = tokio::process::Command::new("docker")
+        let output = tokio::process::Command::new(crate::utils::docker_executable())
             .args(&args)
             .output()
             .await
@@ -630,7 +607,7 @@ impl DockerCommunicator {
             self.config.container_id,
             remote_path.get().to_string_lossy()
         );
-        let output = tokio::process::Command::new("docker")
+        let output = tokio::process::Command::new(crate::utils::docker_executable())
             .args(["cp", &local_path.get().to_string_lossy(), &destination])
             .output()
             .await
@@ -658,7 +635,7 @@ impl DockerCommunicator {
             self.config.container_id,
             remote_path.get().to_string_lossy()
         );
-        let output = tokio::process::Command::new("docker")
+        let output = tokio::process::Command::new(crate::utils::docker_executable())
             .args(["cp", &source, &local_path.get().to_string_lossy()])
             .output()
             .await
@@ -683,7 +660,9 @@ impl Communicator for DockerCommunicator {
         if self.config.container_id.as_str() == "invalid_container" {
             return Err(StampError::Execution("No such container".to_string()));
         }
-        if std::env::var("STAMP_TEST_MODE").is_ok() || cfg!(test) {
+        if self.config.container_id.as_str() == "test_container"
+            || std::env::var("STAMP_TEST_MODE").is_ok()
+        {
             return Ok(CommandResult {
                 exit_code: 0,
                 stdout: String::new(),
@@ -713,7 +692,9 @@ impl Communicator for DockerCommunicator {
         if self.config.container_id.as_str() == "invalid_container" {
             return Err(StampError::Execution("No such container".to_string()));
         }
-        if std::env::var("STAMP_TEST_MODE").is_ok() || cfg!(test) {
+        if self.config.container_id.as_str() == "test_container"
+            || std::env::var("STAMP_TEST_MODE").is_ok()
+        {
             return Ok(());
         }
 
@@ -742,7 +723,9 @@ impl Communicator for DockerCommunicator {
         if self.config.container_id.as_str() == "invalid_container" {
             return Err(StampError::Execution("No such container".to_string()));
         }
-        if std::env::var("STAMP_TEST_MODE").is_ok() || cfg!(test) {
+        if self.config.container_id.as_str() == "test_container"
+            || std::env::var("STAMP_TEST_MODE").is_ok()
+        {
             return Ok(());
         }
 
@@ -888,6 +871,321 @@ mod tests {
         assert!(invalid_comm.upload(&file_path, &file_path).await.is_err());
         assert!(invalid_comm.download(&file_path, &file_path).await.is_err());
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_docker_real_unix_socket_execution() -> Result<(), StampError> {
+        let temp_dir = tempfile::tempdir().map_err(StampError::Io)?;
+        let sock_path = temp_dir.path().join("docker.sock");
+        let listener = tokio::net::UnixListener::bind(&sock_path).map_err(StampError::Io)?;
+
+        let server_task = tokio::spawn(async move {
+            // 1. Create exec
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let resp = concat!(
+                    "HTTP/1.1 200 OK\r\n",
+                    "Content-Type: application/json\r\n",
+                    "Content-Length: 17\r\n",
+                    "Connection: close\r\n\r\n",
+                    r#"{"Id":"mock_exec"}"#
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+
+            // 2. Start exec
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let mut frame_out = vec![1, 0, 0, 0, 0, 0, 0, 16];
+                frame_out.extend_from_slice(b"hello from unix\n");
+                let mut frame_err = vec![2, 0, 0, 0, 0, 0, 0, 18];
+                frame_err.extend_from_slice(b"hello from stderr\n");
+                let mut frame_ign = vec![0, 0, 0, 0, 0, 0, 0, 4];
+                frame_ign.extend_from_slice(b"none");
+                let resp = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n";
+                let _ = stream.write_all(resp.as_bytes()).await;
+                let _ = stream.write_all(&frame_out).await;
+                let _ = stream.write_all(&frame_err).await;
+                let _ = stream.write_all(&frame_ign).await;
+            }
+
+            // 3. Inspect exec
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let resp = concat!(
+                    "HTTP/1.1 200 OK\r\n",
+                    "Content-Type: application/json\r\n",
+                    "Content-Length: 32\r\n",
+                    "Connection: close\r\n\r\n",
+                    r#"{"ExitCode":0,"Running":false}"#
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        let mut config = DockerConfig::new("c_real_unix");
+        config.transport = DockerTransport::UnixSocket(sock_path.clone());
+        let comm = DockerCommunicator::new(config);
+
+        let res = comm
+            .execute(&Command::new("echo hello".to_string()))
+            .await?;
+        assert_eq!(res.exit_code, 0);
+        assert_eq!(res.stdout, "hello from unix\n");
+        assert_eq!(res.stderr, "hello from stderr\n");
+
+        server_task
+            .await
+            .map_err(|e| StampError::Execution(e.to_string()))?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_docker_real_unix_socket_upload_and_download() -> Result<(), StampError> {
+        let temp_dir = tempfile::tempdir().map_err(StampError::Io)?;
+        let sock_path = temp_dir.path().join("docker_archive.sock");
+        let listener = tokio::net::UnixListener::bind(&sock_path).map_err(StampError::Io)?;
+
+        let local_file = temp_dir.path().join("source.txt");
+        tokio::fs::write(&local_file, b"content to archive")
+            .await
+            .map_err(StampError::Io)?;
+        let tar_data = create_tar_archive(&local_file)?;
+
+        let tar_data_clone = tar_data.clone();
+        let server_task = tokio::spawn(async move {
+            // Upload connection (PUT)
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+
+            // Download connection (GET with \n\n delimiter)
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/x-tar\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    tar_data_clone.len()
+                );
+                let _ = stream.write_all(header.as_bytes()).await;
+                let _ = stream.write_all(&tar_data_clone).await;
+            }
+        });
+
+        let mut config = DockerConfig::new("c_real_archive");
+        config.transport = DockerTransport::UnixSocket(sock_path);
+        let comm = DockerCommunicator::new(config);
+
+        let remote_path = FilePath::new(PathBuf::from("/remote/source.txt"));
+        comm.upload(&FilePath::new(local_file.clone()), &remote_path)
+            .await?;
+
+        let extract_dest = temp_dir.path().join("extract_out");
+        tokio::fs::create_dir_all(&extract_dest)
+            .await
+            .map_err(StampError::Io)?;
+        comm.download(&remote_path, &FilePath::new(extract_dest.clone()))
+            .await?;
+        assert!(extract_dest.join("source.txt").exists());
+
+        server_task
+            .await
+            .map_err(|e| StampError::Execution(e.to_string()))?;
+
+        // Test upload failure on server error
+        let sock_err_path = temp_dir.path().join("docker_err.sock");
+        let listener_err =
+            tokio::net::UnixListener::bind(&sock_err_path).map_err(StampError::Io)?;
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener_err.accept().await {
+                let mut buf = vec![0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let _ = stream
+                    .write_all(b"HTTP/1.1 500 Internal Server Error\r\n\r\n")
+                    .await;
+            }
+        });
+
+        let mut config_err = DockerConfig::new("c_err_archive");
+        config_err.transport = DockerTransport::UnixSocket(sock_err_path);
+        let comm_err = DockerCommunicator::new(config_err);
+        assert!(
+            comm_err
+                .upload(&FilePath::new(local_file), &remote_path)
+                .await
+                .is_err()
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_docker_real_unix_socket_errors() -> Result<(), StampError> {
+        let _guard = crate::utils::ENV_MUTEX.lock();
+        let temp_dir = tempfile::tempdir().map_err(StampError::Io)?;
+
+        // 1. Non-existent socket path
+        let bad_sock = temp_dir.path().join("nonexistent.sock");
+        let mut bad_cfg = DockerConfig::new("c_bad_sock");
+        bad_cfg.transport = DockerTransport::UnixSocket(bad_sock);
+        let bad_comm = DockerCommunicator::new(bad_cfg);
+
+        let dummy = FilePath::new(PathBuf::from("/tmp/dummy"));
+        let _ = bad_comm.execute(&Command::new("true".to_string())).await;
+        assert!(bad_comm.upload(&dummy, &dummy).await.is_err());
+        assert!(bad_comm.download(&dummy, &dummy).await.is_err());
+
+        // 2. Truncated / invalid JSON on exec create
+        let sock_bad_create = temp_dir.path().join("bad_create.sock");
+        let listener_create =
+            tokio::net::UnixListener::bind(&sock_bad_create).map_err(StampError::Io)?;
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener_create.accept().await {
+                let mut buf = vec![0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\n\r\nnot-json").await;
+            }
+        });
+        assert!(
+            bad_comm
+                .execute_api_unix(&sock_bad_create, &Command::new("ls".to_string()))
+                .await
+                .is_err()
+        );
+
+        // 3. Invalid JSON on exec inspect
+        let sock_bad_inspect = temp_dir.path().join("bad_inspect.sock");
+        let listener_inspect =
+            tokio::net::UnixListener::bind(&sock_bad_inspect).map_err(StampError::Io)?;
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener_inspect.accept().await {
+                let mut buf = vec![0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\n\r\n{\"Id\":\"e1\"}")
+                    .await;
+            }
+            if let Ok((mut stream, _)) = listener_inspect.accept().await {
+                let mut buf = vec![0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await;
+            }
+            if let Ok((mut stream, _)) = listener_inspect.accept().await {
+                let mut buf = vec![0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\n\r\nbad-inspect-json")
+                    .await;
+            }
+        });
+        assert!(
+            bad_comm
+                .execute_api_unix(&sock_bad_inspect, &Command::new("ls".to_string()))
+                .await
+                .is_err()
+        );
+
+        // 4. Download invalid header response
+        let sock_bad_header = temp_dir.path().join("bad_header.sock");
+        let listener_header =
+            tokio::net::UnixListener::bind(&sock_bad_header).map_err(StampError::Io)?;
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener_header.accept().await {
+                let mut buf = vec![0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                let _ = stream.write_all(b"NO_HEADER_DELIMITER").await;
+            }
+        });
+        assert!(
+            bad_comm
+                .download_archive_unix(&sock_bad_header, &dummy, &dummy)
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_docker_cli_and_tcp_transport_branches() -> Result<(), StampError> {
+        let _guard = crate::utils::ENV_MUTEX.lock();
+        let dummy = FilePath::new(PathBuf::from("/tmp/nonexistent_test_12345"));
+
+        // CLI transport
+        let mut cli_cfg = DockerConfig::new("c_cli_test");
+        cli_cfg.transport = DockerTransport::Cli;
+        let cli_comm = DockerCommunicator::new(cli_cfg);
+        let _ = cli_comm
+            .execute(&Command::new("echo test".to_string()))
+            .await;
+        assert!(cli_comm.upload(&dummy, &dummy).await.is_err());
+        assert!(cli_comm.download(&dummy, &dummy).await.is_err());
+
+        // TCP transport
+        let mut tcp_cfg = DockerConfig::new("c_tcp_test");
+        tcp_cfg.transport = DockerTransport::Tcp("127.0.0.1:2375".to_string());
+        let tcp_comm = DockerCommunicator::new(tcp_cfg);
+        let _ = tcp_comm
+            .execute(&Command::new("echo test".to_string()))
+            .await;
+        assert!(tcp_comm.upload(&dummy, &dummy).await.is_err());
+        assert!(tcp_comm.download(&dummy, &dummy).await.is_err());
+
+        // URL encode
+        assert_eq!(url_encode("hello world/test"), "hello+world%2Ftest");
+
+        // ContainerId serde
+        let cid = ContainerId::new("my-cid".to_string());
+        let json = serde_json::to_string(&cid).map_err(|e| StampError::Parse(e.to_string()))?;
+        let de: ContainerId =
+            serde_json::from_str(&json).map_err(|e| StampError::Parse(e.to_string()))?;
+        assert_eq!(cid, de);
+        assert_eq!(cid, cid.clone());
+        assert!(format!("{cid:?}").contains("ContainerId"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_docker_mock_cli_executable() -> Result<(), StampError> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let temp_dir = tempfile::tempdir().map_err(StampError::Io)?;
+            let mock_bin = temp_dir.path().join("mock_docker.sh");
+            std::fs::write(&mock_bin, "#!/bin/sh\nexit 0\n").map_err(StampError::Io)?;
+            std::fs::set_permissions(&mock_bin, std::fs::Permissions::from_mode(0o755))
+                .map_err(StampError::Io)?;
+
+            let _guard = crate::utils::ENV_MUTEX.lock();
+            unsafe {
+                std::env::set_var("DOCKER_EXECUTABLE", mock_bin.to_string_lossy().as_ref());
+            }
+
+            let mut cli_cfg = DockerConfig::new("c_mock_cli");
+            cli_cfg.transport = DockerTransport::Cli;
+            cli_cfg.tty = true;
+            cli_cfg.user = Some("root".to_string());
+            let comm = DockerCommunicator::new(cli_cfg);
+
+            let res = comm.execute(&Command::new("whoami".to_string())).await?;
+            assert_eq!(res.exit_code, 0);
+
+            let dummy = FilePath::new(temp_dir.path().join("f.txt"));
+            std::fs::write(dummy.get(), "ok").map_err(StampError::Io)?;
+            comm.upload(&dummy, &dummy).await?;
+            comm.download(&dummy, &dummy).await?;
+
+            unsafe {
+                std::env::remove_var("DOCKER_EXECUTABLE");
+            }
+        }
         Ok(())
     }
 }

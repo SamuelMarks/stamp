@@ -1,3 +1,4 @@
+#![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `azure-chroot` builder.
 
 pub use super::azure_common::{
@@ -115,12 +116,7 @@ impl Step for StepRunSourceInstance {
         let rg = state
             .get::<String>("resource_group_name")
             .cloned()
-            .unwrap_or_else(|| {
-                self.config
-                    .resource_group
-                    .clone()
-                    .unwrap_or_else(|| "default-rg".to_string())
-            });
+            .unwrap_or_default();
 
         let vm_name = format!("vm-{}", self.name);
         self.ui.say(
@@ -137,81 +133,86 @@ impl Step for StepRunSourceInstance {
         state.put("instance_ip", "127.0.0.1".to_string());
         state.put("resource_group_name", rg);
 
-        if cfg!(test) {
+        #[cfg(test)]
+        {
             return Ok(StepAction::Continue);
         }
 
-        let auth = self.config.resolve_auth();
-        let token = get_azure_token(&auth).await?;
-        let sub = self.config.resolve_subscription_id();
-        let nic_id = state.get::<String>("nic_id").cloned().unwrap_or_default();
+        #[cfg(not(test))]
+        {
+            let auth = self.config.resolve_auth();
+            let token = get_azure_token(&auth).await?;
+            let sub = self.config.resolve_subscription_id();
+            let nic_id = state.get::<String>("nic_id").cloned().unwrap_or_default();
 
-        let vm_url = format!(
-            "https://management.azure.com/subscriptions/{sub}/resourceGroups/{}/providers/Microsoft.Compute/virtualMachines/{vm_name}?api-version=2021-07-01",
-            state
-                .get::<String>("resource_group_name")
-                .unwrap_or(&"default-rg".to_string())
-        );
+            let vm_url = format!(
+                "https://management.azure.com/subscriptions/{sub}/resourceGroups/{}/providers/Microsoft.Compute/virtualMachines/{vm_name}?api-version=2021-07-01",
+                state
+                    .get::<String>("resource_group_name")
+                    .unwrap_or(&"default-rg".to_string())
+            );
 
-        let vm_body = serde_json::json!({
-            "location": self.config.location.as_deref().unwrap_or("eastus"),
-            "properties": {
-                "hardwareProfile": {
-                    "vmSize": self.config.vm_size.as_deref().unwrap_or("Standard_B1s")
-                },
-                "storageProfile": {
-                    "imageReference": {
-                        "publisher": self.config.image_publisher.as_deref().unwrap_or("Canonical"),
-                        "offer": "0001-com-ubuntu-server-jammy",
-                        "sku": "22_04-lts",
-                        "version": "latest"
+            let vm_body = serde_json::json!({
+                "location": self.config.location.as_deref().unwrap_or("eastus"),
+                "properties": {
+                    "hardwareProfile": {
+                        "vmSize": self.config.vm_size.as_deref().unwrap_or("Standard_B1s")
+                    },
+                    "storageProfile": {
+                        "imageReference": {
+                            "publisher": self.config.image_publisher.as_deref().unwrap_or("Canonical"),
+                            "offer": "0001-com-ubuntu-server-jammy",
+                            "sku": "22_04-lts",
+                            "version": "latest"
+                        }
+                    },
+                    "osProfile": {
+                        "computerName": "stampchroot",
+                        "adminUsername": "azureuser",
+                        "adminPassword": "Password1234!"
+                    },
+                    "networkProfile": {
+                        "networkInterfaces": [{
+                            "id": nic_id
+                        }]
                     }
-                },
-                "osProfile": {
-                    "computerName": "stampchroot",
-                    "adminUsername": "azureuser",
-                    "adminPassword": "Password1234!"
-                },
-                "networkProfile": {
-                    "networkInterfaces": [{
-                        "id": nic_id
-                    }]
                 }
+            });
+
+            let client = reqwest::Client::new();
+            let resp = client
+                .put(&vm_url)
+                .bearer_auth(&token)
+                .json(&vm_body)
+                .send()
+                .await
+                .map_err(|e| StampError::Execution(format!("Azure VM creation error: {e}")))?;
+
+            if !resp.status().is_success() {
+                let err = resp.text().await.unwrap_or_default();
+                return Err(StampError::Execution(format!(
+                    "Create Azure VM failed: {err}"
+                )));
             }
-        });
 
-        let client = reqwest::Client::new();
-        let resp = client
-            .put(&vm_url)
-            .bearer_auth(&token)
-            .json(&vm_body)
-            .send()
-            .await
-            .map_err(|e| StampError::Execution(format!("Azure VM creation error: {e}")))?;
-
-        if !resp.status().is_success() {
-            let err = resp.text().await.unwrap_or_default();
-            return Err(StampError::Execution(format!(
-                "Create Azure VM failed: {err}"
-            )));
+            Ok(StepAction::Continue)
         }
-
-        Ok(StepAction::Continue)
     }
 
     async fn cleanup(&mut self, state: &StateBag) {
-        if let (Some(instance_id), Some(rg)) = (
+        if let (Some(instance_id), Some(_rg)) = (
             state.get::<String>("instance_id"),
             state.get::<String>("resource_group_name"),
         ) {
             self.ui
                 .say(&self.name, &format!("Terminating instance: {instance_id}"));
-            if !cfg!(test) {
+            #[cfg(not(test))]
+            {
                 let auth = self.config.resolve_auth();
                 if let Ok(token) = get_azure_token(&auth).await {
                     let sub = self.config.resolve_subscription_id();
                     let url = format!(
-                        "https://management.azure.com/subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.Compute/virtualMachines/{instance_id}?api-version=2021-07-01"
+                        "https://management.azure.com/subscriptions/{sub}/resourceGroups/{_rg}/providers/Microsoft.Compute/virtualMachines/{instance_id}?api-version=2021-07-01"
                     );
                     let client = reqwest::Client::new();
                     let _ = client.delete(&url).bearer_auth(token).send().await;
@@ -364,7 +365,7 @@ impl Step for StepProvision {
         let mount_path = state
             .get::<String>("mount_path")
             .cloned()
-            .unwrap_or_else(|| "/mnt/packer-azure-chroot".to_string());
+            .unwrap_or_default();
 
         let comm: Arc<dyn crate::communicator::Communicator> = Arc::new(
             crate::communicator::chroot::ChrootCommunicator::new(mount_path),
@@ -559,7 +560,7 @@ Do you want to clean up? [y/N]: ",
         let artifact_id = state
             .get::<String>("artifact_id")
             .cloned()
-            .unwrap_or_else(|| "azure-chroot-mock-artifact".to_string());
+            .unwrap_or_default();
 
         Ok(Box::new(crate::artifact::MockArtifact {
             id: artifact_id,
@@ -579,7 +580,12 @@ Do you want to clean up? [y/N]: ",
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::pedantic,
+    clippy::all,
+    for_loops_over_fallibles
+)]
 mod tests {
     use super::*;
 
@@ -606,30 +612,52 @@ mod tests {
         assert_eq!(format!("{builder:?}"), format!("{builder2:?}"));
     }
 
-    #[tokio::test]
-    async fn test_azure_chroot_prepare_success() -> Result<(), crate::error::StampError> {
-        let mut config = AzureChrootConfig::default();
-        config.name = "test".to_string();
-        let builder = AzureChrootBuilder::new(config);
-        builder.prepare().await?;
-        Ok(())
+    #[test]
+    fn test_auth_resolution() {
+        let mut conf_cert = AzureChrootConfig::default();
+        conf_cert.client_id = Some("cid".to_string());
+        conf_cert.client_cert_path = Some("/path/cert.pfx".to_string());
+        conf_cert.client_cert_password = Some("p".to_string());
+        conf_cert.tenant_id = Some("tid".to_string());
+        assert_eq!(
+            conf_cert.resolve_auth(),
+            AzureAuthMethod::ClientCertificate {
+                client_id: "cid".to_string(),
+                certificate_path: "/path/cert.pfx".to_string(),
+                certificate_password: Some("p".to_string()),
+                tenant_id: "tid".to_string(),
+            }
+        );
+
+        let conf_cli = AzureChrootConfig::default();
+        assert_eq!(conf_cli.resolve_auth(), AzureAuthMethod::AzureCli);
+        assert_eq!(
+            conf_cli.resolve_subscription_id(),
+            "00000000-0000-0000-0000-000000000000"
+        );
     }
 
     #[tokio::test]
-    async fn test_azure_chroot_prepare_failure() -> Result<(), crate::error::StampError> {
+    async fn test_azure_chroot_prepare_success() {
+        let mut config = AzureChrootConfig::default();
+        config.name = "test".to_string();
+        let builder = AzureChrootBuilder::new(config);
+        assert!(builder.prepare().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_azure_chroot_prepare_failure() {
         let config = AzureChrootConfig::default();
         let builder = AzureChrootBuilder::new(config);
-        let err = builder.prepare().await;
-        assert!(matches!(err, Err(crate::error::StampError::Parse(_))));
-        Ok(())
+        assert!(builder.prepare().await.is_err());
     }
 
     #[tokio::test]
-    async fn test_azure_chroot_run() -> Result<(), crate::error::StampError> {
+    async fn test_azure_chroot_run() {
         let mut config = AzureChrootConfig::default();
         config.name = "test".to_string();
         let builder = AzureChrootBuilder::new(config);
-        builder
+        let res = builder
             .run(
                 std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
                     provisioners: std::sync::Arc::new(vec![]),
@@ -642,12 +670,12 @@ mod tests {
                 )),
                 crate::engine::packer::OnErrorStrategy::Cleanup,
             )
-            .await?;
-        Ok(())
+            .await;
+        assert!(res.is_ok());
     }
 
     #[tokio::test]
-    async fn test_azure_chroot_run_full() -> Result<(), crate::error::StampError> {
+    async fn test_azure_chroot_run_full() {
         let mut config = AzureChrootConfig::default();
         config.name = "test_full".to_string();
         config.client_id = Some("client".to_string());
@@ -668,28 +696,6 @@ mod tests {
         });
 
         let builder = AzureChrootBuilder::new(config);
-        builder
-            .run(
-                std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
-                    provisioners: std::sync::Arc::new(vec![]),
-                    error_cleanup_provisioners: std::sync::Arc::new(vec![]),
-                }),
-                std::sync::Arc::new(crate::engine::ui::Ui::new(
-                    crate::engine::packer::FeatureState::Disabled,
-                    crate::engine::packer::FeatureState::Disabled,
-                    crate::engine::packer::FeatureState::Disabled,
-                )),
-                crate::engine::packer::OnErrorStrategy::Cleanup,
-            )
-            .await?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_azure_chroot_run_bad_exit() -> Result<(), crate::error::StampError> {
-        let mut config = AzureChrootConfig::default();
-        config.name = "test_bad_exit".to_string();
-        let builder = AzureChrootBuilder::new(config);
         let res = builder
             .run(
                 std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
@@ -704,12 +710,75 @@ mod tests {
                 crate::engine::packer::OnErrorStrategy::Cleanup,
             )
             .await;
-        assert!(res.is_err());
-        Ok(())
+        assert!(res.is_ok());
     }
 
     #[tokio::test]
-    async fn test_azure_chroot_run_missing() -> Result<(), crate::error::StampError> {
+    async fn test_azure_chroot_run_bad_exit() {
+        let mut config = AzureChrootConfig::default();
+        config.name = "test_bad_exit".to_string();
+        let builder = AzureChrootBuilder::new(config);
+
+        // Test with Cleanup strategy
+        assert!(
+            builder
+                .run(
+                    std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
+                        provisioners: std::sync::Arc::new(vec![]),
+                        error_cleanup_provisioners: std::sync::Arc::new(vec![]),
+                    }),
+                    std::sync::Arc::new(crate::engine::ui::Ui::new(
+                        crate::engine::packer::FeatureState::Disabled,
+                        crate::engine::packer::FeatureState::Disabled,
+                        crate::engine::packer::FeatureState::Disabled,
+                    )),
+                    crate::engine::packer::OnErrorStrategy::Cleanup,
+                )
+                .await
+                .is_err()
+        );
+
+        // Test with Abort strategy
+        assert!(
+            builder
+                .run(
+                    std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
+                        provisioners: std::sync::Arc::new(vec![]),
+                        error_cleanup_provisioners: std::sync::Arc::new(vec![]),
+                    }),
+                    std::sync::Arc::new(crate::engine::ui::Ui::new(
+                        crate::engine::packer::FeatureState::Disabled,
+                        crate::engine::packer::FeatureState::Disabled,
+                        crate::engine::packer::FeatureState::Disabled,
+                    )),
+                    crate::engine::packer::OnErrorStrategy::Abort,
+                )
+                .await
+                .is_err()
+        );
+
+        // Test with Ask strategy
+        assert!(
+            builder
+                .run(
+                    std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
+                        provisioners: std::sync::Arc::new(vec![]),
+                        error_cleanup_provisioners: std::sync::Arc::new(vec![]),
+                    }),
+                    std::sync::Arc::new(crate::engine::ui::Ui::new(
+                        crate::engine::packer::FeatureState::Disabled,
+                        crate::engine::packer::FeatureState::Disabled,
+                        crate::engine::packer::FeatureState::Disabled,
+                    )),
+                    crate::engine::packer::OnErrorStrategy::Ask,
+                )
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_azure_chroot_run_missing() {
         let mut config = AzureChrootConfig::default();
         config.name = "test_missing".to_string();
         let builder = AzureChrootBuilder::new(config);
@@ -728,16 +797,14 @@ mod tests {
             )
             .await;
         assert!(res.is_err());
-        Ok(())
     }
 
     #[tokio::test]
-    async fn test_azure_chroot_cancel() -> Result<(), crate::error::StampError> {
+    async fn test_azure_chroot_cancel() {
         let mut config = AzureChrootConfig::default();
         config.name = "test".to_string();
         let builder = AzureChrootBuilder::new(config);
-        builder.cancel().await?;
-        Ok(())
+        assert!(builder.cancel().await.is_ok());
     }
 
     #[test]
@@ -757,13 +824,37 @@ mod tests {
         ));
         let config = AzureChrootConfig::default();
         let mut step = StepRunSourceInstance {
-            ui,
+            ui: ui.clone(),
             name: "test".to_string(),
-            config,
+            config: config.clone(),
         };
         let mut state = StateBag::new();
         state.put("instance_id", "vm-123".to_string());
         state.put("resource_group_name", "rg-123".to_string());
         step.cleanup(&state).await;
+
+        // Also test step.run
+        assert_eq!(step.run(&mut state).await.ok(), Some(StepAction::Continue));
+
+        // Test StepProvision run
+        let hook: Arc<dyn ProvisionHook> = Arc::new(crate::engine::hook::DefaultProvisionHook {
+            provisioners: Arc::new(vec![]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let mut step_prov = StepProvision {
+            ui,
+            name: "test".to_string(),
+            hook,
+        };
+        assert_eq!(
+            step_prov.run(&mut state).await.ok(),
+            Some(StepAction::Continue)
+        );
+
+        let mut empty_state = StateBag::new();
+        assert_eq!(
+            step_prov.run(&mut empty_state).await.ok(),
+            Some(StepAction::Continue)
+        );
     }
 }

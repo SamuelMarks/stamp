@@ -510,6 +510,7 @@ impl PluginSupervisor {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
@@ -743,5 +744,95 @@ mod tests {
             client_key: None,
         };
         let _ = plugin_bad_cert.create_channel().await;
+    }
+
+    #[tokio::test]
+    async fn test_supervisor_extra_channel_and_healthcheck() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sock_path = temp_dir.path().join("test.sock");
+
+        #[cfg(unix)]
+        {
+            let uds = tokio::net::UnixListener::bind(&sock_path).unwrap();
+            tokio::spawn(async move {
+                let _ = tonic::transport::Server::builder()
+                    .add_service(crate::r#gen::packer::health_server::HealthServer::new(
+                        MockHealthService,
+                    ))
+                    .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(uds))
+                    .await;
+            });
+
+            // Perform healthcheck over Unix socket
+            let hc_unix = PluginSupervisor::perform_healthcheck(
+                &sock_path.to_string_lossy(),
+                &NetworkType::Unix,
+            )
+            .await;
+            assert!(hc_unix.is_ok());
+
+            // Create channel over Unix socket
+            let plugin_unix = SupervisedPlugin {
+                pid: 1,
+                pgid: 0,
+                handshake: Handshake {
+                    core_protocol_version: "1".to_string(),
+                    app_protocol_version: "1".to_string(),
+                    network_type: NetworkType::Unix,
+                    address: sock_path.to_string_lossy().to_string(),
+                    protocol: Protocol::Grpc,
+                    server_cert: None,
+                },
+                child: Arc::new(Mutex::new(None)),
+                cancelled: Arc::new(AtomicBool::new(false)),
+                graceful_timeout: Duration::from_millis(100),
+                client_cert: None,
+                client_key: None,
+            };
+            let ch_unix = plugin_unix.create_channel().await;
+            assert!(ch_unix.is_ok());
+        }
+
+        // Wait when child is None
+        let plugin_no_child = SupervisedPlugin {
+            pid: 1,
+            pgid: 0,
+            handshake: Handshake {
+                core_protocol_version: "1".to_string(),
+                app_protocol_version: "1".to_string(),
+                network_type: NetworkType::Tcp,
+                address: "127.0.0.1:1".to_string(),
+                protocol: Protocol::Grpc,
+                server_cert: None,
+            },
+            child: Arc::new(Mutex::new(None)),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            graceful_timeout: Duration::from_millis(100),
+            client_cert: None,
+            client_key: None,
+        };
+        assert_eq!(plugin_no_child.wait().await.unwrap(), 0);
+
+        // Spawn with env and tls client certs
+        let mut cfg = PluginSupervisorConfig::default();
+        cfg.plugin_path = PathBuf::from("sh");
+        cfg.args = vec![
+            "-c".to_string(),
+            String::from("echo 1\\|1\\|tcp\\|127.0.0.1:12345\\|grpc\\| && sleep 1"),
+        ];
+        cfg.env.insert("CUSTOM_VAR".to_string(), "val".to_string());
+        cfg.client_cert = Some("test_cert".to_string());
+        cfg.client_key = Some("test_key".to_string());
+
+        let sp = PluginSupervisor::spawn(cfg).await;
+        assert!(sp.is_ok());
+        if let Ok(plugin) = sp {
+            let _ = plugin.cancel().await;
+        }
+
+        // Healthcheck with http prefix
+        let hc_err =
+            PluginSupervisor::perform_healthcheck("http://127.0.0.1:1", &NetworkType::Tcp).await;
+        assert!(hc_err.is_err() || matches!(hc_err, Ok(false)));
     }
 }

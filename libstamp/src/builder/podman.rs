@@ -302,13 +302,43 @@ mod tests {
             FeatureState::Disabled,
         ));
 
-        let artifact = builder
-            .run(hook, ui, OnErrorStrategy::Cleanup)
-            .await
-            .unwrap();
+        let artifact = builder.run(hook, ui, OnErrorStrategy::Cleanup).await;
+        assert!(artifact.is_ok());
+        let artifact = match artifact {
+            Ok(a) => a,
+            Err(e) => panic!("{e}"),
+        };
         assert_eq!(artifact.id(), "localhost/my-app:latest");
         assert!(artifact.string().contains("Podman image"));
         assert!(artifact.destroy().is_ok());
         assert!(builder.cancel().await.is_ok());
+    }
+
+    #[test]
+    fn test_artifact_methods_extra() {
+        let art = PodmanArtifact {
+            id: "podman-art-1".to_string(),
+            files: vec!["file1".to_string()],
+        };
+        assert_eq!(art.builder_id(), "podman");
+        assert_eq!(art.files(), vec!["file1".to_string()]);
+        assert!(art.state("foo").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_step_run_podman_container_cleanup() {
+        let ui = Arc::new(Ui::new(
+            FeatureState::Disabled,
+            FeatureState::Disabled,
+            FeatureState::Disabled,
+        ));
+        let mut step = StepRunPodmanContainer {
+            config: PodmanConfig::default(),
+            ui,
+        };
+        let mut state = StateBag::new();
+        step.cleanup(&state).await;
+        state.put("container_id", "mock-cnt-99".to_string());
+        step.cleanup(&state).await;
     }
 }

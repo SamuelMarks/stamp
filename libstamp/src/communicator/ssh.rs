@@ -587,7 +587,10 @@ impl SshCommunicator {
         if self.config.host == "unreachable" {
             return Err(StampError::Io(std::io::Error::other("io error")));
         }
-        if std::env::var("STAMP_TEST_MODE").is_ok() || cfg!(test) {
+        if self.config.host == "simulated"
+            || (self.config.host == "localhost" && std::env::var("STAMP_TEST_MODE").is_ok())
+            || (self.config.host == "127.0.0.1" && self.config.port.get() == 22 && cfg!(test))
+        {
             return Err(StampError::Execution("Simulated mock exit".to_string()));
         }
 
@@ -994,18 +997,8 @@ impl Communicator for SshCommunicator {
             .map_err(|e| StampError::Execution(format!("Channel error: {e}")))?;
 
         if self.config.pty {
-            let term = self
-                .config
-                .pty_config
-                .as_ref()
-                .map_or("xterm-256color", |p| p.term.as_str());
-            let width = self.config.pty_config.as_ref().map_or(80, |p| p.width);
-            let height = self.config.pty_config.as_ref().map_or(24, |p| p.height);
-
-            channel
-                .request_pty(true, term, width, height, 0, 0, &[])
-                .await
-                .map_err(|e| StampError::Execution(format!("PTY error: {e}")))?;
+            request_channel_pty(&channel, self.config.pty_config.as_ref()).await?;
+            Self::resize_pty(&channel, 80, 24).await?;
         }
 
         channel
@@ -1188,6 +1181,11 @@ impl Communicator for SshCommunicator {
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
+    use russh_sftp::protocol::{
+        Attrs, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode,
+    };
+
+    use prost::bytes::Bytes;
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -1230,7 +1228,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ssh_execute_mock() {
-        let config = get_config("127.0.0.1", "root");
+        let config = get_config("simulated", "root");
         let c = SshCommunicator::new(config);
 
         let fp = FilePath::new(PathBuf::from("a"));
@@ -1241,7 +1239,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ssh_execute_success() -> Result<(), crate::error::StampError> {
-        let config = get_config("localhost", "admin");
+        let config = get_config("simulated", "admin");
         let comm = SshCommunicator::new(config);
         let res = comm.execute(&Command::new("ls".to_string())).await?;
         assert_eq!(res.exit_code, 0);
@@ -1250,7 +1248,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ssh_execute_auth_failure() -> Result<(), crate::error::StampError> {
-        let config = get_config("localhost", "invalid_user");
+        let config = get_config("simulated", "invalid_user");
         let comm = SshCommunicator::new(config);
         let result = comm.execute(&Command::new("ls".to_string())).await;
         assert!(matches!(result, Err(StampError::Parse(_))));
@@ -1269,7 +1267,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ssh_download_success() -> Result<(), crate::error::StampError> {
-        let config = get_config("localhost", "admin");
+        let config = get_config("simulated", "admin");
         let comm = SshCommunicator::new(config);
         let path = FilePath::new(PathBuf::from("/tmp"));
         comm.download(&path, &path).await?;
@@ -1278,7 +1276,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ssh_sftp_transfer_protocol() -> Result<(), crate::error::StampError> {
-        let mut config = get_config("localhost", "admin");
+        let mut config = get_config("simulated", "admin");
         config.transfer_protocol = FileTransferProtocol::Sftp;
         let comm = SshCommunicator::new(config);
         let path = FilePath::new(PathBuf::from("/tmp"));
@@ -1397,8 +1395,39 @@ mod tests {
         };
         assert!(handler_accept_new.check_server_key(&key_or_cert).await?);
 
+        // AcceptNew mode with entry now present -> Ok(true) => Ok(true)
+        assert!(handler_accept_new.check_server_key(&key_or_cert).await?);
+
         // Strict mode with entry now -> true
         assert!(handler_strict.check_server_key(&key_or_cert).await?);
+
+        // Known hosts None fallback
+        let mut handler_no_hosts = ClientHandler {
+            host_key_verification: HostKeyVerification::Strict,
+            host: "test.local".to_string(),
+            port: 22,
+            known_hosts_file: None,
+        };
+        let _ = handler_no_hosts.check_server_key(&key_or_cert).await?;
+
+        let mut handler_accept_no_hosts = ClientHandler {
+            host_key_verification: HostKeyVerification::AcceptNew,
+            host: "test.local".to_string(),
+            port: 22,
+            known_hosts_file: None,
+        };
+        let _ = handler_accept_no_hosts
+            .check_server_key(&key_or_cert)
+            .await?;
+
+        // AcceptNew mode with directory path -> triggers check_res Err(_) => Ok(false)
+        let mut handler_dir_err = ClientHandler {
+            host_key_verification: HostKeyVerification::AcceptNew,
+            host: "test.local".to_string(),
+            port: 22,
+            known_hosts_file: Some(temp_dir.path().to_path_buf()),
+        };
+        assert!(!handler_dir_err.check_server_key(&key_or_cert).await?);
 
         Ok(())
     }
@@ -1417,6 +1446,12 @@ mod tests {
         let missing_path = temp_dir.path().join("missing");
         let missing_res = load_private_key(&missing_path, None).await;
         assert!(missing_res.is_err());
+
+        // Valid key file
+        let valid_path = temp_dir.path().join("valid_key");
+        std::fs::write(&valid_path, TEST_OPENSSH_KEY)?;
+        let valid_res = load_private_key(&valid_path, None).await;
+        assert!(valid_res.is_ok());
 
         Ok(())
     }
@@ -1443,5 +1478,1207 @@ mod tests {
         let path = PathBuf::from("/nonexistent/ssh_agent.sock");
         let res = connect_ssh_agent(Some(&path)).await;
         assert!(res.is_err());
+
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("SSH_AUTH_SOCK", "/nonexistent/ssh_auth_sock.sock");
+        }
+        let res_env = connect_ssh_agent(None).await;
+        assert!(res_env.is_err());
+        unsafe {
+            std::env::remove_var("SSH_AUTH_SOCK");
+        }
+    }
+
+    const TEST_OPENSSH_KEY: &str = concat!(
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n",
+        "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\n",
+        "QyNTUxOQAAACCLahs6v+Ramg+W1foQ7S9f7hWLl7113DejbOV/+QSVYQAAAJB6LSA4ei0g\n",
+        "OAAAAAtzc2gtZWQyNTUxOQAAACCLahs6v+Ramg+W1foQ7S9f7hWLl7113DejbOV/+QSVYQ\n",
+        "AAAEBN1CZYOUFGkMWdHDJs3kBboDdag+jgLUttxrlQP4QJ5ItqGzq/5FqaD5bV+hDtL1/u\n",
+        "FYuXvXXcN6Ns5X/5BJVhAAAACnRlc3RAc3RhbXABAgM=\n",
+        "-----END OPENSSH PRIVATE KEY-----\n"
+    );
+
+    #[derive(Default)]
+    struct MockSftpSession {
+        readdir_done: bool,
+    }
+
+    impl russh_sftp::server::Handler for MockSftpSession {
+        type Error = StatusCode;
+
+        fn unimplemented(&self) -> Self::Error {
+            StatusCode::OpUnsupported
+        }
+
+        async fn open(
+            &mut self,
+            id: u32,
+            filename: String,
+            _pflags: OpenFlags,
+            _attrs: FileAttributes,
+        ) -> Result<Handle, Self::Error> {
+            Ok(Handle {
+                id,
+                handle: filename,
+            })
+        }
+
+        async fn close(&mut self, id: u32, _handle: String) -> Result<Status, Self::Error> {
+            Ok(Status {
+                id,
+                status_code: StatusCode::Ok,
+                error_message: "Ok".to_string(),
+                language_tag: "en-US".to_string(),
+            })
+        }
+
+        async fn read(
+            &mut self,
+            id: u32,
+            _handle: String,
+            offset: u64,
+            _len: u32,
+        ) -> Result<russh_sftp::protocol::Data, Self::Error> {
+            if offset == 0 {
+                Ok(russh_sftp::protocol::Data {
+                    id,
+                    data: b"hello sftp".to_vec(),
+                })
+            } else {
+                Err(StatusCode::Eof)
+            }
+        }
+
+        async fn write(
+            &mut self,
+            id: u32,
+            _handle: String,
+            _offset: u64,
+            _data: Vec<u8>,
+        ) -> Result<Status, Self::Error> {
+            Ok(Status {
+                id,
+                status_code: StatusCode::Ok,
+                error_message: "Ok".to_string(),
+                language_tag: "en-US".to_string(),
+            })
+        }
+
+        async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
+            let mut attrs = FileAttributes::dummy();
+            if path.ends_with(".txt") {
+                attrs.permissions = Some(russh_sftp::protocol::FileMode::REG.bits());
+            } else {
+                attrs.permissions = Some(russh_sftp::protocol::FileMode::DIR.bits());
+            }
+            Ok(Attrs { id, attrs })
+        }
+
+        async fn mkdir(
+            &mut self,
+            id: u32,
+            _path: String,
+            _attrs: FileAttributes,
+        ) -> Result<Status, Self::Error> {
+            Ok(Status {
+                id,
+                status_code: StatusCode::Ok,
+                error_message: "Ok".to_string(),
+                language_tag: "en-US".to_string(),
+            })
+        }
+
+        async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, Self::Error> {
+            self.readdir_done = false;
+            Ok(Handle { id, handle: path })
+        }
+
+        async fn readdir(&mut self, id: u32, handle: String) -> Result<Name, Self::Error> {
+            if !self.readdir_done {
+                self.readdir_done = true;
+                let mut attrs = FileAttributes::dummy();
+                attrs.permissions = Some(russh_sftp::protocol::FileMode::REG.bits());
+                let mut dir_attrs = FileAttributes::dummy();
+                dir_attrs.permissions = Some(russh_sftp::protocol::FileMode::DIR.bits());
+                let files = if handle.contains("subdir") {
+                    vec![
+                        russh_sftp::protocol::File::new(".", FileAttributes::dummy()),
+                        russh_sftp::protocol::File::new("..", FileAttributes::dummy()),
+                        russh_sftp::protocol::File::new("f.txt", attrs),
+                    ]
+                } else {
+                    vec![
+                        russh_sftp::protocol::File::new(".", FileAttributes::dummy()),
+                        russh_sftp::protocol::File::new("..", FileAttributes::dummy()),
+                        russh_sftp::protocol::File::new("subdir", dir_attrs),
+                        russh_sftp::protocol::File::new("f.txt", attrs),
+                    ]
+                };
+                Ok(Name { id, files })
+            } else {
+                Err(StatusCode::Eof)
+            }
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct MockSshServer {
+        channels: std::sync::Arc<
+            tokio::sync::Mutex<
+                std::collections::HashMap<russh::ChannelId, russh::Channel<russh::server::Msg>>,
+            >,
+        >,
+        scp_channels:
+            std::sync::Arc<tokio::sync::Mutex<std::collections::HashSet<russh::ChannelId>>>,
+        reject_session: bool,
+        disconnect_on_session: bool,
+    }
+
+    impl russh::server::Handler for MockSshServer {
+        type Error = russh::Error;
+
+        async fn auth_password(
+            &mut self,
+            user: &str,
+            _password: &str,
+        ) -> Result<russh::server::Auth, Self::Error> {
+            if user == "reject" {
+                Ok(russh::server::Auth::reject())
+            } else {
+                Ok(russh::server::Auth::Accept)
+            }
+        }
+
+        async fn auth_publickey(
+            &mut self,
+            user: &str,
+            _public_key: &russh::keys::ssh_key::PublicKey,
+        ) -> Result<russh::server::Auth, Self::Error> {
+            if user == "reject" {
+                Ok(russh::server::Auth::reject())
+            } else {
+                Ok(russh::server::Auth::Accept)
+            }
+        }
+
+        async fn auth_openssh_certificate(
+            &mut self,
+            user: &str,
+            _certificate: &russh::keys::Certificate,
+        ) -> Result<russh::server::Auth, Self::Error> {
+            if user == "reject" {
+                Ok(russh::server::Auth::reject())
+            } else {
+                Ok(russh::server::Auth::Accept)
+            }
+        }
+
+        async fn channel_open_session(
+            &mut self,
+            channel: russh::Channel<russh::server::Msg>,
+            reply: russh::server::ChannelOpenHandle,
+            session: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            if self.reject_session {
+                reply
+                    .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+                    .await;
+                return Ok(());
+            }
+            if self.disconnect_on_session {
+                reply.accept().await;
+                let _ = session.disconnect(russh::Disconnect::ByApplication, "bye", "en");
+                return Ok(());
+            }
+            self.channels.lock().await.insert(channel.id(), channel);
+            reply.accept().await;
+            Ok(())
+        }
+
+        async fn channel_open_direct_tcpip(
+            &mut self,
+            channel: russh::Channel<russh::server::Msg>,
+            host: &str,
+            port: u32,
+            _orig_addr: &str,
+            _orig_port: u32,
+            reply: russh::server::ChannelOpenHandle,
+            _session: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            reply.accept().await;
+            if let Ok(mut target_socket) =
+                tokio::net::TcpStream::connect(format!("{host}:{port}")).await
+            {
+                tokio::spawn(async move {
+                    let (mut r_stream, mut w_stream) = tokio::io::split(channel.into_stream());
+                    let (mut r_sock, mut w_sock) = target_socket.split();
+                    let _ = tokio::select! {
+                        _ = tokio::io::copy(&mut r_stream, &mut w_sock) => (),
+                        _ = tokio::io::copy(&mut r_sock, &mut w_stream) => (),
+                    };
+                });
+            }
+            Ok(())
+        }
+
+        async fn pty_request(
+            &mut self,
+            channel: russh::ChannelId,
+            _term: &str,
+            _col_width: u32,
+            _row_height: u32,
+            _pix_width: u32,
+            _pix_height: u32,
+            _modes: &[(russh::Pty, u32)],
+            session: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            let _ = session.channel_success(channel);
+            Ok(())
+        }
+
+        async fn window_change_request(
+            &mut self,
+            channel: russh::ChannelId,
+            _col_width: u32,
+            _row_height: u32,
+            _pix_width: u32,
+            _pix_height: u32,
+            session: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            let _ = session.channel_success(channel);
+            Ok(())
+        }
+
+        async fn exec_request(
+            &mut self,
+            channel: russh::ChannelId,
+            data: &[u8],
+            session: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            let cmd = String::from_utf8_lossy(data);
+            if cmd.contains("fail_exec") {
+                let _ = session.channel_failure(channel);
+                return Ok(());
+            }
+            if cmd.contains("close_immediate") {
+                let _ = session.channel_success(channel);
+                let _ = session.close(channel);
+                return Ok(());
+            }
+            if cmd.contains("disc_after_init") {
+                self.scp_channels.lock().await.insert(channel);
+                let _ = session.data(channel, Bytes::from_static(b"\0"));
+                let _ = session.disconnect(russh::Disconnect::ByApplication, "bye", "en");
+                return Ok(());
+            }
+            if cmd.contains("disc_download") {
+                let _ = session.channel_success(channel);
+                let _ = session.disconnect(russh::Disconnect::ByApplication, "bye", "en");
+                return Ok(());
+            }
+            let _ = session.channel_success(channel);
+            if cmd.starts_with("scp -t") {
+                self.scp_channels.lock().await.insert(channel);
+                if cmd.contains("fail_init") {
+                    let _ = session.data(channel, Bytes::from_static(b"\x01error\n"));
+                } else {
+                    let _ = session.data(channel, Bytes::from_static(b"\0"));
+                }
+            } else if cmd.starts_with("scp -f") {
+                let _ = session.data(channel, Bytes::from("C0644 5 f.txt\nhello\0"));
+            } else {
+                let _ = session.data(channel, Bytes::from("mock ssh stdout\n"));
+                let _ = session.extended_data(channel, 1, Bytes::from("mock ssh stderr\n"));
+                let _ = session.exit_status_request(channel, 0);
+                let _ = session.close(channel);
+            }
+            Ok(())
+        }
+
+        async fn subsystem_request(
+            &mut self,
+            channel: russh::ChannelId,
+            name: &str,
+            session: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            let _ = session.channel_success(channel);
+            if name == "sftp"
+                && let Some(ch) = self.channels.lock().await.remove(&channel)
+            {
+                russh_sftp::server::run(ch.into_stream(), MockSftpSession::default()).await;
+            }
+            Ok(())
+        }
+
+        async fn data(
+            &mut self,
+            channel: russh::ChannelId,
+            data: &[u8],
+            session: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            if self.scp_channels.lock().await.contains(&channel) {
+                if data.starts_with(b"C") && data.windows(9).any(|w| w == b"fail_meta") {
+                    let _ = session.data(channel, Bytes::from_static(b"\x01error\n"));
+                } else if data.starts_with(b"C")
+                    && data.windows(15).any(|w| w == b"disc_after_meta")
+                {
+                    let _ = session.data(channel, Bytes::from_static(b"\0"));
+                    let _ = session.disconnect(russh::Disconnect::ByApplication, "bye", "en");
+                } else if !data.is_empty()
+                    && data[0] != 0
+                    && data.windows(9).any(|w| w == b"fail_data")
+                {
+                    let _ = session.data(channel, Bytes::from_static(b"\x01error\n"));
+                } else if !data.is_empty()
+                    && data[0] != 0
+                    && data.windows(15).any(|w| w == b"disc_after_data")
+                {
+                    let _ = session.disconnect(russh::Disconnect::ByApplication, "bye", "en");
+                } else {
+                    let _ = session.data(channel, Bytes::from_static(b"\0"));
+                }
+            }
+            Ok(())
+        }
+    }
+
+    async fn start_mock_ssh_server(
+        reject_session: bool,
+        disconnect_on_session: bool,
+    ) -> Result<(u16, tokio::task::JoinHandle<()>), StampError> {
+        let mut server_config = russh::server::Config::default();
+        server_config.inactivity_timeout = None;
+        server_config.auth_rejection_time = Duration::from_millis(1);
+        server_config.auth_rejection_time_initial = Some(Duration::from_millis(1));
+        let priv_key = russh::keys::decode_secret_key(TEST_OPENSSH_KEY, None)
+            .map_err(|e| StampError::Execution(e.to_string()))?;
+        server_config.keys.push(priv_key);
+        let server_config = Arc::new(server_config);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(StampError::Io)?;
+        let port = listener.local_addr().map_err(StampError::Io)?.port();
+        let handle = tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let config = server_config.clone();
+                tokio::spawn(async move {
+                    let server = MockSshServer {
+                        channels: std::sync::Arc::new(tokio::sync::Mutex::new(
+                            std::collections::HashMap::new(),
+                        )),
+                        scp_channels: std::sync::Arc::new(tokio::sync::Mutex::new(
+                            std::collections::HashSet::new(),
+                        )),
+                        reject_session,
+                        disconnect_on_session,
+                    };
+                    if let Ok(running) = russh::server::run_stream(config, socket, server).await {
+                        let _ = running.await;
+                    }
+                });
+            }
+        });
+        Ok((port, handle))
+    }
+
+    #[derive(Clone)]
+    struct MockAgent;
+    impl russh::keys::agent::server::Agent for MockAgent {}
+
+    async fn start_mock_agent(
+        sock_path: &Path,
+        key: Arc<russh::keys::ssh_key::PrivateKey>,
+    ) -> Result<tokio::task::JoinHandle<()>, StampError> {
+        let listener = tokio::net::UnixListener::bind(sock_path).map_err(StampError::Io)?;
+        let stream = tokio_stream::wrappers::UnixListenerStream::new(listener);
+        let handle = tokio::spawn(async move {
+            let _ = russh::keys::agent::server::serve(stream, MockAgent).await;
+        });
+        let mut client = russh::keys::agent::client::AgentClient::connect_uds(sock_path)
+            .await
+            .map_err(|e| StampError::Execution(e.to_string()))?;
+        client
+            .add_identity(&key, &[])
+            .await
+            .map_err(|e| StampError::Execution(e.to_string()))?;
+        Ok(handle)
+    }
+
+    async fn run_mock_cert_agent(
+        sock_path: &Path,
+        cert_bytes: Vec<u8>,
+        keypair: russh::keys::ssh_key::private::Ed25519Keypair,
+    ) -> Result<tokio::task::JoinHandle<()>, StampError> {
+        let listener = tokio::net::UnixListener::bind(sock_path).map_err(StampError::Io)?;
+        let handle = tokio::spawn(async move {
+            use russh::keys::signature::Signer;
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 8192];
+                while let Ok(n) = socket.read(&mut buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                    let msg_type = if n >= 5 { buf[4] } else { 0 };
+                    if msg_type == 11 {
+                        let mut payload = Vec::new();
+                        payload.extend_from_slice(&1u32.to_be_bytes());
+                        payload.extend_from_slice(&(cert_bytes.len() as u32).to_be_bytes());
+                        payload.extend_from_slice(&cert_bytes);
+                        let comment = b"cert-mock";
+                        payload.extend_from_slice(&(comment.len() as u32).to_be_bytes());
+                        payload.extend_from_slice(comment);
+
+                        let mut resp = Vec::new();
+                        let total_len = (1 + payload.len()) as u32;
+                        resp.extend_from_slice(&total_len.to_be_bytes());
+                        resp.push(12);
+                        resp.extend_from_slice(&payload);
+                        let _ = socket.write_all(&resp).await;
+                    } else if msg_type == 13 && n > 9 {
+                        let key_len = u32::from_be_bytes([buf[5], buf[6], buf[7], buf[8]]) as usize;
+                        let data_offset = 9 + key_len;
+                        if n >= data_offset + 4 {
+                            let data_len = u32::from_be_bytes([
+                                buf[data_offset],
+                                buf[data_offset + 1],
+                                buf[data_offset + 2],
+                                buf[data_offset + 3],
+                            ]) as usize;
+                            let data_start = data_offset + 4;
+                            let to_sign = if n >= data_start + data_len {
+                                &buf[data_start..data_start + data_len]
+                            } else {
+                                &[]
+                            };
+                            if let Ok(sig) = keypair.try_sign(to_sign) {
+                                let sig_bytes = sig.as_bytes();
+                                let alg = b"ssh-ed25519";
+                                let mut inner_sig = Vec::new();
+                                inner_sig.extend_from_slice(&(alg.len() as u32).to_be_bytes());
+                                inner_sig.extend_from_slice(alg);
+                                inner_sig
+                                    .extend_from_slice(&(sig_bytes.len() as u32).to_be_bytes());
+                                inner_sig.extend_from_slice(&sig_bytes);
+
+                                let mut payload = Vec::new();
+                                payload.extend_from_slice(&(inner_sig.len() as u32).to_be_bytes());
+                                payload.extend_from_slice(&inner_sig);
+
+                                let mut resp = Vec::new();
+                                let total_len = (1 + payload.len()) as u32;
+                                resp.extend_from_slice(&total_len.to_be_bytes());
+                                resp.push(14);
+                                resp.extend_from_slice(&payload);
+                                let _ = socket.write_all(&resp).await;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        Ok(handle)
+    }
+
+    #[tokio::test]
+    async fn test_ssh_real_server_execution_and_scp() -> Result<(), StampError> {
+        let (port, server_handle) = start_mock_ssh_server(false, false).await?;
+
+        // 1. Password auth execution
+        let mut config = get_config("127.0.0.1", "testuser");
+        config.port = Port::new(port);
+        config.password = Some("testpass".to_string());
+        config.pty = true;
+        let comm = SshCommunicator::new(config.clone());
+
+        let res = comm.execute(&Command::new("uptime".to_string())).await?;
+        assert_eq!(res.exit_code, 0);
+        assert_eq!(res.stdout, "mock ssh stdout\n");
+        assert_eq!(res.stderr, "mock ssh stderr\n");
+
+        // 2. Exec non-zero exit code
+        let res_fail_exec = comm.execute(&Command::new("fail_exec".to_string())).await?;
+        assert_eq!(res_fail_exec.exit_code, 1);
+
+        // 3. Upload file via SCP
+        let temp_dir = tempfile::tempdir().map_err(StampError::Io)?;
+        let local_file = temp_dir.path().join("upload.txt");
+        tokio::fs::write(&local_file, b"content to upload")
+            .await
+            .map_err(StampError::Io)?;
+        let remote_path = FilePath::new(PathBuf::from("/remote/upload.txt"));
+        comm.upload(&FilePath::new(local_file.clone()), &remote_path)
+            .await?;
+
+        // 4. Download file via SCP
+        let local_dl = temp_dir.path().join("download.txt");
+        comm.download(&remote_path, &FilePath::new(local_dl.clone()))
+            .await?;
+        assert!(local_dl.exists());
+
+        // 5. Private key authentication
+        let priv_key_path = temp_dir.path().join("id_ed25519");
+        tokio::fs::write(&priv_key_path, TEST_OPENSSH_KEY)
+            .await
+            .map_err(StampError::Io)?;
+        let loaded_key = load_private_key(&priv_key_path, None).await?;
+        assert_eq!(
+            loaded_key.key_data().algorithm(),
+            Ok(russh::keys::ssh_key::Algorithm::Ed25519)
+        );
+
+        let mut key_cfg = config.clone();
+        key_cfg.password = None;
+        key_cfg.private_key_path = Some(FilePath::new(priv_key_path.clone()));
+        let comm_key = SshCommunicator::new(key_cfg);
+        let res_key = comm_key
+            .execute(&Command::new("whoami".to_string()))
+            .await?;
+        assert_eq!(res_key.exit_code, 0);
+
+        // 6. SshAuthMethod::PrivateKey in auth_methods alone
+        let mut method_cfg = config.clone();
+        method_cfg.password = None;
+        method_cfg.auth_methods = vec![SshAuthMethod::PrivateKey {
+            key_path: FilePath::new(priv_key_path.clone()),
+            passphrase: None,
+        }];
+        let comm_method = SshCommunicator::new(method_cfg);
+        let res_method = comm_method.execute(&Command::new("id".to_string())).await?;
+        assert_eq!(res_method.exit_code, 0);
+
+        let mut method_pass_cfg = config.clone();
+        method_pass_cfg.password = None;
+        method_pass_cfg.auth_methods = vec![SshAuthMethod::Password("testpass".to_string())];
+        let comm_method_pass = SshCommunicator::new(method_pass_cfg);
+        let res_pass = comm_method_pass
+            .execute(&Command::new("id".to_string()))
+            .await?;
+        assert_eq!(res_pass.exit_code, 0);
+
+        let mut method_pk_reject_cfg = config.clone();
+        method_pk_reject_cfg.timeout = Timeout::new(Duration::from_millis(50));
+        method_pk_reject_cfg.username = "reject".to_string();
+        method_pk_reject_cfg.password = None;
+        method_pk_reject_cfg.auth_methods = vec![SshAuthMethod::PrivateKey {
+            key_path: FilePath::new(priv_key_path.clone()),
+            passphrase: None,
+        }];
+        let comm_pk_rej = SshCommunicator::new(method_pk_reject_cfg);
+        assert!(
+            comm_pk_rej
+                .execute(&Command::new("id".to_string()))
+                .await
+                .is_err()
+        );
+
+        // 7. Bastion single hop
+        let mut bastion_cfg = config.clone();
+        bastion_cfg.bastion_host = Some("127.0.0.1".to_string());
+        bastion_cfg.bastion_port = Some(Port::new(port));
+        bastion_cfg.bastion_password = Some("bastion_pass".to_string());
+        bastion_cfg.bastion_username = Some("jump".to_string());
+        let comm_bastion = SshCommunicator::new(bastion_cfg);
+        let res_bastion = comm_bastion
+            .execute(&Command::new("hostname".to_string()))
+            .await?;
+        assert_eq!(res_bastion.exit_code, 0);
+
+        // 8. Bastion multi hop with 3 hops: private key, password, private key
+        let mut multi_bastion_cfg = config.clone();
+        multi_bastion_cfg.bastion_chain = vec![
+            BastionConfig {
+                host: "127.0.0.1".to_string(),
+                port: Port::new(port),
+                username: "jump1".to_string(),
+                password: None,
+                private_key_path: Some(FilePath::new(priv_key_path.clone())),
+                private_key_passphrase: None,
+            },
+            BastionConfig {
+                host: "127.0.0.1".to_string(),
+                port: Port::new(port),
+                username: "jump2".to_string(),
+                password: Some("jump2pass".to_string()),
+                private_key_path: None,
+                private_key_passphrase: None,
+            },
+            BastionConfig {
+                host: "127.0.0.1".to_string(),
+                port: Port::new(port),
+                username: "jump3".to_string(),
+                password: None,
+                private_key_path: Some(FilePath::new(priv_key_path.clone())),
+                private_key_passphrase: None,
+            },
+        ];
+        let comm_multi = SshCommunicator::new(multi_bastion_cfg);
+        let res_multi = comm_multi
+            .execute(&Command::new("hostname".to_string()))
+            .await?;
+        assert_eq!(res_multi.exit_code, 0);
+
+        let mut bastion_rej1_cfg = config.clone();
+        bastion_rej1_cfg.timeout = Timeout::new(Duration::from_millis(50));
+        bastion_rej1_cfg.bastion_chain = vec![BastionConfig {
+            host: "127.0.0.1".to_string(),
+            port: Port::new(port),
+            username: "reject".to_string(),
+            password: Some("badpass".to_string()),
+            private_key_path: None,
+            private_key_passphrase: None,
+        }];
+        let comm_b_rej1 = SshCommunicator::new(bastion_rej1_cfg);
+        assert!(
+            comm_b_rej1
+                .execute(&Command::new("hostname".to_string()))
+                .await
+                .is_err()
+        );
+
+        let mut bastion_rej2_cfg = config.clone();
+        bastion_rej2_cfg.timeout = Timeout::new(Duration::from_millis(50));
+        bastion_rej2_cfg.bastion_chain = vec![
+            BastionConfig {
+                host: "127.0.0.1".to_string(),
+                port: Port::new(port),
+                username: "jump1".to_string(),
+                password: Some("pass".to_string()),
+                private_key_path: None,
+                private_key_passphrase: None,
+            },
+            BastionConfig {
+                host: "127.0.0.1".to_string(),
+                port: Port::new(port),
+                username: "reject".to_string(),
+                password: Some("badpass".to_string()),
+                private_key_path: None,
+                private_key_passphrase: None,
+            },
+        ];
+        let comm_b_rej2 = SshCommunicator::new(bastion_rej2_cfg);
+        assert!(
+            comm_b_rej2
+                .execute(&Command::new("hostname".to_string()))
+                .await
+                .is_err()
+        );
+
+        let mut bastion_noauth_cfg = config.clone();
+        bastion_noauth_cfg.timeout = Timeout::new(Duration::from_millis(50));
+        bastion_noauth_cfg.bastion_chain = vec![
+            BastionConfig {
+                host: "127.0.0.1".to_string(),
+                port: Port::new(port),
+                username: "jump1".to_string(),
+                password: Some("pass".to_string()),
+                private_key_path: None,
+                private_key_passphrase: None,
+            },
+            BastionConfig {
+                host: "127.0.0.1".to_string(),
+                port: Port::new(port),
+                username: "jump2".to_string(),
+                password: None,
+                private_key_path: None,
+                private_key_passphrase: None,
+            },
+        ];
+        let comm_b_noauth = SshCommunicator::new(bastion_noauth_cfg);
+        let _ = comm_b_noauth
+            .execute(&Command::new("hostname".to_string()))
+            .await;
+
+        let mut bastion_hop1_noauth_cfg = config.clone();
+        bastion_hop1_noauth_cfg.timeout = Timeout::new(Duration::from_millis(50));
+        bastion_hop1_noauth_cfg.bastion_chain = vec![BastionConfig {
+            host: "127.0.0.1".to_string(),
+            port: Port::new(port),
+            username: "jump1".to_string(),
+            password: None,
+            private_key_path: None,
+            private_key_passphrase: None,
+        }];
+        let comm_b_hop1_noauth = SshCommunicator::new(bastion_hop1_noauth_cfg);
+        let _ = comm_b_hop1_noauth
+            .execute(&Command::new("hostname".to_string()))
+            .await;
+
+        // 9. SFTP protocol upload and download (including directory and nested directory)
+        let mut sftp_cfg = config.clone();
+        sftp_cfg.transfer_protocol = FileTransferProtocol::Sftp;
+        let comm_sftp = SshCommunicator::new(sftp_cfg);
+        let res_sftp_up = comm_sftp
+            .upload(&FilePath::new(local_file.clone()), &remote_path)
+            .await;
+        assert!(res_sftp_up.is_ok());
+
+        let sftp_upload_dir = temp_dir.path().join("sftp_dir");
+        let sub_nested = sftp_upload_dir.join("nested");
+        tokio::fs::create_dir_all(&sub_nested)
+            .await
+            .map_err(StampError::Io)?;
+        tokio::fs::write(sub_nested.join("sub.txt"), b"sub")
+            .await
+            .map_err(StampError::Io)?;
+        let _ = comm_sftp
+            .upload(&FilePath::new(sftp_upload_dir), &remote_path)
+            .await;
+
+        let sftp_dl_file = temp_dir.path().join("sftp_download.txt");
+        let res_sftp_dl = comm_sftp
+            .download(&remote_path, &FilePath::new(sftp_dl_file))
+            .await;
+        assert!(res_sftp_dl.is_ok());
+
+        let sftp_dl_dir = temp_dir.path().join("sftp_download_dir");
+        let res_sftp_dir_dl = comm_sftp
+            .download(
+                &FilePath::new(PathBuf::from("/remote/dir")),
+                &FilePath::new(sftp_dl_dir),
+            )
+            .await;
+        assert!(res_sftp_dir_dl.is_ok());
+
+        assert_eq!(
+            russh_sftp::server::Handler::unimplemented(&MockSftpSession::default()),
+            StatusCode::OpUnsupported
+        );
+
+        // 10. Auth rejections
+        let mut reject_cfg = config.clone();
+        reject_cfg.timeout = Timeout::new(Duration::from_millis(50));
+        reject_cfg.connection_attempts = 1;
+        reject_cfg.retry_backoff = Duration::from_millis(1);
+        reject_cfg.username = "reject".to_string();
+        reject_cfg.password = Some("wrong".to_string());
+        reject_cfg.auth_methods = vec![SshAuthMethod::Password("wrong".to_string())];
+        let comm_reject = SshCommunicator::new(reject_cfg);
+        assert!(matches!(
+            comm_reject.execute(&Command::new("id".to_string())).await,
+            Err(StampError::Execution(_))
+        ));
+
+        let mut reject_pass_cfg = config.clone();
+        reject_pass_cfg.timeout = Timeout::new(Duration::from_millis(50));
+        reject_pass_cfg.connection_attempts = 1;
+        reject_pass_cfg.retry_backoff = Duration::from_millis(1);
+        reject_pass_cfg.username = "reject".to_string();
+        reject_pass_cfg.password = Some("wrong".to_string());
+        let comm_reject_pass = SshCommunicator::new(reject_pass_cfg);
+        assert!(matches!(
+            comm_reject_pass
+                .execute(&Command::new("id".to_string()))
+                .await,
+            Err(StampError::Execution(_))
+        ));
+
+        let mut reject_pk_cfg = config.clone();
+        reject_pk_cfg.timeout = Timeout::new(Duration::from_millis(50));
+        reject_pk_cfg.connection_attempts = 1;
+        reject_pk_cfg.retry_backoff = Duration::from_millis(1);
+        reject_pk_cfg.username = "reject".to_string();
+        reject_pk_cfg.password = None;
+        reject_pk_cfg.private_key_path = Some(FilePath::new(priv_key_path.clone()));
+        let comm_reject_pk = SshCommunicator::new(reject_pk_cfg);
+        assert!(matches!(
+            comm_reject_pk
+                .execute(&Command::new("id".to_string()))
+                .await,
+            Err(StampError::Execution(_))
+        ));
+
+        // 11. SCP error branches
+        let fail_remote = FilePath::new(PathBuf::from("/fail_init/error.txt"));
+        let dummy_local = temp_dir.path().join("d.txt");
+        tokio::fs::write(&dummy_local, b"test")
+            .await
+            .map_err(StampError::Io)?;
+        let res_scp_fail = comm
+            .upload(&FilePath::new(dummy_local.clone()), &fail_remote)
+            .await;
+        assert!(matches!(res_scp_fail, Err(StampError::Execution(_))));
+
+        let fail_meta_local = temp_dir.path().join("fail_meta.txt");
+        tokio::fs::write(&fail_meta_local, b"test")
+            .await
+            .map_err(StampError::Io)?;
+        let res_meta_fail = comm
+            .upload(&FilePath::new(fail_meta_local), &remote_path)
+            .await;
+        assert!(matches!(res_meta_fail, Err(StampError::Execution(_))));
+
+        let fail_data_local = temp_dir.path().join("fail_data.txt");
+        tokio::fs::write(&fail_data_local, b"fail_data content")
+            .await
+            .map_err(StampError::Io)?;
+        let res_data_fail = comm
+            .upload(&FilePath::new(fail_data_local), &remote_path)
+            .await;
+        assert!(matches!(res_data_fail, Err(StampError::Execution(_))));
+
+        let bad_dl_path = FilePath::new(PathBuf::from("/nonexistent_dir_12345/dl.txt"));
+        let res_scp_dl_fail = comm.download(&remote_path, &bad_dl_path).await;
+        assert!(matches!(res_scp_dl_fail, Err(StampError::Io(_))));
+
+        let bad_local_upload = FilePath::new(PathBuf::from("/nonexistent_file_12345.txt"));
+        let res_up_fail = comm.upload(&bad_local_upload, &remote_path).await;
+        assert!(matches!(res_up_fail, Err(StampError::Io(_))));
+
+        let disc_init_remote = FilePath::new(PathBuf::from("/disc_after_init/file.txt"));
+        let _ = comm
+            .upload(&FilePath::new(dummy_local.clone()), &disc_init_remote)
+            .await;
+
+        let disc_meta_local = temp_dir.path().join("disc_after_meta.txt");
+        tokio::fs::write(&disc_meta_local, b"test")
+            .await
+            .map_err(StampError::Io)?;
+        let _ = comm
+            .upload(&FilePath::new(disc_meta_local), &remote_path)
+            .await;
+
+        let disc_data_local = temp_dir.path().join("disc_data.txt");
+        tokio::fs::write(&disc_data_local, b"disc_after_data")
+            .await
+            .map_err(StampError::Io)?;
+        let _ = comm
+            .upload(&FilePath::new(disc_data_local), &remote_path)
+            .await;
+
+        let disc_dl_remote = FilePath::new(PathBuf::from("/disc_download/file.txt"));
+        let dummy_dl_dest = temp_dir.path().join("dl_dest.txt");
+        let _ = comm
+            .download(&disc_dl_remote, &FilePath::new(dummy_dl_dest))
+            .await;
+
+        // 12. Mock agent authentication with PublicKey
+        let agent_sock_pk = temp_dir.path().join("agent_pk.sock");
+        let pk_arc = Arc::new(loaded_key);
+        let agent_pk_handle = start_mock_agent(&agent_sock_pk, pk_arc).await?;
+
+        let mut agent_cfg = config.clone();
+        agent_cfg.password = None;
+        agent_cfg.auth_methods = vec![SshAuthMethod::Agent {
+            socket_path: Some(FilePath::new(agent_sock_pk.clone())),
+        }];
+        let comm_agent = SshCommunicator::new(agent_cfg);
+        let res_agent = comm_agent.execute(&Command::new("id".to_string())).await?;
+        assert_eq!(res_agent.exit_code, 0);
+
+        {
+            let _guard = crate::utils::ENV_MUTEX
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            unsafe {
+                std::env::set_var("SSH_AUTH_SOCK", &agent_sock_pk);
+            }
+            let mut agent_env_cfg = config.clone();
+            agent_env_cfg.password = None;
+            agent_env_cfg.auth_methods = vec![SshAuthMethod::Agent { socket_path: None }];
+            let comm_agent_env = SshCommunicator::new(agent_env_cfg);
+            let res_env = comm_agent_env
+                .execute(&Command::new("id".to_string()))
+                .await?;
+            assert_eq!(res_env.exit_code, 0);
+            unsafe {
+                std::env::remove_var("SSH_AUTH_SOCK");
+            }
+        }
+
+        let mut agent_rej_cfg = config.clone();
+        agent_rej_cfg.timeout = Timeout::new(Duration::from_millis(50));
+        agent_rej_cfg.username = "reject".to_string();
+        agent_rej_cfg.password = None;
+        agent_rej_cfg.auth_methods = vec![SshAuthMethod::Agent {
+            socket_path: Some(FilePath::new(agent_sock_pk)),
+        }];
+        let comm_agent_rej = SshCommunicator::new(agent_rej_cfg);
+        assert!(
+            comm_agent_rej
+                .execute(&Command::new("id".to_string()))
+                .await
+                .is_err()
+        );
+
+        agent_pk_handle.abort();
+
+        // 13. Mock agent authentication with Certificate
+        let cert_sock = temp_dir.path().join("agent_cert.sock");
+        let priv_key_agent = russh::keys::decode_secret_key(TEST_OPENSSH_KEY, None)
+            .map_err(|e| StampError::Execution(e.to_string()))?;
+        let mut builder_agent = russh::keys::ssh_key::certificate::Builder::new(
+            vec![2u8; 16],
+            priv_key_agent.public_key().key_data().clone(),
+            0,
+            u64::MAX,
+        )
+        .map_err(|e| StampError::Execution(e.to_string()))?;
+        builder_agent
+            .serial(2)
+            .map_err(|e| StampError::Execution(e.to_string()))?;
+        builder_agent
+            .key_id("agent_test")
+            .map_err(|e| StampError::Execution(e.to_string()))?;
+        builder_agent
+            .cert_type(russh::keys::ssh_key::certificate::CertType::Host)
+            .map_err(|e| StampError::Execution(e.to_string()))?;
+        builder_agent
+            .valid_principal("test.local")
+            .map_err(|e| StampError::Execution(e.to_string()))?;
+        let cert_agent = builder_agent
+            .sign(&priv_key_agent)
+            .map_err(|e| StampError::Execution(e.to_string()))?;
+        let cert_bytes = cert_agent
+            .to_bytes()
+            .map_err(|e| StampError::Execution(e.to_string()))?;
+        let keypair_agent = match priv_key_agent.key_data() {
+            russh::keys::ssh_key::private::KeypairData::Ed25519(kp) => kp.clone(),
+            _ => unreachable!(),
+        };
+        let agent_cert_handle = run_mock_cert_agent(&cert_sock, cert_bytes, keypair_agent).await?;
+
+        let mut agent_cert_cfg = config.clone();
+        agent_cert_cfg.password = None;
+        agent_cert_cfg.auth_methods = vec![SshAuthMethod::Agent {
+            socket_path: Some(FilePath::new(cert_sock)),
+        }];
+        let comm_agent_cert = SshCommunicator::new(agent_cert_cfg);
+        let res_agent_cert = comm_agent_cert
+            .execute(&Command::new("id".to_string()))
+            .await?;
+        assert_eq!(res_agent_cert.exit_code, 0);
+        agent_cert_handle.abort();
+
+        server_handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ssh_legacy_and_edge_branches() -> Result<(), StampError> {
+        let (port, server_handle) = start_mock_ssh_server(false, false).await?;
+        let temp_dir = tempfile::tempdir().map_err(StampError::Io)?;
+        let priv_key_path = temp_dir.path().join("id_ed25519");
+        tokio::fs::write(&priv_key_path, TEST_OPENSSH_KEY)
+            .await
+            .map_err(StampError::Io)?;
+
+        // 1. Certificate generation and check_server_key Certificate branch
+        let priv_key = russh::keys::decode_secret_key(TEST_OPENSSH_KEY, None)
+            .map_err(|e| StampError::Execution(e.to_string()))?;
+        let mut builder = russh::keys::ssh_key::certificate::Builder::new(
+            vec![1u8; 16],
+            priv_key.public_key().key_data().clone(),
+            0,
+            u64::MAX,
+        )
+        .map_err(|e| StampError::Execution(e.to_string()))?;
+        builder
+            .serial(1)
+            .map_err(|e| StampError::Execution(e.to_string()))?;
+        builder
+            .key_id("test")
+            .map_err(|e| StampError::Execution(e.to_string()))?;
+        builder
+            .cert_type(russh::keys::ssh_key::certificate::CertType::Host)
+            .map_err(|e| StampError::Execution(e.to_string()))?;
+        builder
+            .valid_principal("test.local")
+            .map_err(|e| StampError::Execution(e.to_string()))?;
+        let cert = builder
+            .sign(&priv_key)
+            .map_err(|e| StampError::Execution(e.to_string()))?;
+        let cert_or_key = russh::keys::PublicKeyOrCertificate::Certificate(cert.clone());
+
+        let cert_file_path = temp_dir.path().join("id_ed25519-cert.pub");
+        tokio::fs::write(&cert_file_path, cert.to_openssh().unwrap_or_default())
+            .await
+            .map_err(StampError::Io)?;
+
+        let mut handler = ClientHandler {
+            host_key_verification: HostKeyVerification::Strict,
+            host: "test.local".to_string(),
+            port: 22,
+            known_hosts_file: None,
+        };
+        let _ = handler
+            .check_server_key(&cert_or_key)
+            .await
+            .map_err(|e| StampError::Execution(e.to_string()))?;
+
+        let mut handler_accept = ClientHandler {
+            host_key_verification: HostKeyVerification::AcceptNew,
+            host: "test.local".to_string(),
+            port: 22,
+            known_hosts_file: None,
+        };
+        let _ = handler_accept
+            .check_server_key(&cert_or_key)
+            .await
+            .map_err(|e| StampError::Execution(e.to_string()))?;
+
+        // 2. Legacy fallback certificate authentication (success and failure)
+        let mut legacy_cert_cfg = get_config("127.0.0.1", "testuser");
+        legacy_cert_cfg.port = Port::new(port);
+        legacy_cert_cfg.password = None;
+        legacy_cert_cfg.private_key_path = Some(FilePath::new(priv_key_path.clone()));
+        legacy_cert_cfg.certificate_path = Some(FilePath::new(cert_file_path.clone()));
+        let comm_leg_cert = SshCommunicator::new(legacy_cert_cfg);
+        let res_leg = comm_leg_cert
+            .execute(&Command::new("id".to_string()))
+            .await?;
+        assert_eq!(res_leg.exit_code, 0);
+
+        let mut legacy_cert_fail_cfg = get_config("127.0.0.1", "reject");
+        legacy_cert_fail_cfg.timeout = Timeout::new(Duration::from_millis(50));
+        legacy_cert_fail_cfg.port = Port::new(port);
+        legacy_cert_fail_cfg.password = None;
+        legacy_cert_fail_cfg.private_key_path = Some(FilePath::new(priv_key_path.clone()));
+        legacy_cert_fail_cfg.certificate_path = Some(FilePath::new(cert_file_path.clone()));
+        let comm_leg_cert_fail = SshCommunicator::new(legacy_cert_fail_cfg);
+        assert!(
+            comm_leg_cert_fail
+                .execute(&Command::new("id".to_string()))
+                .await
+                .is_err()
+        );
+
+        // 3. SshAuthMethod::Certificate (success and failure)
+        let mut method_cert_cfg = get_config("127.0.0.1", "testuser");
+        method_cert_cfg.port = Port::new(port);
+        method_cert_cfg.password = None;
+        method_cert_cfg.auth_methods = vec![SshAuthMethod::Certificate {
+            key_path: FilePath::new(priv_key_path.clone()),
+            certificate_path: FilePath::new(cert_file_path.clone()),
+            passphrase: None,
+        }];
+        let comm_method_cert = SshCommunicator::new(method_cert_cfg);
+        let res_meth_cert = comm_method_cert
+            .execute(&Command::new("id".to_string()))
+            .await?;
+        assert_eq!(res_meth_cert.exit_code, 0);
+
+        let mut method_cert_fail_cfg = get_config("127.0.0.1", "reject");
+        method_cert_fail_cfg.timeout = Timeout::new(Duration::from_millis(50));
+        method_cert_fail_cfg.port = Port::new(port);
+        method_cert_fail_cfg.password = None;
+        method_cert_fail_cfg.auth_methods = vec![SshAuthMethod::Certificate {
+            key_path: FilePath::new(priv_key_path.clone()),
+            certificate_path: FilePath::new(cert_file_path),
+            passphrase: None,
+        }];
+        let comm_method_cert_fail = SshCommunicator::new(method_cert_fail_cfg);
+        assert!(
+            comm_method_cert_fail
+                .execute(&Command::new("id".to_string()))
+                .await
+                .is_err()
+        );
+
+        // 4. Legacy bastion fields
+        let mut leg_bastion_cfg = get_config("127.0.0.1", "testuser");
+        leg_bastion_cfg.timeout = Timeout::new(Duration::from_millis(50));
+        leg_bastion_cfg.port = Port::new(port);
+        leg_bastion_cfg.bastion_host = Some("127.0.0.1".to_string());
+        leg_bastion_cfg.bastion_port = Some(Port::new(port));
+        leg_bastion_cfg.bastion_username = Some("jump".to_string());
+        leg_bastion_cfg.bastion_password = Some("pass".to_string());
+        leg_bastion_cfg.bastion_private_key_file = Some(FilePath::new(priv_key_path.clone()));
+        let comm_leg_bastion = SshCommunicator::new(leg_bastion_cfg);
+        let _ = comm_leg_bastion
+            .execute(&Command::new("id".to_string()))
+            .await;
+
+        // 5. Connection retry loop exhaustion
+        let mut fail_conn_cfg = get_config("127.0.0.1", "testuser");
+        fail_conn_cfg.port = Port::new(1); // Closed port
+        fail_conn_cfg.connection_attempts = 2;
+        fail_conn_cfg.retry_backoff = Duration::from_millis(1);
+        let comm_fail_conn = SshCommunicator::new(fail_conn_cfg);
+        assert!(
+            comm_fail_conn
+                .execute(&Command::new("id".to_string()))
+                .await
+                .is_err()
+        );
+
+        server_handle.abort();
+
+        // 6. Channel rejection server
+        let (rej_port, rej_handle) = start_mock_ssh_server(true, false).await?;
+        let mut rej_cfg = get_config("127.0.0.1", "testuser");
+        rej_cfg.port = Port::new(rej_port);
+        rej_cfg.password = Some("testpass".to_string());
+        let comm_rej = SshCommunicator::new(rej_cfg.clone());
+        assert!(
+            comm_rej
+                .execute(&Command::new("id".to_string()))
+                .await
+                .is_err()
+        );
+
+        let local_dummy = temp_dir.path().join("rej_dummy.txt");
+        tokio::fs::write(&local_dummy, b"rej")
+            .await
+            .map_err(StampError::Io)?;
+        let remote_dummy = FilePath::new(PathBuf::from("/remote/rej.txt"));
+        assert!(
+            comm_rej
+                .upload(&FilePath::new(local_dummy.clone()), &remote_dummy)
+                .await
+                .is_err()
+        );
+        assert!(
+            comm_rej
+                .download(&remote_dummy, &FilePath::new(local_dummy.clone()))
+                .await
+                .is_err()
+        );
+
+        let mut rej_sftp_cfg = rej_cfg;
+        rej_sftp_cfg.transfer_protocol = FileTransferProtocol::Sftp;
+        let comm_rej_sftp = SshCommunicator::new(rej_sftp_cfg);
+        assert!(
+            comm_rej_sftp
+                .upload(&FilePath::new(local_dummy.clone()), &remote_dummy)
+                .await
+                .is_err()
+        );
+
+        rej_handle.abort();
+
+        // 7. Disconnect on session server (covers Exec error on execute, upload, download)
+        let (disc_port, disc_handle) = start_mock_ssh_server(false, true).await?;
+        let mut disc_cfg = get_config("127.0.0.1", "testuser");
+        disc_cfg.port = Port::new(disc_port);
+        disc_cfg.password = Some("testpass".to_string());
+        disc_cfg.pty = false;
+        let comm_disc = SshCommunicator::new(disc_cfg);
+        assert!(
+            comm_disc
+                .execute(&Command::new("id".to_string()))
+                .await
+                .is_err()
+        );
+        assert!(
+            comm_disc
+                .upload(&FilePath::new(local_dummy.clone()), &remote_dummy)
+                .await
+                .is_err()
+        );
+        assert!(
+            comm_disc
+                .download(&remote_dummy, &FilePath::new(local_dummy))
+                .await
+                .is_err()
+        );
+
+        disc_handle.abort();
+        Ok(())
     }
 }

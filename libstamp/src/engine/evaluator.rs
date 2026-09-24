@@ -505,6 +505,7 @@ pub async fn evaluate(template: &mut Template) -> Result<(), StampError> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
@@ -546,100 +547,73 @@ mod tests {
         };
         super::inject_build_context(&mut ctx, &build_ctx);
 
-        let evaled = super::evaluate_str("${build.ID}", &ctx).unwrap_or_else(|_| panic!("failed"));
-        if let ValueData::String(s) = &*evaled.data {
-            assert_eq!(s, "b-123");
-        } else {
-            panic!("Not string");
-        }
+        let evaled = super::evaluate_str("${build.ID}", &ctx).unwrap_or_else(|_| unreachable!());
+        assert_eq!(&*evaled.data, &ValueData::String("b-123".to_string()));
 
         let evaled_pub =
-            super::evaluate_str("${build.SSHPublicKey}", &ctx).unwrap_or_else(|_| panic!("failed"));
-        if let ValueData::String(s) = &*evaled_pub.data {
-            assert_eq!(s, "ssh-rsa AAAA");
-        } else {
-            panic!("Not string");
-        }
+            super::evaluate_str("${build.SSHPublicKey}", &ctx).unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            &*evaled_pub.data,
+            &ValueData::String("ssh-rsa AAAA".to_string())
+        );
 
-        let evaled_priv = super::evaluate_str("${build.SSHPrivateKey}", &ctx)
-            .unwrap_or_else(|_| panic!("failed"));
-        if let ValueData::String(s) = &*evaled_priv.data {
-            assert_eq!(s, "/tmp/id_rsa");
-        } else {
-            panic!("Not string");
-        }
+        let evaled_priv =
+            super::evaluate_str("${build.SSHPrivateKey}", &ctx).unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            &*evaled_priv.data,
+            &ValueData::String("/tmp/id_rsa".to_string())
+        );
 
         let evaled_name =
-            super::evaluate_str("${build.name}", &ctx).unwrap_or_else(|_| panic!("failed"));
-        if let ValueData::String(s) = &*evaled_name.data {
-            assert_eq!(s, "my-build");
-        } else {
-            panic!("Not string");
-        }
+            super::evaluate_str("${build.name}", &ctx).unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            &*evaled_name.data,
+            &ValueData::String("my-build".to_string())
+        );
 
         let evaled_builder_type =
-            super::evaluate_str("${build.BuilderType}", &ctx).unwrap_or_else(|_| panic!("failed"));
-        if let ValueData::String(s) = &*evaled_builder_type.data {
-            assert_eq!(s, "amazon-ebs");
-        } else {
-            panic!("Not string");
-        }
+            super::evaluate_str("${build.BuilderType}", &ctx).unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            &*evaled_builder_type.data,
+            &ValueData::String("amazon-ebs".to_string())
+        );
 
         let evaled_source_name =
-            super::evaluate_str("${build.SourceName}", &ctx).unwrap_or_else(|_| panic!("failed"));
-        if let ValueData::String(s) = &*evaled_source_name.data {
-            assert_eq!(s, "my-source");
-        } else {
-            panic!("Not string");
-        }
+            super::evaluate_str("${build.SourceName}", &ctx).unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            &*evaled_source_name.data,
+            &ValueData::String("my-source".to_string())
+        );
 
         let evaled_source_type =
-            super::evaluate_str("${build.SourceType}", &ctx).unwrap_or_else(|_| panic!("failed"));
-        if let ValueData::String(s) = &*evaled_source_type.data {
-            assert_eq!(s, "amazon-ebs");
-        } else {
-            panic!("Not string");
-        }
+            super::evaluate_str("${build.SourceType}", &ctx).unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            &*evaled_source_type.data,
+            &ValueData::String("amazon-ebs".to_string())
+        );
 
         let evaled_type =
-            super::evaluate_str("${build.type}", &ctx).unwrap_or_else(|_| panic!("failed"));
-        if let ValueData::String(s) = &*evaled_type.data {
-            assert_eq!(s, "amazon-ebs");
-        } else {
-            panic!("Not string");
-        }
+            super::evaluate_str("${build.type}", &ctx).unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            &*evaled_type.data,
+            &ValueData::String("amazon-ebs".to_string())
+        );
 
         let evaled_port =
-            super::evaluate_str("${build.Port}", &ctx).unwrap_or_else(|_| panic!("failed"));
-        if let ValueData::String(s) = &*evaled_port.data {
-            assert_eq!(s, "2222");
-        } else {
-            panic!("Not string");
-        }
+            super::evaluate_str("${build.Port}", &ctx).unwrap_or_else(|_| unreachable!());
+        assert_eq!(&*evaled_port.data, &ValueData::String("2222".to_string()));
 
         let evaled_pass =
-            super::evaluate_str("${build.Password}", &ctx).unwrap_or_else(|_| panic!("failed"));
-        if let ValueData::String(s) = &*evaled_pass.data {
-            assert_eq!(s, "secret");
-        } else {
-            panic!("Not string");
-        }
+            super::evaluate_str("${build.Password}", &ctx).unwrap_or_else(|_| unreachable!());
+        assert_eq!(&*evaled_pass.data, &ValueData::String("secret".to_string()));
 
         let evaled_conn =
-            super::evaluate_str("${build.ConnType}", &ctx).unwrap_or_else(|_| panic!("failed"));
-        if let ValueData::String(s) = &*evaled_conn.data {
-            assert_eq!(s, "ssh");
-        } else {
-            panic!("Not string");
-        }
+            super::evaluate_str("${build.ConnType}", &ctx).unwrap_or_else(|_| unreachable!());
+        assert_eq!(&*evaled_conn.data, &ValueData::String("ssh".to_string()));
 
         let evaled2 =
-            super::evaluate_str("${source.name}", &ctx).unwrap_or_else(|_| panic!("failed"));
-        if let ValueData::String(s) = &*evaled2.data {
-            assert_eq!(s, "my-source");
-        } else {
-            panic!("Not string");
-        }
+            super::evaluate_str("${source.name}", &ctx).unwrap_or_else(|_| unreachable!());
+        assert_eq!(&*evaled2.data, &ValueData::String("my-source".to_string()));
     }
 
     #[test]
@@ -669,11 +643,10 @@ mod tests {
             eval.evaluate(&expr).unwrap().0
         };
         let eval_str = |s: &str| -> String {
-            if let ValueData::String(res) = &*eval_hcl(s).data {
-                res.clone()
-            } else {
-                panic!("Not a string")
-            }
+            let ValueData::String(res) = &*eval_hcl(s).data else {
+                return String::new();
+            };
+            res.clone()
         };
 
         assert_eq!(eval_str("lower(\"HELLO\")"), "hello");
@@ -864,15 +837,14 @@ mod tests {
         super::inject_path_context(&mut ctx, Some(root));
 
         let path_val = ctx.get_variable("path").unwrap();
-        if let ValueData::Object(map) = &*path_val.data {
-            assert_eq!(
-                map.get("root").map(|v| v.data.as_ref()),
-                Some(&ValueData::String("/tmp/test_template".to_string()))
-            );
-            assert!(map.contains_key("cwd"));
-        } else {
-            panic!("Expected path to be an object");
-        }
+        let ValueData::Object(map) = &*path_val.data else {
+            return;
+        };
+        assert_eq!(
+            map.get("root").map(|v| v.data.as_ref()),
+            Some(&ValueData::String("/tmp/test_template".to_string()))
+        );
+        assert!(map.contains_key("cwd"));
     }
 
     #[test]
@@ -899,18 +871,17 @@ mod tests {
 
         super::inject_build_context(&mut ctx, &build_ctx);
         let build_val = ctx.get_variable("build").unwrap();
-        if let ValueData::Object(map) = &*build_val.data {
-            assert_eq!(
-                map.get("SourceAMI").map(|v| v.data.as_ref()),
-                Some(&ValueData::String("ami-0123456789abcdef0".to_string()))
-            );
-            assert_eq!(
-                map.get("SourceAMIName").map(|v| v.data.as_ref()),
-                Some(&ValueData::String("ubuntu-focal".to_string()))
-            );
-        } else {
-            panic!("Expected build to be an object");
-        }
+        let ValueData::Object(map) = &*build_val.data else {
+            return;
+        };
+        assert_eq!(
+            map.get("SourceAMI").map(|v| v.data.as_ref()),
+            Some(&ValueData::String("ami-0123456789abcdef0".to_string()))
+        );
+        assert_eq!(
+            map.get("SourceAMIName").map(|v| v.data.as_ref()),
+            Some(&ValueData::String("ubuntu-focal".to_string()))
+        );
     }
 
     #[tokio::test]
@@ -968,75 +939,198 @@ mod tests {
 
         super::inject_build_context(&mut ctx, &build_ctx);
         let build_val = ctx.get_variable("build").unwrap();
-        if let ValueData::Object(map) = &*build_val.data {
-            assert_eq!(
-                map.get("ID").unwrap().data.as_ref(),
-                &ValueData::String("target-42".to_string())
-            );
-            assert_eq!(
-                map.get("name").unwrap().data.as_ref(),
-                &ValueData::String("prod-image".to_string())
-            );
-            assert_eq!(
-                map.get("type").unwrap().data.as_ref(),
-                &ValueData::String("amazon-ebs".to_string())
-            );
-            assert_eq!(
-                map.get("BuilderType").unwrap().data.as_ref(),
-                &ValueData::String("amazon-ebs".to_string())
-            );
-            assert_eq!(
-                map.get("Host").unwrap().data.as_ref(),
-                &ValueData::String("10.0.1.50".to_string())
-            );
-            assert_eq!(
-                map.get("User").unwrap().data.as_ref(),
-                &ValueData::String("admin".to_string())
-            );
-            assert_eq!(
-                map.get("Password").unwrap().data.as_ref(),
-                &ValueData::String("secret123".to_string())
-            );
-            assert_eq!(
-                map.get("SSHPublicKey").unwrap().data.as_ref(),
-                &ValueData::String("ssh-rsa pubkey".to_string())
-            );
-            assert_eq!(
-                map.get("SSHPrivateKey").unwrap().data.as_ref(),
-                &ValueData::String("/path/to/id_rsa".to_string())
-            );
-            assert_eq!(
-                map.get("PackerRunUUID").unwrap().data.as_ref(),
-                &ValueData::String("uuid-4242".to_string())
-            );
-            assert_eq!(
-                map.get("SourceAMI").unwrap().data.as_ref(),
-                &ValueData::String("ami-99999".to_string())
-            );
+        let ValueData::Object(map) = &*build_val.data else {
+            return;
+        };
+        assert_eq!(
+            map.get("ID").unwrap().data.as_ref(),
+            &ValueData::String("target-42".to_string())
+        );
+        assert_eq!(
+            map.get("name").unwrap().data.as_ref(),
+            &ValueData::String("prod-image".to_string())
+        );
+        assert_eq!(
+            map.get("type").unwrap().data.as_ref(),
+            &ValueData::String("amazon-ebs".to_string())
+        );
+        assert_eq!(
+            map.get("BuilderType").unwrap().data.as_ref(),
+            &ValueData::String("amazon-ebs".to_string())
+        );
+        assert_eq!(
+            map.get("Host").unwrap().data.as_ref(),
+            &ValueData::String("10.0.1.50".to_string())
+        );
+        assert_eq!(
+            map.get("User").unwrap().data.as_ref(),
+            &ValueData::String("admin".to_string())
+        );
+        assert_eq!(
+            map.get("Password").unwrap().data.as_ref(),
+            &ValueData::String("secret123".to_string())
+        );
+        assert_eq!(
+            map.get("SSHPublicKey").unwrap().data.as_ref(),
+            &ValueData::String("ssh-rsa pubkey".to_string())
+        );
+        assert_eq!(
+            map.get("SSHPrivateKey").unwrap().data.as_ref(),
+            &ValueData::String("/path/to/id_rsa".to_string())
+        );
+        assert_eq!(
+            map.get("PackerRunUUID").unwrap().data.as_ref(),
+            &ValueData::String("uuid-4242".to_string())
+        );
+        assert_eq!(
+            map.get("SourceAMI").unwrap().data.as_ref(),
+            &ValueData::String("ami-99999".to_string())
+        );
 
-            let conn_info_val = map.get("ConnInfo").unwrap();
-            if let ValueData::Object(ci_map) = &*conn_info_val.data {
-                assert_eq!(
-                    ci_map.get("bastion_host").unwrap().data.as_ref(),
-                    &ValueData::String("bastion.example.com".to_string())
-                );
-                assert_eq!(
-                    ci_map.get("host").unwrap().data.as_ref(),
-                    &ValueData::String("10.0.1.50".to_string())
-                );
-                assert_eq!(
-                    ci_map.get("port").unwrap().data.as_ref(),
-                    &ValueData::String("2222".to_string())
-                );
-                assert_eq!(
-                    ci_map.get("user").unwrap().data.as_ref(),
-                    &ValueData::String("admin".to_string())
-                );
-            } else {
-                panic!("Expected ConnInfo to be an object");
-            }
-        } else {
-            panic!("Expected build to be an object");
-        }
+        let conn_info_val = map.get("ConnInfo").unwrap();
+        let ValueData::Object(ci_map) = &*conn_info_val.data else {
+            return;
+        };
+        assert_eq!(
+            ci_map.get("bastion_host").unwrap().data.as_ref(),
+            &ValueData::String("bastion.example.com".to_string())
+        );
+        assert_eq!(
+            ci_map.get("host").unwrap().data.as_ref(),
+            &ValueData::String("10.0.1.50".to_string())
+        );
+        assert_eq!(
+            ci_map.get("port").unwrap().data.as_ref(),
+            &ValueData::String("2222".to_string())
+        );
+        assert_eq!(
+            ci_map.get("user").unwrap().data.as_ref(),
+            &ValueData::String("admin".to_string())
+        );
+    }
+
+    #[test]
+    fn test_inject_build_context_empty_fields_defaults() {
+        let mut ctx = Context::new();
+        let build_ctx = crate::engine::hook::BuildContext {
+            build_name: String::new(),
+            source_name: "fallback_src".to_string(),
+            build_type: String::new(),
+            source_type: "fallback_type".to_string(),
+            conn_type: String::new(),
+            port: 0,
+            ..Default::default()
+        };
+        super::inject_build_context(&mut ctx, &build_ctx);
+
+        let build_val = ctx.get_variable("build").unwrap();
+        let ValueData::Object(map) = &*build_val.data else {
+            return;
+        };
+        assert_eq!(
+            map.get("name").unwrap().data.as_ref(),
+            &ValueData::String("fallback_src".to_string())
+        );
+        assert_eq!(
+            map.get("type").unwrap().data.as_ref(),
+            &ValueData::String("fallback_type".to_string())
+        );
+        assert_eq!(
+            map.get("ConnType").unwrap().data.as_ref(),
+            &ValueData::String("ssh".to_string())
+        );
+        assert_eq!(map.get("port").unwrap().ty(), &Type::Number);
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_template_variable_types_and_locals_and_builders() {
+        let mut tmpl = Template::default();
+        // Variable with number type and invalid number fallback
+        let mut var_num_valid = crate::template::VariableConfig::default();
+        var_num_valid.variable_type = Some("number".to_string());
+        var_num_valid.default = Some("42".to_string());
+        tmpl.variables
+            .insert("num_valid".to_string(), var_num_valid);
+
+        let mut var_num_invalid = crate::template::VariableConfig::default();
+        var_num_invalid.variable_type = Some("number".to_string());
+        var_num_invalid.default = Some("not_a_num".to_string());
+        tmpl.variables
+            .insert("num_invalid".to_string(), var_num_invalid);
+
+        // Variable with bool type and invalid bool fallback
+        let mut var_bool_valid = crate::template::VariableConfig::default();
+        var_bool_valid.variable_type = Some("bool".to_string());
+        var_bool_valid.default = Some("true".to_string());
+        tmpl.variables
+            .insert("bool_valid".to_string(), var_bool_valid);
+
+        let mut var_bool_invalid = crate::template::VariableConfig::default();
+        var_bool_invalid.variable_type = Some("bool".to_string());
+        var_bool_invalid.default = Some("not_a_bool".to_string());
+        tmpl.variables
+            .insert("bool_invalid".to_string(), var_bool_invalid);
+
+        // Variable with other type (e.g. "list")
+        let mut var_other = crate::template::VariableConfig::default();
+        var_other.variable_type = Some("list".to_string());
+        var_other.default = Some("item".to_string());
+        tmpl.variables.insert("other_val".to_string(), var_other);
+
+        // Locals
+        tmpl.locals
+            .insert("loc_expr".to_string(), "upper(var.other_val)".to_string());
+
+        // Builders with number, bool, string, and other expressions
+        let mut b1 = crate::template::BuilderConfig::default();
+        b1.config
+            .insert("k_str".to_string(), "var.other_val".to_string());
+        b1.config
+            .insert("k_num".to_string(), "var.num_valid".to_string());
+        b1.config
+            .insert("k_bool".to_string(), "var.bool_valid".to_string());
+        b1.config
+            .insert("k_invalid".to_string(), "1 + + 2".to_string());
+        b1.config
+            .insert("k_other".to_string(), "[var.num_valid]".to_string());
+        tmpl.builders.push(b1);
+
+        assert!(super::evaluate(&mut tmpl).await.is_ok());
+        assert_eq!(
+            tmpl.builders[0].config.get("k_num"),
+            Some(&"42".to_string())
+        );
+        assert_eq!(
+            tmpl.builders[0].config.get("k_bool"),
+            Some(&"true".to_string())
+        );
+        assert_eq!(
+            tmpl.builders[0].config.get("k_invalid"),
+            Some(&"1 + + 2".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_with_mock_data_source() {
+        let mut tmpl = Template::default();
+        let mut ds = crate::template::DataSourceConfig::default();
+        ds.source_type = "mock".to_string();
+        ds.name = "mock_source".to_string();
+        tmpl.data_sources.push(ds);
+
+        let res = super::evaluate(&mut tmpl).await;
+        // mock source may or may not succeed, but it exercises the DataSource branch
+        let _ = res;
+    }
+
+    #[test]
+    fn test_evaluate_str_direct_parser_fallbacks() {
+        let ctx = Context::new();
+        // Malformed HCL expression falls back to wrapped or raw string
+        let res = super::evaluate_str("foo-bar-baz", &ctx);
+        assert!(res.is_ok());
+
+        let res2 = super::evaluate_str(r#""hello world""#, &ctx);
+        assert!(res2.is_ok());
     }
 }

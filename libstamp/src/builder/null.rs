@@ -292,6 +292,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_null_run_ssh_success() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::set_var("STAMP_TEST_MODE", "1");
         }
@@ -317,6 +320,9 @@ mod tests {
                 crate::engine::packer::OnErrorStrategy::Cleanup,
             )
             .await;
+        unsafe {
+            std::env::remove_var("STAMP_TEST_MODE");
+        }
         assert!(res.is_ok());
     }
 
@@ -349,6 +355,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_null_run_winrm_success() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::set_var("STAMP_TEST_MODE", "1");
         }
@@ -374,6 +383,9 @@ mod tests {
                 crate::engine::packer::OnErrorStrategy::Cleanup,
             )
             .await;
+        unsafe {
+            std::env::remove_var("STAMP_TEST_MODE");
+        }
         assert!(res.is_ok());
     }
 

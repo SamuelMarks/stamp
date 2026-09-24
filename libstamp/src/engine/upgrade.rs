@@ -781,7 +781,9 @@ mod tests {
             ]
         }"#;
 
-        let hcl = upgrade_json_to_hcl2(json).unwrap();
+        let hcl_res = upgrade_json_to_hcl2(json);
+        assert!(hcl_res.is_ok());
+        let hcl = hcl_res.unwrap_or_default();
         assert!(hcl.contains("# Ubuntu AMI build"));
         assert!(hcl.contains("packer {"));
         assert!(hcl.contains("variable \"region\" {"));
@@ -851,9 +853,106 @@ mod tests {
             ]
         }"#;
 
-        let structured = upgrade_json_to_structured_hcl2(json).unwrap();
+        let structured_res = upgrade_json_to_structured_hcl2(json);
+        assert!(structured_res.is_ok());
+        let structured = structured_res.unwrap_or_default();
         assert!(structured.variables.contains("variable \"region\""));
         assert!(structured.sources.contains("source \"null\" \"my-null\""));
         assert!(structured.build.contains("build {"));
+    }
+
+    #[test]
+    fn test_legacy_expressions_all_variants() {
+        let text =
+            r#"{{ clean_resource_name `my-res` }} {{ split `val` `/` }} {{ .Vars }} {{.Vars}}"#;
+        let rewritten = rewrite_legacy_expression(text);
+        assert!(rewritten.contains("${clean_resource_name(\"my-res\")}"));
+        assert!(rewritten.contains("${split(\"/\", \"val\")}"));
+        assert!(!rewritten.contains(".Vars"));
+    }
+
+    #[test]
+    fn test_json_val_to_hcl_expr_empty_and_null() {
+        assert_eq!(json_val_to_hcl_expr(&JsonValue::Null, 0), "null");
+        assert_eq!(json_val_to_hcl_expr(&serde_json::json!([]), 0), "[]");
+        assert_eq!(json_val_to_hcl_expr(&serde_json::json!({}), 0), "{}");
+        let nested_map = serde_json::json!({ "key": "val" });
+        let res = json_val_to_hcl_expr(&nested_map, 1);
+        assert!(res.contains("key = \"val\""));
+    }
+
+    #[test]
+    fn test_upgrade_json_to_structured_hcl2_full() {
+        let json = r#"{
+            "description": "Full test",
+            "min_packer_version": "1.8.0",
+            "variables": {
+                "var_a": "val_a"
+            },
+            "builders": [
+                {
+                    "type": "amazon-ebs",
+                    "name": "ami1",
+                    "region": "us-east-1"
+                }
+            ],
+            "provisioners": [
+                {
+                    "type": "shell",
+                    "inline": ["echo test"],
+                    "only": ["ami1", "unknown"]
+                }
+            ],
+            "post-processors": [
+                {
+                    "type": "manifest",
+                    "output": "m.json"
+                },
+                [
+                    {
+                        "type": "docker-tag",
+                        "repository": "repo1"
+                    }
+                ]
+            ]
+        }"#;
+
+        let res = upgrade_json_to_structured_hcl2(json);
+        assert!(res.is_ok());
+        if let Ok(s) = res {
+            assert!(
+                s.variables.contains("packer {")
+                    || s.variables.contains("required_version = \">=1.8.0\"")
+            );
+            assert!(s.sources.contains("source \"amazon-ebs\" \"ami1\""));
+            assert!(s.build.contains("provisioner \"shell\""));
+            assert!(s.build.contains("post-processor \"manifest\""));
+            assert!(s.build.contains("post-processors {"));
+            assert!(s.build.contains("post-processor \"docker-tag\""));
+        }
+    }
+
+    #[test]
+    fn test_upgrade_json_to_structured_hcl2_errors() {
+        let not_json = "{ bad";
+        assert!(upgrade_json_to_structured_hcl2(not_json).is_err());
+        let not_obj = "[1, 2, 3]";
+        assert!(upgrade_json_to_structured_hcl2(not_obj).is_err());
+        let missing_b_type = r#"{"builders": [{}]}"#;
+        assert!(upgrade_json_to_structured_hcl2(missing_b_type).is_err());
+        let missing_p_type = r#"{"provisioners": [{}]}"#;
+        assert!(upgrade_json_to_structured_hcl2(missing_p_type).is_err());
+        let missing_pp_type = r#"{"post-processors": [{}]}"#;
+        assert!(upgrade_json_to_structured_hcl2(missing_pp_type).is_err());
+        let missing_sub_pp_type = r#"{"post-processors": [[{}]]}"#;
+        assert!(upgrade_json_to_structured_hcl2(missing_sub_pp_type).is_err());
+    }
+
+    #[test]
+    fn test_structured_hcl2_derived_traits() {
+        let s1 = StructuredHcl2::default();
+        let s2 = s1.clone();
+        assert_eq!(s1, s2);
+        assert_eq!(format!("{s1:?}"), format!("{s2:?}"));
     }
 }

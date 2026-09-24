@@ -341,8 +341,73 @@ mod tests {
             .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
             .await;
         assert!(artifact.is_ok());
-        let art = artifact.unwrap();
+        assert!(artifact.is_ok());
+        let art = match artifact {
+            Ok(a) => a,
+            Err(e) => panic!("{e}"),
+        };
         assert_eq!(art.builder_id(), "upcloud");
         assert!(art.state("foo").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_upcloud_edge_cases() {
+        let ui = Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+
+        // StepCreateServer cleanup
+        let mut step_server = StepCreateServer {
+            ui: ui.clone(),
+            name: "test-upcloud".to_string(),
+            config: UpCloudConfig::default(),
+        };
+        let mut state = StateBag::new();
+        step_server.cleanup(&state).await;
+        state.put("server_uuid", "uuid-12345".to_string());
+        step_server.cleanup(&state).await;
+
+        // StepProvision missing instance_ip and cleanup
+        let mut step_prov = StepProvision {
+            ui: ui.clone(),
+            name: "test-prov".to_string(),
+            config: UpCloudConfig::default(),
+            hook: Arc::new(crate::engine::hook::DefaultProvisionHook {
+                provisioners: Arc::new(Vec::new()),
+                error_cleanup_provisioners: Arc::new(Vec::new()),
+            }),
+        };
+        let mut empty_state = StateBag::new();
+        assert!(step_prov.run(&mut empty_state).await.is_err());
+        step_prov.cleanup(&empty_state).await;
+
+        // StepCreateTemplate cleanup
+        let mut step_tmpl = StepCreateTemplate {
+            ui: ui.clone(),
+            name: "test-tmpl".to_string(),
+            config: UpCloudConfig::default(),
+        };
+        step_tmpl.cleanup(&empty_state).await;
+
+        // builder.name() when config.name is empty
+        let empty_b = UpCloudBuilder::new(UpCloudConfig::default());
+        assert_eq!(empty_b.name(), "upcloud");
+
+        // builder.run() with zone None
+        let b_no_zone = UpCloudBuilder::new(UpCloudConfig {
+            name: "upcloud-no-zone".to_string(),
+            zone: None,
+            ..Default::default()
+        });
+        let hook = Arc::new(crate::engine::hook::DefaultProvisionHook {
+            provisioners: Arc::new(Vec::new()),
+            error_cleanup_provisioners: Arc::new(Vec::new()),
+        });
+        let res = b_no_zone
+            .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
+            .await;
+        assert!(res.is_ok());
     }
 }

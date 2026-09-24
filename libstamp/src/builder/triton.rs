@@ -110,10 +110,6 @@ impl TritonClient {
         image: &str,
         networks: &[String],
     ) -> Result<String, StampError> {
-        if cfg!(test) {
-            return Ok(format!("inst-{}", uuid::Uuid::new_v4().simple()));
-        }
-
         let client = reqwest::Client::new();
         let mut body = serde_json::json!({
             "name": name,
@@ -147,10 +143,6 @@ impl TritonClient {
     ///
     /// Returns `StampError::Execution` if IP resolution fails.
     pub async fn get_machine_ip(&self, machine_id: &str) -> Result<String, StampError> {
-        if cfg!(test) {
-            return Ok("127.0.0.1".to_string());
-        }
-
         let client = reqwest::Client::new();
         let url = format!("{}/{}/machines/{machine_id}", self.url, self.account);
         let resp = client
@@ -183,10 +175,6 @@ impl TritonClient {
     ///
     /// Returns `StampError::Execution` if stopping fails.
     pub async fn stop_machine(&self, machine_id: &str) -> Result<(), StampError> {
-        if cfg!(test) {
-            return Ok(());
-        }
-
         let client = reqwest::Client::new();
         let url = format!(
             "{}/{}/machines/{machine_id}?action=stop",
@@ -212,10 +200,6 @@ impl TritonClient {
         version: &str,
         description: Option<&str>,
     ) -> Result<String, StampError> {
-        if cfg!(test) {
-            return Ok(format!("img-{}", uuid::Uuid::new_v4().simple()));
-        }
-
         let client = reqwest::Client::new();
         let url = format!("{}/{}/images", self.url, self.account);
 
@@ -249,10 +233,6 @@ impl TritonClient {
     ///
     /// Returns `StampError::Execution` if deletion fails.
     pub async fn delete_machine(&self, machine_id: &str) -> Result<(), StampError> {
-        if cfg!(test) {
-            return Ok(());
-        }
-
         let client = reqwest::Client::new();
         let url = format!("{}/{}/machines/{machine_id}", self.url, self.account);
         let _ = client
@@ -547,7 +527,7 @@ impl Builder for TritonBuilder {
         let artifact_id = state
             .get::<String>("artifact_id")
             .cloned()
-            .unwrap_or_else(|| format!("triton:{}", self.name()));
+            .unwrap_or_default();
 
         Ok(Box::new(crate::artifact::MockArtifact {
             builder_id: self.name(),
@@ -558,9 +538,30 @@ impl Builder for TritonBuilder {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::pedantic,
+    clippy::all,
+    for_loops_over_fallibles
+)]
 mod tests {
     use super::*;
+    use crate::engine::hook::DefaultProvisionHook;
+    use crate::engine::packer::OnErrorStrategy;
+
+    #[derive(Clone)]
+    struct FailingProvisioner;
+
+    #[async_trait]
+    impl crate::provisioner::Provisioner for FailingProvisioner {
+        async fn provision(
+            &self,
+            _comm: &dyn crate::communicator::Communicator,
+            _ui: Arc<crate::engine::ui::Ui>,
+        ) -> Result<(), StampError> {
+            Err(StampError::Execution("mock provision failure".to_string()))
+        }
+    }
 
     #[test]
     fn test_derived_traits() {
@@ -577,50 +578,75 @@ mod tests {
         let b = TritonBuilder::new(cfg.clone());
         assert_eq!(format!("{b:?}"), format!("{:?}", b));
 
-        let json = serde_json::to_string(&cfg).unwrap();
-        let deser: TritonConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(deser, cfg);
+        let json = serde_json::to_string(&cfg);
+        assert!(json.is_ok());
+        for s in json {
+            let deser: Result<TritonConfig, _> = serde_json::from_str(&s);
+            assert!(deser.is_ok());
+            for d in deser {
+                assert_eq!(d, cfg);
+            }
+        }
     }
 
     #[tokio::test]
-    async fn test_triton_client_mocked() -> Result<(), StampError> {
-        let client = TritonClient::new(
-            "myaccount".to_string(),
-            "https://us-east-1.api.joyent.com".to_string(),
-            Some("key1".to_string()),
-            None,
-        );
-        let m_id = client
-            .create_machine("test-vm", "g4-highcpu-1G", "source-uuid", &[])
-            .await?;
-        assert!(m_id.starts_with("inst-"));
+    async fn test_triton_run() {
+        let mut server = mockito::Server::new_async().await;
 
-        let ip = client.get_machine_ip(&m_id).await?;
-        assert_eq!(ip, "127.0.0.1");
+        let _m_create = server
+            .mock("POST", "/acc/machines")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"id": "inst-12345"}"#)
+            .create_async()
+            .await;
 
-        client.stop_machine(&m_id).await?;
+        let _m_get = server
+            .mock("GET", "/acc/machines/inst-12345")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"primary_ip": "10.0.0.50"}"#)
+            .create_async()
+            .await;
 
-        let img_id = client
-            .create_image_from_machine(&m_id, "test-img", "1.0.0", Some("desc"))
-            .await?;
-        assert!(img_id.starts_with("img-"));
+        let _m_stop = server
+            .mock("POST", "/acc/machines/inst-12345?action=stop")
+            .with_status(200)
+            .create_async()
+            .await;
 
-        client.delete_machine(&m_id).await?;
-        Ok(())
-    }
+        let _m_img = server
+            .mock("POST", "/acc/images")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"id": "img-67890"}"#)
+            .create_async()
+            .await;
 
-    #[tokio::test]
-    async fn test_triton_run() -> Result<(), StampError> {
+        let _m_del = server
+            .mock("DELETE", "/acc/machines/inst-12345")
+            .with_status(200)
+            .create_async()
+            .await;
+
         let cfg = TritonConfig {
             account: "acc".into(),
-            image_name: "test".into(),
-            source_machine_image: "img".into(),
-            machine_package: "pkg".into(),
+            triton_url: Some(server.url()),
+            image_name: "test-img".into(),
+            image_version: Some("2.0.0".into()),
+            image_description: Some("Custom image".into()),
+            source_machine_image: "base-uuid".into(),
+            machine_package: "g4-highcpu-1G".into(),
+            networks: vec!["net-uuid-1".into()],
+            ssh_username: Some("admin".into()),
+            ssh_password: Some("secret".into()),
             ..Default::default()
         };
+
         let b = TritonBuilder::new(cfg);
-        b.prepare().await.unwrap();
-        assert_eq!(b.name(), "test");
+        assert!(b.prepare().await.is_ok());
+        assert_eq!(b.name(), "test-img");
+
         let ui = Arc::new(crate::engine::ui::Ui::new(
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
@@ -630,12 +656,305 @@ mod tests {
             provisioners: Arc::new(vec![]),
             error_cleanup_provisioners: Arc::new(vec![]),
         });
+
         let art = b
             .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
-            .await?;
-        assert!(art.id().starts_with("triton:img-"));
-        b.cancel().await?;
-        Ok(())
+            .await;
+        assert!(art.is_ok());
+        for a in art {
+            assert_eq!(a.id(), "triton:img-67890");
+        }
+
+        assert!(b.cancel().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_triton_client_methods_and_branches() {
+        let mut server = mockito::Server::new_async().await;
+
+        // create_machine with empty networks
+        let _m_create = server
+            .mock("POST", "/acc/machines")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"id": "inst-empty-net"}"#)
+            .create_async()
+            .await;
+
+        let client = TritonClient::new(
+            "acc".to_string(),
+            server.url(),
+            Some("key".to_string()),
+            Some("mat".to_string()),
+        );
+
+        let res = client.create_machine("vm", "pkg", "img", &[]).await;
+        assert!(res.is_ok());
+        for id in res {
+            assert_eq!(id, "inst-empty-net");
+        }
+
+        // create_machine network error
+        let bad_client = TritonClient::new(
+            "acc".to_string(),
+            "http://127.0.0.1:1".to_string(),
+            None,
+            None,
+        );
+        assert!(
+            bad_client
+                .create_machine("vm", "pkg", "img", &[])
+                .await
+                .is_err()
+        );
+
+        // create_machine invalid json response
+        let _m_create_bad_json = server
+            .mock("POST", "/acc/machines")
+            .with_status(200)
+            .with_body("not-json")
+            .create_async()
+            .await;
+        assert!(
+            client
+                .create_machine("vm", "pkg", "img", &[])
+                .await
+                .is_err()
+        );
+
+        // get_machine_ip with fallback to ips list
+        let _m_get_ips = server
+            .mock("GET", "/acc/machines/inst-ips")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"primary_ip": null, "ips": ["192.168.1.100"]}"#)
+            .create_async()
+            .await;
+        let ip_res = client.get_machine_ip("inst-ips").await;
+        assert!(ip_res.is_ok());
+        for ip in ip_res {
+            assert_eq!(ip, "192.168.1.100");
+        }
+
+        // get_machine_ip with fallback to default 127.0.0.1
+        let _m_get_none = server
+            .mock("GET", "/acc/machines/inst-none")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"primary_ip": null, "ips": []}"#)
+            .create_async()
+            .await;
+        let ip_res2 = client.get_machine_ip("inst-none").await;
+        assert!(ip_res2.is_ok());
+        for ip in ip_res2 {
+            assert_eq!(ip, "127.0.0.1");
+        }
+
+        // get_machine_ip network error and invalid json
+        assert!(bad_client.get_machine_ip("inst-1").await.is_err());
+        let _m_get_bad_json = server
+            .mock("GET", "/acc/machines/inst-bad")
+            .with_status(200)
+            .with_body("not-json")
+            .create_async()
+            .await;
+        assert!(client.get_machine_ip("inst-bad").await.is_err());
+
+        // stop_machine and delete_machine
+        let _m_stop = server
+            .mock("POST", "/acc/machines/inst-1?action=stop")
+            .with_status(200)
+            .create_async()
+            .await;
+        assert!(client.stop_machine("inst-1").await.is_ok());
+        assert!(bad_client.stop_machine("inst-1").await.is_ok());
+
+        let _m_del = server
+            .mock("DELETE", "/acc/machines/inst-1")
+            .with_status(200)
+            .create_async()
+            .await;
+        assert!(client.delete_machine("inst-1").await.is_ok());
+        assert!(bad_client.delete_machine("inst-1").await.is_ok());
+
+        // create_image_from_machine without description
+        let _m_img = server
+            .mock("POST", "/acc/images")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"id": "img-no-desc"}"#)
+            .create_async()
+            .await;
+        let img_res = client
+            .create_image_from_machine("inst-1", "name", "1.0", None)
+            .await;
+        assert!(img_res.is_ok());
+        for id in img_res {
+            assert_eq!(id, "img-no-desc");
+        }
+
+        // create_image_from_machine network error and invalid json
+        assert!(
+            bad_client
+                .create_image_from_machine("inst-1", "name", "1.0", None)
+                .await
+                .is_err()
+        );
+        let _m_img_bad_json = server
+            .mock("POST", "/acc/images")
+            .with_status(200)
+            .with_body("not-json")
+            .create_async()
+            .await;
+        assert!(
+            client
+                .create_image_from_machine("inst-1", "name", "1.0", None)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_triton_steps_cleanups_and_fallbacks() {
+        let mut server = mockito::Server::new_async().await;
+
+        let ui = Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+
+        let client = TritonClient::new("acc".to_string(), server.url(), None, None);
+        let config = TritonConfig {
+            account: "acc".to_string(),
+            image_name: "test".to_string(),
+            ..Default::default()
+        };
+
+        // StepCreateTritonMachine cleanup with state
+        let _m_del = server
+            .mock("DELETE", "/acc/machines/inst-cleanup")
+            .with_status(200)
+            .create_async()
+            .await;
+        let mut step_create = StepCreateTritonMachine {
+            ui: ui.clone(),
+            name: "test".to_string(),
+            client: client.clone(),
+            config: config.clone(),
+        };
+        let mut state = StateBag::new();
+        state.put("machine_id", "inst-cleanup".to_string());
+        step_create.cleanup(&state).await;
+
+        // StepCreateTritonMachine cleanup with empty state
+        let empty_state = StateBag::new();
+        step_create.cleanup(&empty_state).await;
+
+        // StepProvisionTriton with default ssh root and failure
+        let fail_hook = Arc::new(DefaultProvisionHook {
+            provisioners: Arc::new(vec![Box::new(FailingProvisioner)]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let mut step_prov = StepProvisionTriton {
+            ui: ui.clone(),
+            name: "test".to_string(),
+            hook: fail_hook,
+            ssh_username: None,
+            ssh_password: None,
+        };
+        assert!(step_prov.run(&mut state).await.is_err());
+        step_prov.cleanup(&state).await;
+
+        // StepCaptureTritonImage without machine_id and default version 1.0.0
+        let _m_stop = server
+            .mock("POST", "/acc/machines/?action=stop")
+            .with_status(200)
+            .create_async()
+            .await;
+        let _m_img = server
+            .mock("POST", "/acc/images")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"id": "img-default-ver"}"#)
+            .create_async()
+            .await;
+
+        let mut step_cap = StepCaptureTritonImage {
+            ui,
+            name: "test".to_string(),
+            client,
+            config,
+        };
+        let mut empty_state_cap = StateBag::new();
+        assert!(step_cap.run(&mut empty_state_cap).await.is_ok());
+        step_cap.cleanup(&empty_state_cap).await;
+    }
+
+    #[tokio::test]
+    async fn test_triton_builder_run_errors_and_strategies() {
+        let hook = Arc::new(DefaultProvisionHook {
+            provisioners: Arc::new(vec![]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let ui = Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+
+        // test_missing branch
+        let cfg_missing = TritonConfig {
+            image_name: "test_missing".to_string(),
+            ..Default::default()
+        };
+        let b_missing = TritonBuilder::new(cfg_missing);
+        assert!(
+            b_missing
+                .run(hook.clone(), ui.clone(), OnErrorStrategy::Cleanup)
+                .await
+                .is_err()
+        );
+
+        // Default triton_url branch (None -> https://us-east-1.api.joyent.com)
+        let cfg_default_url = TritonConfig {
+            account: "acc".to_string(),
+            triton_url: None,
+            image_name: "test-default-url".to_string(),
+            source_machine_image: "img".to_string(),
+            machine_package: "pkg".to_string(),
+            ..Default::default()
+        };
+        let b_def = TritonBuilder::new(cfg_default_url);
+        assert!(
+            b_def
+                .run(hook.clone(), ui.clone(), OnErrorStrategy::Cleanup)
+                .await
+                .is_err()
+        );
+
+        // StepCreateTritonMachine failure with OnErrorStrategy::Abort
+        let cfg_fail = TritonConfig {
+            account: "acc".to_string(),
+            triton_url: Some("http://127.0.0.1:1".to_string()),
+            image_name: "fail".to_string(),
+            source_machine_image: "img".to_string(),
+            machine_package: "pkg".to_string(),
+            ..Default::default()
+        };
+        let b_fail = TritonBuilder::new(cfg_fail);
+        assert!(
+            b_fail
+                .run(hook.clone(), ui.clone(), OnErrorStrategy::Abort)
+                .await
+                .is_err()
+        );
+        assert!(
+            b_fail
+                .run(hook, ui, OnErrorStrategy::Cleanup)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

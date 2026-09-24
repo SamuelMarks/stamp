@@ -477,20 +477,6 @@ pub fn parse_hcl<S: ::std::hash::BuildHasher>(
                         error_message: expr_to_string(&v_block.error_message),
                     });
                 }
-                for inner_block in &block.body.blocks {
-                    if inner_block.block_type == "validation" {
-                        let mut val = crate::template::VariableValidation::default();
-                        for (k, attr) in &inner_block.body.attributes {
-                            let v = expr_to_string(&attr.expr);
-                            if k == "condition" {
-                                val.condition = v;
-                            } else if k == "error_message" {
-                                val.error_message = v;
-                            }
-                        }
-                        var.validations.push(val);
-                    }
-                }
                 variables.insert(label.clone(), var);
             }
         } else if block.block_type == "locals" {
@@ -607,50 +593,32 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::match_wildcard_for_single_variants)]
-    fn test_parse_hcl_invalid_syntax() -> Result<(), crate::error::StampError> {
+    fn test_parse_hcl_invalid_syntax() {
         let input = r#"source "amazon-ebs" {"#;
-        let Err(err) = parse_hcl(input, &std::collections::HashMap::new()) else {
-            return Err(crate::error::StampError::Parse(
-                "Expected error on invalid HCL".to_string(),
-            ));
-        };
-        assert!(matches!(err, StampError::Parse(_)));
-        Ok(())
+        let res = parse_hcl(input, &std::collections::HashMap::new());
+        assert!(matches!(res, Err(StampError::Parse(_))));
     }
 
     #[test]
-    #[allow(clippy::match_wildcard_for_single_variants)]
-    fn test_parse_hcl_invalid_source_labels() -> Result<(), crate::error::StampError> {
+    fn test_parse_hcl_invalid_source_labels() {
         let input = r#"source "amazon-ebs" {}"#; // Only one label
-        let Err(err) = parse_hcl(input, &std::collections::HashMap::new()) else {
-            return Err(crate::error::StampError::Parse(
-                "Expected error on invalid source labels".to_string(),
-            ));
-        };
+        let res = parse_hcl(input, &std::collections::HashMap::new());
         assert!(
-            matches!(err, StampError::Parse(msg) if msg.contains("source block must have exactly two labels"))
+            matches!(res, Err(StampError::Parse(msg)) if msg.contains("source block must have exactly two labels"))
         );
-        Ok(())
     }
 
     #[test]
-    #[allow(clippy::match_wildcard_for_single_variants)]
-    fn test_parse_hcl_invalid_provisioner_labels() -> Result<(), crate::error::StampError> {
+    fn test_parse_hcl_invalid_provisioner_labels() {
         let input = r#"
             build {
                 provisioner "shell" "extra" {}
             }
         "#;
-        let Err(err) = parse_hcl(input, &std::collections::HashMap::new()) else {
-            return Err(crate::error::StampError::Parse(
-                "Expected error on invalid provisioner labels".to_string(),
-            ));
-        };
+        let res = parse_hcl(input, &std::collections::HashMap::new());
         assert!(
-            matches!(err, StampError::Parse(msg) if msg.contains("provisioner block must have exactly one label"))
+            matches!(res, Err(StampError::Parse(msg)) if msg.contains("provisioner block must have exactly one label"))
         );
-        Ok(())
     }
 
     #[test]
@@ -968,12 +936,8 @@ mod tests {
         "#;
         let vars = std::collections::HashMap::new();
         let tpl = crate::parser::hcl::parse_hcl(input, &vars)?;
-        let packer_cfg = tpl.packer.as_ref().ok_or_else(|| {
-            StampError::TemplateValidation("packer config should be present".to_string())
-        })?;
-        let reg = packer_cfg.hcp_packer_registry.as_ref().ok_or_else(|| {
-            StampError::TemplateValidation("hcp_packer_registry should be present".to_string())
-        })?;
+        let packer_cfg = tpl.packer.as_ref().unwrap();
+        let reg = packer_cfg.hcp_packer_registry.as_ref().unwrap();
         assert_eq!(reg.bucket_name.0, "learn-packer-ubuntu");
         assert_eq!(reg.description.as_deref(), Some("Ubuntu base image"));
         assert_eq!(reg.channels, vec!["production", "staging"]);
@@ -987,5 +951,163 @@ mod tests {
         );
         assert_eq!(reg.labels.get("tier").map(String::as_str), Some("base"));
         Ok(())
+    }
+
+    #[test]
+    fn test_parse_hcl_comprehensive_branches() -> Result<(), StampError> {
+        let input = r#"
+            packer {
+                required_version = ">= 1.7.0"
+                hcp_packer_registry {
+                    bucket_name = "test-bucket"
+                    build_labels = {
+                        "os" = "linux"
+                    }
+                    labels {
+                        env = "dev"
+                    }
+                    bucket_labels {
+                        team = "infra"
+                    }
+                }
+            }
+
+            variable "secret_var" {
+                sensitive = true
+                validation {
+                    condition = "true"
+                    error_message = "valid"
+                }
+            }
+
+            build {
+                source "amazon-ebs" "two_labels" {
+                    ami_name = "test"
+                }
+
+                source "bare_single_label" {
+                    ami_name = "single"
+                }
+
+                provisioner "shell" {
+                    nested_block {
+                        sub_key = "sub_val"
+                    }
+                }
+
+                post-processors {
+                    post-processor "manifest" {
+                        only = "single_only"
+                        except = "single_except"
+                        sub_block {
+                            field = "val"
+                        }
+                    }
+                }
+            }
+        "#;
+
+        let vars = std::collections::HashMap::new();
+        let tpl = crate::parser::hcl::parse_hcl(input, &vars)?;
+
+        let packer_cfg = tpl.packer.as_ref().unwrap();
+        assert_eq!(packer_cfg.required_version.as_deref(), Some(">= 1.7.0"));
+        let reg = packer_cfg.hcp_packer_registry.as_ref().unwrap();
+        assert_eq!(
+            reg.build_labels.get("os").map(String::as_str),
+            Some("linux")
+        );
+        assert_eq!(reg.labels.get("env").map(String::as_str), Some("dev"));
+        assert_eq!(
+            reg.bucket_labels.get("team").map(String::as_str),
+            Some("infra")
+        );
+
+        let sec_var = tpl.variables.get("secret_var").unwrap();
+        assert_eq!(sec_var.sensitive, Some(true));
+        assert_eq!(sec_var.validations.len(), 1);
+        assert_eq!(sec_var.validations[0].condition, "true");
+        assert_eq!(sec_var.validations[0].error_message, "valid");
+
+        assert_eq!(tpl.builders.len(), 2);
+        assert_eq!(tpl.builders[0].builder_type, "amazon-ebs");
+        assert_eq!(tpl.builders[0].name, "two_labels");
+        assert_eq!(tpl.builders[1].builder_type, "bare_single_label");
+        assert_eq!(tpl.builders[1].name, "bare_single_label");
+
+        assert_eq!(tpl.provisioners.len(), 1);
+        assert_eq!(
+            tpl.provisioners[0]
+                .config
+                .get("nested_block.sub_key")
+                .map(String::as_str),
+            Some("sub_val")
+        );
+
+        assert_eq!(tpl.post_processors.len(), 1);
+        assert_eq!(tpl.post_processors[0].only, vec!["single_only"]);
+        assert_eq!(tpl.post_processors[0].except, vec!["single_except"]);
+        assert_eq!(
+            tpl.post_processors[0]
+                .config
+                .get("sub_block.field")
+                .map(String::as_str),
+            Some("val")
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_expr_helpers_direct() {
+        use hashicorp_configuration_language_rs::ast::expr::{Directive, Expression, TemplatePart};
+        use hashicorp_configuration_language_rs::number::Number;
+        use hashicorp_configuration_language_rs::span::Span;
+
+        let dummy_span = Span::default();
+
+        // Expression::Template with Interpolation and Directive
+        let tmpl_expr = Expression::Template(
+            vec![
+                TemplatePart::Literal("hello ".to_string(), dummy_span.clone()),
+                TemplatePart::Interpolation(
+                    Expression::String("world".to_string(), dummy_span.clone()),
+                    dummy_span.clone(),
+                ),
+                TemplatePart::Directive(
+                    Directive::If {
+                        cond: Expression::Bool(true, dummy_span.clone()),
+                        true_expr: vec![],
+                        else_ifs: vec![],
+                        false_expr: None,
+                    },
+                    dummy_span.clone(),
+                ),
+            ],
+            dummy_span.clone(),
+        );
+        assert_eq!(expr_to_string(&tmpl_expr), "hello world");
+
+        // Expression::Object in expr_to_string
+        let obj_expr = Expression::Object(
+            vec![(
+                Expression::String("key".to_string(), dummy_span.clone()),
+                Expression::String("value".to_string(), dummy_span.clone()),
+            )],
+            dummy_span.clone(),
+        );
+        assert_eq!(expr_to_string(&obj_expr), "{key: value}");
+
+        // expr_to_vec_string fallback branches
+        let str_expr = Expression::String("solo".to_string(), dummy_span.clone());
+        assert_eq!(expr_to_vec_string(&str_expr), vec!["solo".to_string()]);
+
+        let num_expr = Expression::Number(Number::from(42), dummy_span.clone());
+        assert_eq!(expr_to_vec_string(&num_expr), vec!["42".to_string()]);
+
+        // Default / empty fallback
+        let null_expr = Expression::Null(dummy_span);
+        assert_eq!(expr_to_string(&null_expr), "");
+        assert_eq!(expr_to_vec_string(&null_expr), Vec::<String>::new());
     }
 }

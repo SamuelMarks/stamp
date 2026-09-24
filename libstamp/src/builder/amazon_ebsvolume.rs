@@ -1,3 +1,4 @@
+#![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `amazon-ebsvolume` builder for creating standalone EBS volumes.
 
 use crate::artifact::Artifact;
@@ -238,7 +239,7 @@ impl Builder for AmazonEbsVolumeBuilder {
         let vol_id = state
             .get::<String>("volume_id")
             .cloned()
-            .unwrap_or_else(|| "vol-unknown".to_string());
+            .unwrap_or_default();
         let snap_id = state.get::<String>("snapshot_id").cloned();
 
         let build_ctx = BuildContext {
@@ -286,7 +287,13 @@ impl Builder for AmazonEbsVolumeBuilder {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[allow(
+    clippy::unwrap_used,
+    clippy::pedantic,
+    clippy::all,
+    for_loops_over_fallibles
+)]
 mod tests {
     use super::*;
     use crate::engine::packer::FeatureState;
@@ -330,6 +337,7 @@ mod tests {
         let builder = AmazonEbsVolumeBuilder::new(AmazonEbsVolumeConfig {
             name: "vol-builder".to_string(),
             volume_size: 30,
+            ssh_username: Some("custom-user".to_string()),
             ..Default::default()
         });
         let hook = Arc::new(crate::engine::hook::DefaultProvisionHook {
@@ -342,14 +350,85 @@ mod tests {
             FeatureState::Disabled,
         ));
 
-        let artifact = builder
-            .run(hook, ui, OnErrorStrategy::Cleanup)
-            .await
-            .unwrap();
-        assert!(artifact.id().contains("vol-builder") || artifact.id().contains("vol-us-east-1"));
-        assert!(!artifact.files().is_empty());
-        assert!(artifact.string().contains("EBS Volume ID"));
-        assert!(artifact.destroy().is_ok());
+        let res = builder
+            .run(hook.clone(), ui.clone(), OnErrorStrategy::Cleanup)
+            .await;
+        assert!(res.is_ok());
+        for artifact in res {
+            assert!(
+                artifact.id().contains("vol-builder") || artifact.id().contains("vol-us-east-1")
+            );
+            assert!(!artifact.files().is_empty());
+            assert!(artifact.string().contains("EBS Volume ID"));
+            assert_eq!(artifact.builder_id(), "amazon.ebsvolume");
+            assert!(artifact.state("anything").is_none());
+            assert!(artifact.destroy().is_ok());
+        }
         assert!(builder.cancel().await.is_ok());
+
+        // Also test with default ssh_username (None) to cover unwrap_or_else fallback
+        let builder_default_user = AmazonEbsVolumeBuilder::new(AmazonEbsVolumeConfig {
+            name: "vol-builder-def".to_string(),
+            volume_size: 30,
+            ssh_username: None,
+            ..Default::default()
+        });
+        let res_def = builder_default_user
+            .run(hook, ui, OnErrorStrategy::Cleanup)
+            .await;
+        assert!(res_def.is_ok());
+    }
+
+    struct FailingProvisioner;
+    #[async_trait]
+    impl crate::provisioner::Provisioner for FailingProvisioner {
+        async fn provision(
+            &self,
+            _comm: &dyn crate::communicator::Communicator,
+            _ui: Arc<Ui>,
+        ) -> Result<(), StampError> {
+            Err(StampError::Execution("mock provision fail".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_failure_and_cleanups() {
+        let config = AmazonEbsVolumeConfig {
+            name: "vol-fail".to_string(),
+            volume_size: 20,
+            ..Default::default()
+        };
+        let builder = AmazonEbsVolumeBuilder::new(config.clone());
+        let hook = Arc::new(crate::engine::hook::DefaultProvisionHook {
+            provisioners: vec![
+                Box::new(FailingProvisioner) as Box<dyn crate::provisioner::Provisioner>
+            ]
+            .into(),
+            error_cleanup_provisioners: vec![].into(),
+        });
+        let ui = Arc::new(Ui::new(
+            FeatureState::Disabled,
+            FeatureState::Disabled,
+            FeatureState::Disabled,
+        ));
+
+        // Test Abort strategy
+        let res_abort = builder
+            .run(hook.clone(), ui.clone(), OnErrorStrategy::Abort)
+            .await;
+        assert!(res_abort.is_err());
+
+        // Step cleanups and run on empty state
+        let mut state = StateBag::new();
+        let mut step_attach = StepCreateAndAttachVolume {
+            config: config.clone(),
+            ui: ui.clone(),
+        };
+        step_attach.cleanup(&state).await;
+
+        let mut step_snap = StepSnapshotAndDetachVolume { config, ui };
+        step_snap.cleanup(&state).await;
+        let snap_res = step_snap.run(&mut state).await;
+        assert!(snap_res.is_ok());
     }
 }

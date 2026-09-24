@@ -436,6 +436,9 @@ mod tests {
 
     #[test]
     fn test_opa_types_display_and_defaults() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let path = OpaPolicyPath(PathBuf::from("/etc/packer/policy.rego"));
         assert_eq!(path.to_string(), "/etc/packer/policy.rego");
 
@@ -448,6 +451,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_opa_no_policies_configured() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let evaluator = OpaEvaluator::new(OpaConfig::default());
         let template = Template::default();
         let res = evaluator.evaluate_template(&template, &[]).await;
@@ -456,6 +462,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_opa_missing_policy_file() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let config = OpaConfig {
             policy_paths: vec![OpaPolicyPath(PathBuf::from("/non/existent/policy.rego"))],
             ..Default::default()
@@ -468,6 +477,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_opa_inline_rego_encrypt_boot_denial() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let rego = r#"
             package packer
 
@@ -499,6 +511,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_opa_inline_rego_encrypt_boot_pass() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let rego = r#"
             package packer
 
@@ -533,6 +548,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_opa_inline_rego_root_ssh_user_denial() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let rego = r#"
             package packer
 
@@ -566,6 +584,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_opa_inline_rego_dangerous_command_denial() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let rego = r#"
             package packer
 
@@ -601,6 +622,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_opa_policy_file_and_directory_evaluation() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         let policy_file = tmp.path().join("compliance.rego");
         let rego = r#"
@@ -650,5 +674,205 @@ mod tests {
 
         let res_pass = evaluator.evaluate_template(&pass_tmpl, &[]).await;
         assert!(res_pass.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_opa_extra_coverage() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut tmpl = Template::default();
+        // Prepare input with dummy artifact
+        #[derive(Debug)]
+        struct DummyArt;
+        impl Artifact for DummyArt {
+            fn id(&self) -> String {
+                "dummy-id".to_string()
+            }
+            fn builder_id(&self) -> String {
+                "dummy-builder".to_string()
+            }
+            fn files(&self) -> Vec<String> {
+                vec!["file.bin".to_string()]
+            }
+            fn string(&self) -> String {
+                "dummy".to_string()
+            }
+            fn state(&self, _name: &str) -> Option<Box<dyn std::any::Any>> {
+                None
+            }
+            fn destroy(&self) -> Result<(), StampError> {
+                Ok(())
+            }
+        }
+        let artifacts: Vec<Box<dyn Artifact>> = vec![Box::new(DummyArt)];
+        assert_eq!(artifacts[0].string(), "dummy");
+        assert!(artifacts[0].state("test").is_none());
+        assert!(artifacts[0].destroy().is_ok());
+        let input = OpaEvaluator::prepare_input(&tmpl, &artifacts);
+        assert!(input["artifacts"].as_array().unwrap().len() == 1);
+
+        // 1. Disallowed builder type check
+        let mut b = crate::template::BuilderConfig::default();
+        b.builder_type = "docker".to_string();
+        tmpl.builders.push(b);
+
+        let config_disallowed = OpaConfig {
+            inline_policy: Some(
+                "package main\ndeny[msg] {\n  allowed_builders\n  disallowed docker\n  msg := \"fail\"\n}".to_string()
+            ),
+            ..Default::default()
+        };
+        let eval_disallowed = OpaEvaluator::new(config_disallowed);
+        assert!(eval_disallowed.evaluate_template(&tmpl, &[]).await.is_err());
+
+        // 2. Revoked / forbidden AMI check
+        let mut tmpl_ami = Template::default();
+        let mut b_ami = crate::template::BuilderConfig::default();
+        b_ami
+            .config
+            .insert("source_ami".to_string(), "ami-bad123".to_string());
+        tmpl_ami.builders.push(b_ami);
+
+        let config_ami = OpaConfig {
+            inline_policy: Some(
+                "package main\ndeny[msg] {\n  revoked ami-bad123\n  msg := \"revoked\"\n}"
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
+        let eval_ami = OpaEvaluator::new(config_ami);
+        assert!(eval_ami.evaluate_template(&tmpl_ami, &[]).await.is_err());
+
+        // 3. Default allow = false without allow = true
+        let config_default_deny = OpaConfig {
+            inline_policy: Some("package main\ndefault allow = false\n".to_string()),
+            ..Default::default()
+        };
+        let eval_default_deny = OpaEvaluator::new(config_default_deny);
+        assert!(
+            eval_default_deny
+                .evaluate_template(&Template::default(), &[])
+                .await
+                .is_err()
+        );
+
+        // 4. Default allow = false with count(deny) == 0 (should pass when no denials)
+        let config_default_count = OpaConfig {
+            inline_policy: Some(
+                "package main\ndefault allow = false\ncount(deny) == 0\n".to_string(),
+            ),
+            ..Default::default()
+        };
+        let eval_default_count = OpaEvaluator::new(config_default_count);
+        assert!(
+            eval_default_count
+                .evaluate_template(&Template::default(), &[])
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mock_external_opa_execution() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let bin_dir = temp_dir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let opa_script = bin_dir.join("opa");
+
+        // Shell script that acts as `opa eval`
+        let script_content = r#"#!/bin/sh
+printf '%s\n' '{"result":[{"expressions":[{"value":["violation message"]},{"value":false},{"value":42}]}]}'
+"#;
+        std::fs::write(&opa_script, script_content).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&opa_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", bin_dir.display(), orig_path);
+        unsafe { std::env::set_var("PATH", &new_path) };
+
+        let policy_file = temp_dir.path().join("policy.rego");
+        std::fs::write(&policy_file, "package main").unwrap();
+
+        let config = OpaConfig {
+            policy_paths: vec![OpaPolicyPath(policy_file)],
+            ..Default::default()
+        };
+        let eval = OpaEvaluator::new(config);
+        let res = eval.evaluate_template(&Template::default(), &[]).await;
+        assert!(res.is_err());
+
+        // Test non-zero exit failure
+        let script_fail = r#"#!/bin/sh
+exit 2
+"#;
+        std::fs::write(&opa_script, script_fail).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&opa_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let res_fail = eval.evaluate_template(&Template::default(), &[]).await;
+        assert!(res_fail.is_err());
+
+        unsafe { std::env::set_var("PATH", orig_path) };
+    }
+
+    #[tokio::test]
+    async fn test_opa_dummy_art_methods_and_nested_config() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        #[derive(Debug)]
+        struct DummyArt;
+        impl Artifact for DummyArt {
+            fn id(&self) -> String {
+                "dummy-id".to_string()
+            }
+            fn builder_id(&self) -> String {
+                "dummy-builder".to_string()
+            }
+            fn files(&self) -> Vec<String> {
+                vec!["file.bin".to_string()]
+            }
+            fn string(&self) -> String {
+                "dummy".to_string()
+            }
+            fn state(&self, _name: &str) -> Option<Box<dyn std::any::Any>> {
+                None
+            }
+            fn destroy(&self) -> Result<(), StampError> {
+                Ok(())
+            }
+        }
+        let art = DummyArt;
+        assert_eq!(art.string(), "dummy");
+        assert!(art.state("foo").is_none());
+        assert!(art.destroy().is_ok());
+
+        // Nested config for builder
+        let mut tmpl = Template::default();
+        let mut b = crate::template::BuilderConfig::default();
+        b.config
+            .insert("encrypt_boot".to_string(), "false".to_string());
+        b.builder_type = "amazon-ebs".to_string();
+        tmpl.builders.push(b);
+
+        let config = OpaConfig {
+            inline_policy: Some(
+                "package main\ndeny[msg] {\n  encrypt_boot\n  msg := \"unencrypted\"\n}"
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
+        let eval = OpaEvaluator::new(config);
+        assert!(eval.evaluate_template(&tmpl, &[]).await.is_err());
     }
 }

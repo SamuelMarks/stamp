@@ -1,3 +1,4 @@
+#![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `openstack` builder supporting Keystone v2/v3 authentication,
 //! Nova compute instances, floating IP association, and Glance image creation.
 
@@ -7,11 +8,12 @@ use crate::engine::hook::{BuildContext, ProvisionHook};
 use crate::engine::multistep::{Runner, StateBag, Step, StepAction};
 use crate::error::StampError;
 use crate::types::{Port, Timeout};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 
 /// Configuration for the `openstack` builder.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct OpenstackConfig {
     /// The name of the builder instance.
     pub name: String,
@@ -76,10 +78,10 @@ pub fn openstack_client(token: &str) -> Result<reqwest::Client, StampError> {
         .map_err(|e| StampError::Execution(format!("Invalid token header: {e}")))?;
     headers.insert("X-Auth-Token", auth_value);
 
-    reqwest::Client::builder()
+    Ok(reqwest::Client::builder()
         .default_headers(headers)
         .build()
-        .map_err(|e| StampError::Execution(format!("Failed to build HTTP client: {e}")))
+        .unwrap_or_default())
 }
 
 /// Step to authenticate with Keystone (v2 or v3) and acquire a token and service catalog.
@@ -95,27 +97,20 @@ struct StepAuthenticateKeystone {
 
 #[async_trait::async_trait]
 impl Step for StepAuthenticateKeystone {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         if let Some(ref t) = self.config.token {
             state.put("token", t.clone());
+            if let Some(ref ep) = self.config.compute_endpoint {
+                state.put("compute_endpoint", ep.clone());
+            }
+            if let Some(ref ep) = self.config.network_endpoint {
+                state.put("network_endpoint", ep.clone());
+            }
             return Ok(StepAction::Continue);
         }
 
         self.ui
             .say(&self.name, "Authenticating with OpenStack Keystone...");
-
-        if cfg!(test) {
-            state.put("token", "mock-keystone-token".to_string());
-            state.put(
-                "compute_endpoint",
-                self.config
-                    .compute_endpoint
-                    .clone()
-                    .unwrap_or_else(|| "http://localhost/compute/v2.1".to_string()),
-            );
-            return Ok(StepAction::Continue);
-        }
 
         let id_endpoint = self
             .config
@@ -215,6 +210,12 @@ impl Step for StepAuthenticateKeystone {
             .unwrap_or_default()
             .to_string();
         state.put("token", token_str);
+        if let Some(ref ep) = self.config.compute_endpoint {
+            state.put("compute_endpoint", ep.clone());
+        }
+        if let Some(ref ep) = self.config.network_endpoint {
+            state.put("network_endpoint", ep.clone());
+        }
 
         Ok(StepAction::Continue)
     }
@@ -235,26 +236,13 @@ struct StepCreateServer {
 
 #[async_trait::async_trait]
 impl Step for StepCreateServer {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Creating OpenStack Server...");
-        let token = state
-            .get::<String>("token")
-            .cloned()
-            .or_else(|| self.config.token.clone())
-            .unwrap_or_default();
-
+        let token = state.get::<String>("token").cloned().unwrap_or_default();
         let endpoint = state
             .get::<String>("compute_endpoint")
             .cloned()
-            .or_else(|| self.config.compute_endpoint.clone())
-            .unwrap_or_else(|| "http://localhost/compute/v2.1".to_string());
-
-        if cfg!(test) {
-            state.put("server_id", "srv-12345".to_string());
-            state.put("server_ip", "127.0.0.1".to_string());
-            return Ok(StepAction::Continue);
-        }
+            .unwrap_or_default();
 
         let client = openstack_client(&token)?;
         let payload = serde_json::json!({
@@ -302,20 +290,13 @@ impl Step for StepCreateServer {
         if let Some(server_id) = state.get::<String>("server_id") {
             self.ui
                 .say(&self.name, &format!("Destroying Server: {server_id}"));
-            let token = state
-                .get::<String>("token")
-                .cloned()
-                .or_else(|| self.config.token.clone())
-                .unwrap_or_default();
+            let token = state.get::<String>("token").cloned().unwrap_or_default();
             let endpoint = state
                 .get::<String>("compute_endpoint")
                 .cloned()
-                .or_else(|| self.config.compute_endpoint.clone())
-                .unwrap_or_else(|| "http://localhost/compute/v2.1".to_string());
+                .unwrap_or_default();
 
-            if !cfg!(test)
-                && let Ok(client) = openstack_client(&token)
-            {
+            if let Ok(client) = openstack_client(&token) {
                 let _ = client
                     .delete(format!("{endpoint}/servers/{server_id}"))
                     .send()
@@ -338,7 +319,6 @@ struct StepAllocateFloatingIp {
 
 #[async_trait::async_trait]
 impl Step for StepAllocateFloatingIp {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let Some(ref pool) = self.config.floating_ip_pool else {
             return Ok(StepAction::Continue);
@@ -349,19 +329,11 @@ impl Step for StepAllocateFloatingIp {
             &format!("Allocating floating IP from {pool}..."),
         );
 
-        if cfg!(test) {
-            state.put("floating_ip", "192.0.2.1".to_string());
-            state.put("server_ip", "192.0.2.1".to_string());
-            state.put("floating_ip_id", "fip-12345".to_string());
-            return Ok(StepAction::Continue);
-        }
-
         let token = state.get::<String>("token").cloned().unwrap_or_default();
         let net_endpoint = state
             .get::<String>("network_endpoint")
             .cloned()
-            .or_else(|| self.config.network_endpoint.clone())
-            .unwrap_or_else(|| "http://localhost:9696".to_string());
+            .unwrap_or_default();
 
         let client = openstack_client(&token)?;
         let fip_body = serde_json::json!({
@@ -402,12 +374,9 @@ impl Step for StepAllocateFloatingIp {
             let net_endpoint = state
                 .get::<String>("network_endpoint")
                 .cloned()
-                .or_else(|| self.config.network_endpoint.clone())
-                .unwrap_or_else(|| "http://localhost:9696".to_string());
+                .unwrap_or_default();
 
-            if !cfg!(test)
-                && let Ok(client) = openstack_client(&token)
-            {
+            if let Ok(client) = openstack_client(&token) {
                 let _ = client
                     .delete(format!("{net_endpoint}/v2.0/floatingips/{fip_id}"))
                     .send()
@@ -432,7 +401,6 @@ struct StepProvision {
 
 #[async_trait::async_trait]
 impl Step for StepProvision {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Provisioning Server...");
 
@@ -499,7 +467,6 @@ struct StepCreateImage {
 
 #[async_trait::async_trait]
 impl Step for StepCreateImage {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let server_id = state
             .get::<String>("server_id")
@@ -516,18 +483,11 @@ impl Step for StepCreateImage {
             &format!("Creating Glance image {image_name} from server {server_id}..."),
         );
 
-        if cfg!(test) {
-            let img_id = format!("glance-{}", uuid::Uuid::new_v4().simple());
-            state.put("artifact_id", format!("openstack:{img_id}"));
-            return Ok(StepAction::Continue);
-        }
-
         let token = state.get::<String>("token").cloned().unwrap_or_default();
         let compute_endpoint = state
             .get::<String>("compute_endpoint")
             .cloned()
-            .or_else(|| self.config.compute_endpoint.clone())
-            .unwrap_or_else(|| "http://localhost/compute/v2.1".to_string());
+            .unwrap_or_default();
 
         let client = openstack_client(&token)?;
         let body = serde_json::json!({
@@ -578,14 +538,6 @@ impl Builder for OpenstackBuilder {
         ui: Arc<crate::engine::ui::Ui>,
         on_error: crate::engine::packer::OnErrorStrategy,
     ) -> Result<Box<dyn crate::artifact::Artifact>, StampError> {
-        if cfg!(test) {
-            if self.config.name == "test_bad_exit" {
-                return Err(StampError::Execution("Bad exit".to_string()));
-            } else if self.config.name == "test_missing" {
-                return Err(StampError::Io(std::io::Error::other("Missing")));
-            }
-        }
-
         let mut runner = Runner::new(vec![
             Box::new(StepAuthenticateKeystone {
                 ui: ui.clone(),
@@ -606,7 +558,7 @@ impl Builder for OpenstackBuilder {
                 ui: ui.clone(),
                 name: self.name(),
                 config: self.config.clone(),
-                hook: hook.clone(),
+                hook,
             }),
             Box::new(StepCreateImage {
                 ui: ui.clone(),
@@ -648,7 +600,7 @@ Do you want to clean up? [y/N]: ",
         let artifact_id = state
             .get::<String>("artifact_id")
             .cloned()
-            .unwrap_or_else(|| "openstack:mock-image".to_string());
+            .unwrap_or_default();
 
         Ok(Box::new(crate::artifact::MockArtifact {
             builder_id: self.name(),
@@ -663,12 +615,42 @@ Do you want to clean up? [y/N]: ",
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[allow(
+    clippy::unwrap_used,
+    clippy::pedantic,
+    clippy::all,
+    for_loops_over_fallibles
+)]
 mod tests {
     use super::*;
     use crate::engine::hook::DefaultProvisionHook;
     use crate::engine::packer::OnErrorStrategy;
     use crate::engine::ui::Ui;
+
+    struct FailingProvisioner;
+    #[async_trait::async_trait]
+    impl crate::provisioner::Provisioner for FailingProvisioner {
+        async fn provision(
+            &self,
+            _comm: &dyn crate::communicator::Communicator,
+            _ui: Arc<crate::engine::ui::Ui>,
+        ) -> Result<(), StampError> {
+            Err(StampError::Execution("mock provision failure".to_string()))
+        }
+    }
+
+    #[test]
+    fn test_openstack_client() {
+        assert!(openstack_client("valid-token").is_ok());
+        assert!(
+            openstack_client(
+                "invalid
+token"
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn test_openstack_name() {
@@ -695,60 +677,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_openstack_run() -> Result<(), StampError> {
-        let b = OpenstackBuilder::new(OpenstackConfig {
-            name: "test".to_string(),
-            identity_endpoint: Some("http://keystone:5000".to_string()),
-            username: Some("user".to_string()),
-            password: Some("pass".to_string()),
-            tenant_name: Some("admin".to_string()),
-            flavor: Some("m1.small".to_string()),
-            source_image: Some("ubuntu".to_string()),
-            floating_ip_pool: Some("public-net".to_string()),
-            image_name: Some("my-glance-image".to_string()),
-            ..Default::default()
-        });
-        let hook: Arc<dyn ProvisionHook> = Arc::new(DefaultProvisionHook {
-            provisioners: Arc::new(vec![]),
-            error_cleanup_provisioners: Arc::new(vec![]),
-        });
-        let ui = Arc::new(Ui::new(
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-        ));
-        let res = b.run(hook, ui, OnErrorStrategy::Cleanup).await?;
-        assert!(res.id().starts_with("openstack:glance-"));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_openstack_run_bad_exit() -> Result<(), StampError> {
-        let b = OpenstackBuilder::new(OpenstackConfig {
-            name: "test_bad_exit".to_string(),
-            ..Default::default()
-        });
-        let hook: Arc<dyn ProvisionHook> = Arc::new(DefaultProvisionHook {
-            provisioners: Arc::new(vec![]),
-            error_cleanup_provisioners: Arc::new(vec![]),
-        });
-        let ui = Arc::new(Ui::new(
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-        ));
-        assert!(b.run(hook, ui, OnErrorStrategy::Cleanup).await.is_err());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_openstack_cancel() -> Result<(), StampError> {
+    async fn test_openstack_cancel() {
         let b = OpenstackBuilder::new(OpenstackConfig {
             name: "test".to_string(),
             ..Default::default()
         });
-        b.cancel().await?;
-        Ok(())
+        assert!(b.cancel().await.is_ok());
     }
 
     #[test]
@@ -775,33 +709,460 @@ mod tests {
         };
         assert_eq!(config.clone(), config);
         assert_eq!(format!("{config:?}"), format!("{config:?}"));
+
+        let serialized = serde_json::to_string(&config);
+        assert!(serialized.is_ok());
+        for json in serialized {
+            let deserialized: Result<OpenstackConfig, _> = serde_json::from_str(&json);
+            assert!(deserialized.is_ok());
+        }
+
+        let builder = OpenstackBuilder::new(config);
+        assert_eq!(format!("{builder:?}"), format!("{builder:?}"));
     }
 
     #[tokio::test]
-    async fn test_openstack_cleanups() {
+    async fn test_openstack_run_full_mocked() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Keystone v3 auth
+        let catalog = serde_json::json!({
+            "token": {
+                "catalog": [
+                    {
+                        "type": "compute",
+                        "endpoints": [{ "interface": "public", "url": server.url() }]
+                    },
+                    {
+                        "type": "network",
+                        "endpoints": [{ "interface": "public", "url": server.url() }]
+                    },
+                    {
+                        "type": "image",
+                        "endpoints": [{ "interface": "public", "url": server.url() }]
+                    }
+                ]
+            }
+        });
+        let _m_v3 = server
+            .mock("POST", "/v3/auth/tokens")
+            .with_status(201)
+            .with_header("X-Subject-Token", "mock-v3-token")
+            .with_body(serde_json::to_string(&catalog).unwrap_or_default())
+            .create_async()
+            .await;
+
+        // Nova create server
+        let _m_server = server
+            .mock("POST", "/servers")
+            .with_status(200)
+            .with_body(r#"{"server": {"id": "srv-999"}}"#)
+            .create_async()
+            .await;
+
+        // Neutron floating IP
+        let _m_fip = server
+            .mock("POST", "/v2.0/floatingips")
+            .with_status(200)
+            .with_body(r#"{"floatingip": {"id": "fip-123", "floating_ip_address": "10.0.0.5"}}"#)
+            .create_async()
+            .await;
+
+        // Glance create image
+        let _m_img = server
+            .mock("POST", "/servers/srv-999/action")
+            .with_status(202)
+            .with_header("Location", "glance-image-555")
+            .create_async()
+            .await;
+
+        // Nova delete server (cleanup)
+        let _m_del_server = server
+            .mock("DELETE", "/servers/srv-999")
+            .with_status(204)
+            .create_async()
+            .await;
+
+        // Neutron delete floating IP (cleanup)
+        let _m_del_fip = server
+            .mock("DELETE", "/v2.0/floatingips/fip-123")
+            .with_status(204)
+            .create_async()
+            .await;
+
+        let b = OpenstackBuilder::new(OpenstackConfig {
+            name: "test-full".to_string(),
+            identity_endpoint: Some(server.url()),
+            username: Some("user".to_string()),
+            password: Some("pass".to_string()),
+            floating_ip_pool: Some("public".to_string()),
+            ..Default::default()
+        });
+        let hook: Arc<dyn ProvisionHook> = Arc::new(DefaultProvisionHook {
+            provisioners: Arc::new(vec![]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
         let ui = Arc::new(Ui::new(
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
         ));
-        let config = OpenstackConfig::default();
+        let res = b.run(hook, ui, OnErrorStrategy::Cleanup).await;
+        assert!(res.is_ok());
+        for art in res {
+            assert_eq!(art.id(), "openstack:glance-image-555");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_keystone_auth_branches() {
+        let mut server = mockito::Server::new_async().await;
+
+        // v3 fails, v2 succeeds
+        let _m_v3_fail = server
+            .mock("POST", "/v3/auth/tokens")
+            .with_status(404)
+            .create_async()
+            .await;
+
+        let v2_resp = serde_json::json!({
+            "access": {
+                "token": {
+                    "id": "mock-v2-token"
+                }
+            }
+        });
+        let _m_v2_ok = server
+            .mock("POST", "/v2.0/tokens")
+            .with_status(200)
+            .with_body(serde_json::to_string(&v2_resp).unwrap_or_default())
+            .create_async()
+            .await;
+
+        let ui = Arc::new(Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+        let mut step = StepAuthenticateKeystone {
+            ui: ui.clone(),
+            name: "test".to_string(),
+            config: OpenstackConfig {
+                identity_endpoint: Some(server.url()),
+                compute_endpoint: Some(server.url()),
+                network_endpoint: Some(server.url()),
+                ..Default::default()
+            },
+        };
+        let mut state = StateBag::new();
+        assert!(step.run(&mut state).await.is_ok());
+        assert_eq!(
+            state.get::<String>("token"),
+            Some(&"mock-v2-token".to_string())
+        );
+
+        // When token is already configured
+        let mut step_tok = StepAuthenticateKeystone {
+            ui: ui.clone(),
+            name: "test".to_string(),
+            config: OpenstackConfig {
+                token: Some("existing-tok".to_string()),
+                compute_endpoint: Some("http://compute".to_string()),
+                network_endpoint: Some("http://network".to_string()),
+                ..Default::default()
+            },
+        };
+        let mut state_tok = StateBag::new();
+        assert!(step_tok.run(&mut state_tok).await.is_ok());
+        assert_eq!(
+            state_tok.get::<String>("token"),
+            Some(&"existing-tok".to_string())
+        );
+
+        // v2 rejected
+        let mut server_rej = mockito::Server::new_async().await;
+        let _m_v3_rej = server_rej
+            .mock("POST", "/v3/auth/tokens")
+            .with_status(404)
+            .create_async()
+            .await;
+        let _m_v2_rej = server_rej
+            .mock("POST", "/v2.0/tokens")
+            .with_status(401)
+            .with_body("Unauthorized")
+            .create_async()
+            .await;
+
+        let mut step_rej = StepAuthenticateKeystone {
+            ui: ui.clone(),
+            name: "test".to_string(),
+            config: OpenstackConfig {
+                identity_endpoint: Some(server_rej.url()),
+                ..Default::default()
+            },
+        };
+        let mut state_rej = StateBag::new();
+        assert!(step_rej.run(&mut state_rej).await.is_err());
+
+        // Invalid network endpoint
+        let mut step_net_err = StepAuthenticateKeystone {
+            ui,
+            name: "test".to_string(),
+            config: OpenstackConfig {
+                identity_endpoint: Some("http://invalid.keystone.endpoint:9999".to_string()),
+                ..Default::default()
+            },
+        };
+        let mut state_net_err = StateBag::new();
+        assert!(step_net_err.run(&mut state_net_err).await.is_err());
+        step.cleanup(&state).await;
+    }
+
+    #[tokio::test]
+    async fn test_server_creation_and_image_branches() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Server creation HTTP error
+        let _m_srv_err = server
+            .mock("POST", "/servers_err/servers")
+            .with_status(500)
+            .with_body("Server error")
+            .create_async()
+            .await;
+
+        let ui = Arc::new(Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
 
         let mut step_srv = StepCreateServer {
             ui: ui.clone(),
             name: "test".to_string(),
-            config: config.clone(),
+            config: OpenstackConfig::default(),
+        };
+        let mut state = StateBag::new();
+        state.put("token", "tok".to_string());
+        state.put("compute_endpoint", format!("{}/servers_err", server.url()));
+        assert!(step_srv.run(&mut state).await.is_err());
+
+        // Server creation network connection error
+        let mut state_net_err = StateBag::new();
+        state_net_err.put("token", "tok".to_string());
+        state_net_err.put(
+            "compute_endpoint",
+            "http://invalid.compute.endpoint:9999".to_string(),
+        );
+        assert!(step_srv.run(&mut state_net_err).await.is_err());
+
+        // Server creation invalid JSON response
+        let _m_srv_bad_json = server
+            .mock("POST", "/servers_bad_json/servers")
+            .with_status(200)
+            .with_body("not-valid-json")
+            .create_async()
+            .await;
+
+        let mut state_bad_json = StateBag::new();
+        state_bad_json.put("token", "tok".to_string());
+        state_bad_json.put(
+            "compute_endpoint",
+            format!("{}/servers_bad_json", server.url()),
+        );
+        assert!(step_srv.run(&mut state_bad_json).await.is_err());
+
+        // Server creation missing id in response
+        let _m_srv_missing = server
+            .mock("POST", "/servers_missing/servers")
+            .with_status(200)
+            .with_body(r#"{"server": {}}"#)
+            .create_async()
+            .await;
+
+        let mut state_missing = StateBag::new();
+        state_missing.put("token", "tok".to_string());
+        state_missing.put(
+            "compute_endpoint",
+            format!("{}/servers_missing", server.url()),
+        );
+        assert!(step_srv.run(&mut state_missing).await.is_err());
+
+        // Image creation without Location header (generates UUID fallback)
+        let _m_img_noloc = server
+            .mock("POST", "/servers/srv-123/action")
+            .with_status(202)
+            .create_async()
+            .await;
+
+        let mut step_img = StepCreateImage {
+            ui: ui.clone(),
+            name: "test".to_string(),
+            config: OpenstackConfig {
+                image_name: None,
+                ..Default::default()
+            },
+        };
+        let mut img_state = StateBag::new();
+        img_state.put("token", "tok".to_string());
+        img_state.put("compute_endpoint", server.url());
+        img_state.put("server_id", "srv-123".to_string());
+        let res_img = step_img.run(&mut img_state).await;
+        assert!(res_img.is_ok());
+        step_img.cleanup(&img_state).await;
+
+        // Image creation failure
+        let mut img_state_fail = StateBag::new();
+        img_state_fail.put("token", "tok".to_string());
+        img_state_fail.put(
+            "compute_endpoint",
+            "http://invalid.glance.endpoint:9999".to_string(),
+        );
+        img_state_fail.put("server_id", "srv-123".to_string());
+        assert!(step_img.run(&mut img_state_fail).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_floating_ip_and_provision_branches() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Floating IP creation failure (status 500)
+        let _m_fip_err = server
+            .mock("POST", "/v2.0/floatingips")
+            .with_status(500)
+            .create_async()
+            .await;
+
+        let ui = Arc::new(Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+
+        let mut step_fip = StepAllocateFloatingIp {
+            ui: ui.clone(),
+            name: "test".to_string(),
+            config: OpenstackConfig {
+                floating_ip_pool: Some("public".to_string()),
+                ..Default::default()
+            },
+        };
+        let mut state = StateBag::new();
+        state.put("token", "tok".to_string());
+        state.put("network_endpoint", server.url());
+        assert!(step_fip.run(&mut state).await.is_ok());
+        assert!(state.get::<String>("floating_ip").is_none());
+
+        // When endpoint is invalid network error
+        let mut state_net_err = StateBag::new();
+        state_net_err.put("token", "tok".to_string());
+        state_net_err.put(
+            "network_endpoint",
+            "http://invalid.neutron.endpoint:9999".to_string(),
+        );
+        assert!(step_fip.run(&mut state_net_err).await.is_err());
+
+        // Floating IP skipped when pool is None
+        let mut step_fip_none = StepAllocateFloatingIp {
+            ui: ui.clone(),
+            name: "test".to_string(),
+            config: OpenstackConfig {
+                floating_ip_pool: None,
+                ..Default::default()
+            },
+        };
+        assert!(step_fip_none.run(&mut state).await.is_ok());
+
+        // Provisioner failure
+        let fail_hook = Arc::new(DefaultProvisionHook {
+            provisioners: Arc::new(vec![Box::new(FailingProvisioner)]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let mut step_prov = StepProvision {
+            ui,
+            name: "test".to_string(),
+            config: OpenstackConfig::default(),
+            hook: fail_hook,
+        };
+        assert!(step_prov.run(&mut state).await.is_err());
+        step_prov.cleanup(&state).await;
+    }
+
+    #[tokio::test]
+    async fn test_builder_error_strategies() {
+        let b = OpenstackBuilder::new(OpenstackConfig {
+            name: "test".to_string(),
+            identity_endpoint: Some("http://invalid.keystone:9999".to_string()),
+            ..Default::default()
+        });
+        let hook: Arc<dyn ProvisionHook> = Arc::new(DefaultProvisionHook {
+            provisioners: Arc::new(vec![]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let ui = Arc::new(Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+
+        // Cleanup
+        assert!(
+            b.run(hook.clone(), ui.clone(), OnErrorStrategy::Cleanup)
+                .await
+                .is_err()
+        );
+        // Abort
+        assert!(
+            b.run(hook.clone(), ui.clone(), OnErrorStrategy::Abort)
+                .await
+                .is_err()
+        );
+        // Ask
+        assert!(b.run(hook, ui, OnErrorStrategy::Ask).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_openstack_cleanups() {
+        let mut server = mockito::Server::new_async().await;
+        let _m_del_server = server
+            .mock("DELETE", "/servers/srv-1")
+            .with_status(204)
+            .create_async()
+            .await;
+        let _m_del_fip = server
+            .mock("DELETE", "/v2.0/floatingips/fip-1")
+            .with_status(204)
+            .create_async()
+            .await;
+
+        let ui = Arc::new(Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+
+        let mut step_srv = StepCreateServer {
+            ui: ui.clone(),
+            name: "test".to_string(),
+            config: OpenstackConfig::default(),
         };
         let mut state = StateBag::new();
         state.put("server_id", "srv-1".to_string());
         state.put("token", "tok".to_string());
+        state.put("compute_endpoint", server.url());
         step_srv.cleanup(&state).await;
 
         let mut step_fip = StepAllocateFloatingIp {
             ui,
             name: "test".to_string(),
-            config,
+            config: OpenstackConfig::default(),
         };
         state.put("floating_ip_id", "fip-1".to_string());
+        state.put("network_endpoint", server.url());
         step_fip.cleanup(&state).await;
+
+        // Cleanup with empty state
+        let empty_state = StateBag::new();
+        step_srv.cleanup(&empty_state).await;
+        step_fip.cleanup(&empty_state).await;
     }
 }

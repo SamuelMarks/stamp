@@ -398,11 +398,6 @@ impl Step for StepFlattenContainer {
             &format!("Flattening exported container from {export_path}..."),
         );
 
-        if cfg!(test) {
-            state.put("image_id", "mock-flattened-image".to_string());
-            return Ok(StepAction::Continue);
-        }
-
         let mut cmd = tokio::process::Command::new(crate::utils::docker_executable());
         cmd.arg("import");
         for change in &self.config.changes {
@@ -469,10 +464,6 @@ impl Step for StepPushContainer {
                 &self.name,
                 &format!("Tagging image {image_id} as {full_tag}..."),
             );
-
-            if cfg!(test) {
-                continue;
-            }
 
             let status = tokio::process::Command::new(crate::utils::docker_executable())
                 .arg("tag")
@@ -1378,11 +1369,294 @@ exit 1
             }
             let _ = std::fs::remove_file(&path);
         }
-        assert!(res.is_err());
-        assert!(
-            res.unwrap_err()
-                .to_string()
-                .contains("Docker export failed")
-        );
+        assert!(matches!(
+            res,
+            Err(StampError::Execution(ref msg)) if msg.contains("Docker export failed")
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_docker_step_flatten_failure() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "mock_docker_flatten_fail_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_micros()
+        ));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script = "#!/bin/sh\nexit 1\n";
+            let _ = std::fs::write(&path, script);
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+            unsafe {
+                std::env::set_var("DOCKER_EXECUTABLE", path.to_str().unwrap_or(""));
+            }
+        }
+        let mut step = StepFlattenContainer {
+            ui: std::sync::Arc::new(crate::engine::ui::Ui::new(
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+            )),
+            name: "test_flatten_failure".into(),
+            config: DockerConfig {
+                name: "test_flatten_failure".to_string(),
+                flatten: true,
+                export_path: Some("out.tar".into()),
+                ..Default::default()
+            },
+        };
+        let mut state = StateBag::new();
+        let res = step.run(&mut state).await;
+        #[cfg(unix)]
+        {
+            unsafe {
+                std::env::remove_var("DOCKER_EXECUTABLE");
+            }
+            let _ = std::fs::remove_file(&path);
+        }
+        assert!(matches!(
+            res,
+            Err(StampError::Execution(ref msg)) if msg.contains("Docker import (flatten) failed")
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_docker_step_flatten_map_err() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        unsafe {
+            std::env::set_var(
+                "DOCKER_EXECUTABLE",
+                "non_existent_docker_executable_flatten",
+            );
+        }
+        let mut step = StepFlattenContainer {
+            ui: std::sync::Arc::new(crate::engine::ui::Ui::new(
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+            )),
+            name: "test_flatten_map_err".into(),
+            config: DockerConfig {
+                name: "test_flatten_map_err".to_string(),
+                flatten: true,
+                export_path: Some("out.tar".into()),
+                ..Default::default()
+            },
+        };
+        let mut state = StateBag::new();
+        let res = step.run(&mut state).await;
+        unsafe {
+            std::env::remove_var("DOCKER_EXECUTABLE");
+        }
+        assert!(matches!(
+            res,
+            Err(StampError::Execution(ref msg)) if msg.contains("Failed to execute docker import")
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_docker_step_tag_failure() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "mock_docker_tag_fail_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_micros()
+        ));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script = "#!/bin/sh\nexit 1\n";
+            let _ = std::fs::write(&path, script);
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+            unsafe {
+                std::env::set_var("DOCKER_EXECUTABLE", path.to_str().unwrap_or(""));
+            }
+        }
+        let mut step = StepPushContainer {
+            ui: std::sync::Arc::new(crate::engine::ui::Ui::new(
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+            )),
+            name: "test_tag_failure".into(),
+            config: DockerConfig {
+                name: "test_tag_failure".to_string(),
+                repository: Some("myrepo".to_string()),
+                tags: vec!["v1".to_string()],
+                ..Default::default()
+            },
+        };
+        let mut state = StateBag::new();
+        state.put("image_id", "img123".to_string());
+        let res = step.run(&mut state).await;
+        #[cfg(unix)]
+        {
+            unsafe {
+                std::env::remove_var("DOCKER_EXECUTABLE");
+            }
+            let _ = std::fs::remove_file(&path);
+        }
+        assert!(matches!(
+            res,
+            Err(StampError::Execution(ref msg)) if msg.contains("Docker tag failed")
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_docker_step_tag_map_err() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        unsafe {
+            std::env::set_var("DOCKER_EXECUTABLE", "non_existent_docker_executable_tag");
+        }
+        let mut step = StepPushContainer {
+            ui: std::sync::Arc::new(crate::engine::ui::Ui::new(
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+            )),
+            name: "test_tag_map_err".into(),
+            config: DockerConfig {
+                name: "test_tag_map_err".to_string(),
+                repository: Some("myrepo".to_string()),
+                tags: vec!["v1".to_string()],
+                ..Default::default()
+            },
+        };
+        let mut state = StateBag::new();
+        state.put("image_id", "img123".to_string());
+        let res = step.run(&mut state).await;
+        unsafe {
+            std::env::remove_var("DOCKER_EXECUTABLE");
+        }
+        assert!(matches!(
+            res,
+            Err(StampError::Execution(ref msg)) if msg.contains("Failed to execute docker tag")
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_docker_step_push_failure() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "mock_docker_push_fail_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_micros()
+        ));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script = "#!/bin/sh\nif [ \"$1\" = \"push\" ]; then\n  exit 1\nfi\nexit 0\n";
+            let _ = std::fs::write(&path, script);
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+            unsafe {
+                std::env::set_var("DOCKER_EXECUTABLE", path.to_str().unwrap_or(""));
+            }
+        }
+        let mut step = StepPushContainer {
+            ui: std::sync::Arc::new(crate::engine::ui::Ui::new(
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+            )),
+            name: "test_push_failure".into(),
+            config: DockerConfig {
+                name: "test_push_failure".to_string(),
+                repository: Some("myrepo".to_string()),
+                tags: vec!["v1".to_string()],
+                push: true,
+                ..Default::default()
+            },
+        };
+        let mut state = StateBag::new();
+        state.put("image_id", "img123".to_string());
+        let res = step.run(&mut state).await;
+        #[cfg(unix)]
+        {
+            unsafe {
+                std::env::remove_var("DOCKER_EXECUTABLE");
+            }
+            let _ = std::fs::remove_file(&path);
+        }
+        assert!(matches!(
+            res,
+            Err(StampError::Execution(ref msg)) if msg.contains("Docker push failed")
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_docker_step_push_map_err() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "mock_docker_push_map_err_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_micros()
+        ));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // The script deletes itself upon running "tag", so the subsequent "push" fails to execute!
+            let script =
+                "#!/bin/sh\nif [ \"$1\" = \"tag\" ]; then\n  rm -f \"$0\"\n  exit 0\nfi\nexit 0\n";
+            let _ = std::fs::write(&path, script);
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+            unsafe {
+                std::env::set_var("DOCKER_EXECUTABLE", path.to_str().unwrap_or(""));
+            }
+        }
+        let mut step = StepPushContainer {
+            ui: std::sync::Arc::new(crate::engine::ui::Ui::new(
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+            )),
+            name: "test_push_map_err".into(),
+            config: DockerConfig {
+                name: "test_push_map_err".to_string(),
+                repository: Some("myrepo".to_string()),
+                tags: vec!["v1".to_string()],
+                push: true,
+                ..Default::default()
+            },
+        };
+        let mut state = StateBag::new();
+        state.put("image_id", "img123".to_string());
+        let res = step.run(&mut state).await;
+        #[cfg(unix)]
+        {
+            unsafe {
+                std::env::remove_var("DOCKER_EXECUTABLE");
+            }
+            let _ = std::fs::remove_file(&path);
+        }
+        assert!(matches!(
+            res,
+            Err(StampError::Execution(ref msg)) if msg.contains("Failed to execute docker push")
+        ));
     }
 }

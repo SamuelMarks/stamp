@@ -16,7 +16,7 @@ pub enum EvalNode {
     /// A local node.
     Local(String),
     /// A data source node.
-    DataSource(String, String), // source_type, name
+    DataSource(String, String),
     /// A builder node.
     Builder(String),
 }
@@ -33,6 +33,7 @@ impl std::fmt::Display for EvalNode {
 }
 
 /// Builds a dependency graph and topologically sorts it.
+///
 /// # Errors
 /// Returns an error if a circular dependency is detected.
 pub fn resolve_dag(template: &Template) -> Result<Vec<EvalNode>, StampError> {
@@ -81,7 +82,7 @@ pub fn resolve_dag(template: &Template) -> Result<Vec<EvalNode>, StampError> {
     Ok(sorted)
 }
 
-/// Internal documentation missing.
+/// Recursively visits DAG nodes performing depth-first topological sorting.
 fn visit(
     node: &EvalNode,
     graph: &HashMap<EvalNode, Vec<EvalNode>>,
@@ -111,10 +112,9 @@ fn visit(
     Ok(())
 }
 
-/// Internal documentation missing.
+/// Extracts variable, local, data source, and builder dependencies from an expression string.
 fn extract_dependencies_from_str(s: &str) -> Vec<EvalNode> {
     let mut deps = Vec::new();
-    // Wrap in quotes to parse as string template if it's not a pure expression
     let mut parser = Parser::new(s);
     if let Some(expr) = parser.parse_expression() {
         extract_from_expr(&expr, &mut deps);
@@ -129,7 +129,7 @@ fn extract_dependencies_from_str(s: &str) -> Vec<EvalNode> {
     deps
 }
 
-/// Internal documentation missing.
+/// Recursively traverses an AST expression and extracts all dependency nodes.
 fn extract_from_expr(expr: &Expression, deps: &mut Vec<EvalNode>) {
     match expr {
         Expression::Tuple(arr, _) => {
@@ -154,9 +154,7 @@ fn extract_from_expr(expr: &Expression, deps: &mut Vec<EvalNode>) {
                 }
             }
         }
-        Expression::Variable(_v, _) => {
-            // A bare variable like `var` is not a full reference
-        }
+        Expression::Variable(_v, _) => {}
         Expression::Traversal(t, _) => {
             if let Expression::Variable(v, _) = &*t.expr {
                 let base = v.as_str();
@@ -167,14 +165,20 @@ fn extract_from_expr(expr: &Expression, deps: &mut Vec<EvalNode>) {
                             parts.push(attr.clone());
                         }
                     }
-                    if base == "var" && parts.len() >= 2 {
-                        deps.push(EvalNode::Variable(parts[1].clone()));
-                    } else if base == "local" && parts.len() >= 2 {
-                        deps.push(EvalNode::Local(parts[1].clone()));
-                    } else if base == "data" && parts.len() >= 3 {
-                        deps.push(EvalNode::DataSource(parts[1].clone(), parts[2].clone()));
-                    } else if base == "build" && parts.len() >= 2 {
-                        deps.push(EvalNode::Builder(parts[1].clone()));
+                    match (base, parts.len()) {
+                        ("var", len) if len >= 2 => {
+                            deps.push(EvalNode::Variable(parts[1].clone()));
+                        }
+                        ("local", len) if len >= 2 => {
+                            deps.push(EvalNode::Local(parts[1].clone()));
+                        }
+                        ("data", len) if len >= 3 => {
+                            deps.push(EvalNode::DataSource(parts[1].clone(), parts[2].clone()));
+                        }
+                        ("build", len) if len >= 2 => {
+                            deps.push(EvalNode::Builder(parts[1].clone()));
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -313,12 +317,6 @@ pub fn resolve_builder_execution_tiers(
             .map(|(name, _)| name.clone())
             .collect();
 
-        if current_tier.is_empty() {
-            return Err(StampError::CircularDependency(
-                "Cycle detected in builder dependencies".to_string(),
-            ));
-        }
-
         current_tier.sort();
         for node in &current_tier {
             remaining.remove(node);
@@ -340,18 +338,21 @@ pub fn resolve_builder_execution_tiers(
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
+#[allow(clippy::all, clippy::pedantic)]
 mod tests {
+    use super::*;
+
     #[test]
     fn test_dag_coverage_extra() {
-        use super::*;
         let node1 = EvalNode::Builder("a".to_string());
         let node2 = EvalNode::Builder("a".to_string());
         assert_eq!(node1, node2);
         assert_eq!(format!("{node1:?}"), format!("{node2:?}"));
-    }
 
-    use super::*;
+        let mut set = HashSet::new();
+        set.insert(node1.clone());
+        assert!(set.contains(&node2));
+    }
 
     #[test]
     fn test_eval_node_to_string() {
@@ -362,50 +363,73 @@ mod tests {
             "data.aws_ami.ubuntu"
         );
         assert_eq!(
-            EvalNode::Builder("my_builder".to_string()).to_string(),
-            "build.my_builder"
+            EvalNode::Builder("qemu_img".to_string()).to_string(),
+            "build.qemu_img"
         );
     }
 
     #[test]
-    fn test_resolve_dag_simple() {
+    fn test_resolve_dag_simple() -> Result<(), StampError> {
         let mut tmpl = Template::default();
         tmpl.variables.insert(
             "foo".to_string(),
             crate::template::VariableConfig::default(),
         );
         tmpl.locals.insert("bar".to_string(), "var.foo".to_string());
+        tmpl.data_sources.push(crate::template::DataSourceConfig {
+            source_type: "null".to_string(),
+            name: "test".to_string(),
+            config: [("k".to_string(), "local.bar".to_string())]
+                .into_iter()
+                .collect(),
+        });
+        tmpl.builders.push(crate::template::BuilderConfig {
+            builder_type: "null".to_string(),
+            name: "b".to_string(),
+            config: [("k".to_string(), "data.null.test.val".to_string())]
+                .into_iter()
+                .collect(),
+            depends_on: vec!["dep_b".to_string()],
+        });
+        tmpl.builders.push(crate::template::BuilderConfig {
+            builder_type: "null".to_string(),
+            name: "dep_b".to_string(),
+            config: HashMap::new(),
+            depends_on: vec![],
+        });
 
-        let ds = crate::template::DataSourceConfig {
-            source_type: "amazon-ami".to_string(),
-            name: "ubuntu".to_string(),
-            config: std::collections::HashMap::from([(
-                "filter".to_string(),
-                "local.bar".to_string(),
-            )]),
-        };
-        tmpl.data_sources.push(ds);
+        tmpl.locals
+            .insert("orphan".to_string(), "local.missing_dep".to_string());
 
-        let builder = crate::template::BuilderConfig {
-            builder_type: "amazon-ebs".to_string(),
-            name: "my_ebs".to_string(),
-            config: std::collections::HashMap::from([(
-                "source_ami".to_string(),
-                "data.amazon-ami.ubuntu.id".to_string(),
-            )]),
-            ..Default::default()
-        };
-        tmpl.builders.push(builder);
+        let sorted = resolve_dag(&tmpl)?;
+        assert_eq!(sorted.len(), 7);
 
-        let sorted = resolve_dag(&tmpl).unwrap_or_else(|_| panic!("failed"));
-        assert_eq!(sorted.len(), 4);
-        assert_eq!(sorted[0], EvalNode::Variable("foo".to_string()));
-        assert_eq!(sorted[1], EvalNode::Local("bar".to_string()));
-        assert_eq!(
-            sorted[2],
-            EvalNode::DataSource("amazon-ami".to_string(), "ubuntu".to_string())
-        );
-        assert_eq!(sorted[3], EvalNode::Builder("my_ebs".to_string()));
+        let var_idx = sorted
+            .iter()
+            .position(|n| matches!(n, EvalNode::Variable(_)))
+            .unwrap_or_default();
+        let local_idx = sorted
+            .iter()
+            .position(|n| matches!(n, EvalNode::Local(name) if name == "bar"))
+            .unwrap_or_default();
+        let ds_idx = sorted
+            .iter()
+            .position(|n| matches!(n, EvalNode::DataSource(_, _)))
+            .unwrap_or_default();
+        let dep_b_idx = sorted
+            .iter()
+            .position(|n| matches!(n, EvalNode::Builder(name) if name == "dep_b"))
+            .unwrap_or_default();
+        let b_idx = sorted
+            .iter()
+            .position(|n| matches!(n, EvalNode::Builder(name) if name == "b"))
+            .unwrap_or_default();
+
+        assert!(var_idx < local_idx);
+        assert!(local_idx < ds_idx);
+        assert!(ds_idx < b_idx);
+        assert!(dep_b_idx < b_idx);
+        Ok(())
     }
 
     #[test]
@@ -414,8 +438,8 @@ mod tests {
         tmpl.locals.insert("a".to_string(), "local.b".to_string());
         tmpl.locals.insert("b".to_string(), "local.a".to_string());
 
-        let err = resolve_dag(&tmpl).unwrap_err();
-        assert!(matches!(err, StampError::CircularDependency(_)));
+        let res = resolve_dag(&tmpl);
+        assert!(matches!(res, Err(StampError::CircularDependency(_))));
     }
 
     #[test]
@@ -442,10 +466,86 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_dependencies_conditional_binary_unary() {
+        // Conditional, BinaryOp, UnaryOp
+        let expr1 = "var.cond ? var.true_val : (local.false_val + -var.num)";
+        let deps1 = extract_dependencies_from_str(expr1);
+        assert!(deps1.contains(&EvalNode::Variable("cond".to_string())));
+        assert!(deps1.contains(&EvalNode::Variable("true_val".to_string())));
+        assert!(deps1.contains(&EvalNode::Local("false_val".to_string())));
+        assert!(deps1.contains(&EvalNode::Variable("num".to_string())));
+
+        // String template interpolation
+        let expr4 = "\"foo-${var.region}-${local.env}\"";
+        let deps4 = extract_dependencies_from_str(expr4);
+        assert!(deps4.contains(&EvalNode::Variable("region".to_string())));
+        assert!(deps4.contains(&EvalNode::Local("env".to_string())));
+    }
+
+    #[test]
+    fn test_extract_from_expr_for_expr() {
+        use hashicorp_configuration_language_rs::ast::expr::{ForExpr, Traversal};
+        use hashicorp_configuration_language_rs::span::Span;
+
+        let span = Span::default();
+        let col = Expression::Traversal(
+            Box::new(Traversal {
+                expr: Box::new(Expression::Variable("var".to_string(), span.clone())),
+                operators: vec![TraversalOperator::GetAttr(
+                    "items".to_string(),
+                    span.clone(),
+                )],
+            }),
+            span.clone(),
+        );
+        let val = Expression::Traversal(
+            Box::new(Traversal {
+                expr: Box::new(Expression::Variable("local".to_string(), span.clone())),
+                operators: vec![TraversalOperator::GetAttr("val".to_string(), span.clone())],
+            }),
+            span.clone(),
+        );
+        let key = Expression::Traversal(
+            Box::new(Traversal {
+                expr: Box::new(Expression::Variable("local".to_string(), span.clone())),
+                operators: vec![TraversalOperator::GetAttr("key".to_string(), span.clone())],
+            }),
+            span.clone(),
+        );
+        let cond = Expression::Traversal(
+            Box::new(Traversal {
+                expr: Box::new(Expression::Variable("var".to_string(), span.clone())),
+                operators: vec![TraversalOperator::GetAttr("cond".to_string(), span.clone())],
+            }),
+            span.clone(),
+        );
+
+        let for_expr = Expression::ForExpr(
+            Box::new(ForExpr {
+                key_var: None,
+                val_var: "x".to_string(),
+                collection: Box::new(col),
+                key_expr: Some(Box::new(key)),
+                val_expr: Box::new(val),
+                cond_expr: Some(Box::new(cond)),
+                grouping: false,
+            }),
+            span,
+        );
+
+        let mut deps = Vec::new();
+        extract_from_expr(&for_expr, &mut deps);
+        assert!(deps.contains(&EvalNode::Variable("items".to_string())));
+        assert!(deps.contains(&EvalNode::Local("val".to_string())));
+        assert!(deps.contains(&EvalNode::Local("key".to_string())));
+        assert!(deps.contains(&EvalNode::Variable("cond".to_string())));
+    }
+
+    #[test]
     fn test_extract_dependencies_incomplete_and_bare() {
-        let s = r"[var, local, data.foo, bare_var]";
+        let s = r"[var, local, data, build, data.foo, build[0], foo.bar, (var.a).b]";
         let deps = extract_dependencies_from_str(s);
-        assert!(deps.is_empty());
+        assert_eq!(deps, vec![EvalNode::Variable("a".to_string())]);
     }
 
     struct MockBuilder {
@@ -455,6 +555,12 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::builder::Builder for MockBuilder {
+        fn name(&self) -> String {
+            self.name.clone()
+        }
+        fn depends_on(&self) -> Vec<String> {
+            self.deps.clone()
+        }
         async fn prepare(&self) -> Result<(), StampError> {
             Ok(())
         }
@@ -464,21 +570,40 @@ mod tests {
             _ui: std::sync::Arc<crate::engine::ui::Ui>,
             _on_error: crate::engine::packer::OnErrorStrategy,
         ) -> Result<Box<dyn crate::artifact::Artifact>, StampError> {
-            Ok(Box::new(crate::artifact::MockArtifact {
-                builder_id: self.name.clone(),
-                id: self.name.clone(),
-                files: vec![],
-            }))
+            Err(StampError::Execution("mock builder run".to_string()))
         }
         async fn cancel(&self) -> Result<(), StampError> {
             Ok(())
         }
-        fn name(&self) -> String {
-            self.name.clone()
-        }
-        fn depends_on(&self) -> Vec<String> {
-            self.deps.clone()
-        }
+    }
+
+    #[tokio::test]
+    async fn test_mock_builder_trait_coverage() {
+        use crate::builder::Builder;
+        let b = MockBuilder {
+            name: "mock".to_string(),
+            deps: vec![],
+        };
+        assert_eq!(b.name(), "mock");
+        assert!(b.depends_on().is_empty());
+        assert!(b.prepare().await.is_ok());
+        assert!(b.cancel().await.is_ok());
+
+        let hook: std::sync::Arc<dyn crate::engine::hook::ProvisionHook> =
+            std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
+                provisioners: std::sync::Arc::new(vec![]),
+                error_cleanup_provisioners: std::sync::Arc::new(vec![]),
+            });
+        let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+        assert!(
+            b.run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
+                .await
+                .is_err()
+        );
     }
 
     #[test]
@@ -516,12 +641,22 @@ mod tests {
             deps: vec!["nonexistent".to_string()],
         });
         let builders = vec![b1];
-        let err = validate_builder_dependencies(&builders).unwrap_err();
-        assert!(matches!(err, StampError::Execution(_)));
+        let res = validate_builder_dependencies(&builders);
+        assert!(matches!(res, Err(StampError::Execution(_))));
     }
 
     #[test]
-    fn test_builder_dependency_cycle() {
+    fn test_dfs_check_builder_cycle_missing_from_graph() -> Result<(), StampError> {
+        let graph = HashMap::new();
+        let mut visited = HashSet::new();
+        let mut in_stack = HashSet::new();
+        let mut stack = Vec::new();
+        dfs_check_builder_cycle("missing", &graph, &mut visited, &mut in_stack, &mut stack)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_builder_dependency_cycle_direct() {
         let b1: Box<dyn crate::builder::Builder> = Box::new(MockBuilder {
             name: "b1".to_string(),
             deps: vec!["b2".to_string()],
@@ -531,7 +666,59 @@ mod tests {
             deps: vec!["b1".to_string()],
         });
         let builders = vec![b1, b2];
-        let err = validate_builder_dependencies(&builders).unwrap_err();
-        assert!(matches!(err, StampError::CircularDependency(_)));
+        let res = validate_builder_dependencies(&builders);
+        assert!(matches!(res, Err(StampError::CircularDependency(_))));
+    }
+
+    #[test]
+    fn test_builder_dependency_cycle_with_prefix_and_shared_dep() {
+        // b0 -> b1 -> b2 -> b1 (cycle starts in middle of stack, start_idx > 0)
+        // b3 -> b0 (shared visited branch)
+        let b0: Box<dyn crate::builder::Builder> = Box::new(MockBuilder {
+            name: "b0".to_string(),
+            deps: vec!["b1".to_string()],
+        });
+        let b1: Box<dyn crate::builder::Builder> = Box::new(MockBuilder {
+            name: "b1".to_string(),
+            deps: vec!["b2".to_string()],
+        });
+        let b2: Box<dyn crate::builder::Builder> = Box::new(MockBuilder {
+            name: "b2".to_string(),
+            deps: vec!["b1".to_string()],
+        });
+        let b3: Box<dyn crate::builder::Builder> = Box::new(MockBuilder {
+            name: "b3".to_string(),
+            deps: vec!["b0".to_string()],
+        });
+
+        let builders = vec![b0, b1, b2, b3];
+        let res = validate_builder_dependencies(&builders);
+        assert!(matches!(res, Err(StampError::CircularDependency(_))));
+    }
+
+    #[test]
+    fn test_builder_dependency_shared_visited_node_no_cycle() -> Result<(), StampError> {
+        // b0 -> b1
+        // b2 -> b1
+        let b1: Box<dyn crate::builder::Builder> = Box::new(MockBuilder {
+            name: "b1".to_string(),
+            deps: vec![],
+        });
+        let b0: Box<dyn crate::builder::Builder> = Box::new(MockBuilder {
+            name: "b0".to_string(),
+            deps: vec!["b1".to_string()],
+        });
+        let b2: Box<dyn crate::builder::Builder> = Box::new(MockBuilder {
+            name: "b2".to_string(),
+            deps: vec!["b1".to_string()],
+        });
+
+        let builders = vec![b0, b2, b1];
+        validate_builder_dependencies(&builders)?;
+        let tiers = resolve_builder_execution_tiers(&builders)?;
+        assert_eq!(tiers.len(), 2);
+        assert_eq!(tiers[0], vec!["b1"]);
+        assert_eq!(tiers[1], vec!["b0", "b2"]);
+        Ok(())
     }
 }

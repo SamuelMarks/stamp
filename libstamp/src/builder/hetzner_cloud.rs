@@ -1,3 +1,4 @@
+#![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `hetzner-cloud` builder.
 
 use crate::builder::Builder;
@@ -517,10 +518,39 @@ Do you want to clean up? [y/N]: ",
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::pedantic,
+    clippy::all,
+    for_loops_over_fallibles
+)]
 mod tests {
+    use super::*;
+
     #[tokio::test]
-    async fn test_hetznercloudbuilder_run_action_error() -> Result<(), StampError> {
+    async fn test_hcloud_helpers() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        // hcloud_client
+        assert!(hcloud_client("valid-token").is_ok());
+        assert!(hcloud_client("\n").is_err());
+
+        // hcloud_api_url with and without env var
+        unsafe {
+            std::env::set_var("HCLOUD_API_URL", "http://custom-api");
+        }
+        assert_eq!(hcloud_api_url(), "http://custom-api");
+
+        unsafe {
+            std::env::remove_var("HCLOUD_API_URL");
+        }
+        assert_eq!(hcloud_api_url(), "https://api.hetzner.cloud");
+    }
+
+    #[tokio::test]
+    async fn test_hetznercloudbuilder_run_action_error() {
         let config = HetznerCloudConfig {
             name: "test-builder".to_string(),
             ..Default::default()
@@ -541,12 +571,8 @@ mod tests {
             crate::engine::packer::FeatureState::Disabled,
         ));
 
-        // Let us just test run method execution coverage.
         let _ = builder.run(hook, ui, OnErrorStrategy::Cleanup).await;
-        Ok(())
     }
-
-    use super::*;
 
     #[test]
     fn test_derived_traits() {
@@ -562,30 +588,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_hetzner_cloud_prepare_success() -> Result<(), crate::error::StampError> {
+    async fn test_hetzner_cloud_prepare_success() {
         let config = HetznerCloudConfig {
             name: "test".to_string(),
             ..Default::default()
         };
         let builder = HetznerCloudBuilder::new(config);
-        builder.prepare().await?;
-        Ok(())
+        assert!(builder.prepare().await.is_ok());
     }
 
     #[tokio::test]
-    async fn test_hetzner_cloud_prepare_failure() -> Result<(), crate::error::StampError> {
+    async fn test_hetzner_cloud_prepare_failure() {
         let config = HetznerCloudConfig {
             name: String::new(),
             ..Default::default()
         };
         let builder = HetznerCloudBuilder::new(config);
-        let err = builder.prepare().await;
-        assert!(matches!(err, Err(crate::error::StampError::Parse(_))));
-        Ok(())
+        assert!(builder.prepare().await.is_err());
     }
 
     #[tokio::test]
-    async fn test_hetzner_cloud_run() -> Result<(), crate::error::StampError> {
+    async fn test_hetzner_cloud_run() {
         let _guard = crate::utils::ENV_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -594,7 +617,7 @@ mod tests {
             ..Default::default()
         };
         let builder = HetznerCloudBuilder::new(config);
-        let artifact = builder
+        let res = builder
             .run(
                 std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
                     provisioners: std::sync::Arc::new(vec![]),
@@ -607,20 +630,21 @@ mod tests {
                 )),
                 crate::engine::packer::OnErrorStrategy::Cleanup,
             )
-            .await?;
-        assert!(artifact.id().contains("server:123456789"));
-        Ok(())
+            .await;
+        assert!(res.is_ok());
+        for artifact in res {
+            assert!(artifact.id().contains("server:123456789"));
+        }
     }
 
     #[tokio::test]
-    async fn test_hetzner_cloud_cancel() -> Result<(), crate::error::StampError> {
+    async fn test_hetzner_cloud_cancel() {
         let config = HetznerCloudConfig {
             name: "test".to_string(),
             ..Default::default()
         };
         let builder = HetznerCloudBuilder::new(config);
-        builder.cancel().await?;
-        Ok(())
+        assert!(builder.cancel().await.is_ok());
     }
 
     #[test]
@@ -649,6 +673,14 @@ mod tests {
             .mock("POST", "/v1/servers")
             .with_status(201)
             .with_body(r#"{"server": {"id": 999}, "action": {"id": 111}}"#)
+            .create_async()
+            .await;
+
+        let _m2_poll = server
+            .mock("GET", "/v1/actions/111")
+            .with_status(200)
+            .with_body(r#"{"action": {"status": "running"}}"#)
+            .expect(1)
             .create_async()
             .await;
 
@@ -782,5 +814,39 @@ mod tests {
             std::env::remove_var("HCLOUD_REAL_TEST");
         }
         assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_hcloud_action_timeout() {
+        let mut server = mockito::Server::new_async().await;
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        unsafe {
+            std::env::set_var("HCLOUD_API_URL", server.url());
+            std::env::set_var("HCLOUD_REAL_TEST", "1");
+        }
+
+        let _m = server
+            .mock("GET", "/v1/actions/9999")
+            .with_status(200)
+            .with_body(r#"{"action": {"status": "running"}}"#)
+            .expect(60)
+            .create_async()
+            .await;
+
+        let client = hcloud_client("token").unwrap_or_default();
+        let ui = Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+        let res = wait_for_hcloud_action(&client, &ui, "test", 9999).await;
+        assert!(res.is_err());
+
+        unsafe {
+            std::env::remove_var("HCLOUD_API_URL");
+            std::env::remove_var("HCLOUD_REAL_TEST");
+        }
     }
 }

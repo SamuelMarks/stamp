@@ -1,3 +1,4 @@
+#![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `amazon-chroot` builder.
 
 pub use super::amazon_common::{
@@ -159,11 +160,12 @@ impl Step for StepRunSourceInstance {
     }
 }
 
-/// Resolves an EC2 device name (such as `/dev/sdf` or `/dev/xvdf`) to its corresponding
-/// `NVMe` block device on modern Nitro instances (e.g. `/dev/nvme1n1`), or returns the original
-/// path if already an `NVMe` path or if no Nitro `NVMe` mapping is detected.
-#[must_use]
-pub fn resolve_nvme_device_path(device_path: &str) -> String {
+/// Internal helper to resolve `NVMe` device paths for Amazon EC2 EBS volumes.
+fn resolve_nvme_device_path_internal(
+    device_path: &str,
+    by_id_dir: &std::path::Path,
+    dev_dir: &std::path::Path,
+) -> String {
     if device_path.starts_with("/dev/nvme") {
         return device_path.to_string();
     }
@@ -175,7 +177,7 @@ pub fn resolve_nvme_device_path(device_path: &str) -> String {
         .trim_start_matches("hd");
 
     // Check by-id disk symlinks for AWS EBS volume aliases
-    if let Ok(entries) = std::fs::read_dir("/dev/disk/by-id") {
+    if let Ok(entries) = std::fs::read_dir(by_id_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             if name.contains(dev_name)
@@ -191,13 +193,30 @@ pub fn resolve_nvme_device_path(device_path: &str) -> String {
         && first_char.is_ascii_lowercase()
     {
         let index = (first_char as u8).saturating_sub(b'f') + 1;
-        let candidate = format!("/dev/nvme{index}n1");
-        if std::path::Path::new(&candidate).exists() {
-            return candidate;
+        let candidate_file = format!("nvme{index}n1");
+        let candidate = dev_dir.join(&candidate_file);
+        if candidate.exists() {
+            return candidate.to_string_lossy().into_owned();
         }
     }
 
     device_path.to_string()
+}
+
+/// Resolves an EC2 device name (such as `/dev/sdf` or `/dev/xvdf`) to its corresponding
+/// `NVMe` block device on modern Nitro instances (e.g. `/dev/nvme1n1`), or returns the original
+/// path if already an `NVMe` path or if no Nitro `NVMe` mapping is detected.
+///
+/// # Arguments
+///
+/// * `device_path` - Original block device path (e.g. `"/dev/xvdf"`).
+#[must_use]
+pub fn resolve_nvme_device_path(device_path: &str) -> String {
+    resolve_nvme_device_path_internal(
+        device_path,
+        std::path::Path::new("/dev/disk/by-id"),
+        std::path::Path::new("/dev"),
+    )
 }
 
 /// Step to format and mount the chroot block device.
@@ -333,6 +352,7 @@ struct StepProvision {
     /// Builder name.
     name: String,
     /// Builder configuration.
+    #[allow(dead_code)]
     config: AmazonChrootConfig,
     /// Provisioning hook.
     hook: Arc<dyn ProvisionHook>,
@@ -347,12 +367,7 @@ impl Step for StepProvision {
         let mount_path = state
             .get::<String>("mount_path")
             .cloned()
-            .unwrap_or_else(|| {
-                self.config
-                    .mount_path
-                    .clone()
-                    .unwrap_or_else(|| "/mnt/packer-amazon-chroot".to_string())
-            });
+            .unwrap_or_default();
 
         let comm: Arc<dyn crate::communicator::Communicator> = Arc::new(
             crate::communicator::chroot::ChrootCommunicator::new(mount_path),
@@ -626,10 +641,7 @@ Do you want to clean up? [y/N]: ",
             }
         }
 
-        let ami_id = state
-            .get::<String>("ami_id")
-            .cloned()
-            .unwrap_or_else(|| "ami-mock".to_string());
+        let ami_id = state.get::<String>("ami_id").cloned().unwrap_or_default();
 
         Ok(Box::new(crate::artifact::MockArtifact {
             id: ami_id,
@@ -676,12 +688,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_amazon_chroot_prepare_success() -> Result<(), crate::error::StampError> {
+    async fn test_amazon_chroot_prepare_success() {
         let mut config = AmazonChrootConfig::default();
         config.name = "test".to_string();
         let builder = AmazonChrootBuilder::new(config);
-        builder.prepare().await?;
-        Ok(())
+        assert!(builder.prepare().await.is_ok());
     }
 
     #[tokio::test]
@@ -692,7 +703,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_amazon_chroot_run_mocked() -> Result<(), crate::error::StampError> {
+    async fn test_amazon_chroot_run_mocked() {
         let mut config = AmazonChrootConfig::default();
         config.name = "test".to_string();
         config.region = Some("us-west-2".to_string());
@@ -711,7 +722,7 @@ mod tests {
         });
 
         let builder = AmazonChrootBuilder::new(config);
-        builder
+        let res = builder
             .run(
                 std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
                     provisioners: std::sync::Arc::new(vec![]),
@@ -724,12 +735,12 @@ mod tests {
                 )),
                 crate::engine::packer::OnErrorStrategy::Cleanup,
             )
-            .await?;
-        Ok(())
+            .await;
+        assert!(res.is_ok());
     }
 
     #[tokio::test]
-    async fn test_amazon_chroot_run_bad_exit() -> Result<(), crate::error::StampError> {
+    async fn test_amazon_chroot_run_bad_exit() {
         let mut config = AmazonChrootConfig::default();
         config.name = "test_bad_exit".to_string();
         let builder = AmazonChrootBuilder::new(config);
@@ -748,11 +759,10 @@ mod tests {
             )
             .await;
         assert!(res.is_err());
-        Ok(())
     }
 
     #[tokio::test]
-    async fn test_amazon_chroot_run_missing() -> Result<(), crate::error::StampError> {
+    async fn test_amazon_chroot_run_missing() {
         let mut config = AmazonChrootConfig::default();
         config.name = "test_missing".to_string();
         let builder = AmazonChrootBuilder::new(config);
@@ -771,20 +781,18 @@ mod tests {
             )
             .await;
         assert!(res.is_err());
-        Ok(())
     }
 
     #[tokio::test]
-    async fn test_amazon_chroot_cancel() -> Result<(), crate::error::StampError> {
+    async fn test_amazon_chroot_cancel() {
         let mut config = AmazonChrootConfig::default();
         config.name = "test".to_string();
         let builder = AmazonChrootBuilder::new(config);
-        builder.cancel().await?;
-        Ok(())
+        assert!(builder.cancel().await.is_ok());
     }
 
     #[tokio::test]
-    async fn test_steps_run_and_cleanup() -> Result<(), crate::error::StampError> {
+    async fn test_steps_run_and_cleanup() {
         let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
@@ -827,15 +835,29 @@ mod tests {
             mount_path: "/mnt/test".to_string(),
             filesystem: "ext4".to_string(),
         };
-        let res_mount = mount_step.run(&mut state).await?;
-        assert_eq!(res_mount, StepAction::Continue);
+        let res_mount = mount_step.run(&mut state).await;
+        assert_eq!(res_mount.ok(), Some(StepAction::Continue));
         assert_eq!(
             state.get::<String>("configured_device_path"),
             Some(&"/dev/xvdf".to_string())
         );
         mount_step.cleanup(&state).await;
 
-        Ok(())
+        // StepProvision run
+        let hook: Arc<dyn ProvisionHook> = Arc::new(crate::engine::hook::DefaultProvisionHook {
+            provisioners: Arc::new(vec![]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let mut step_prov = StepProvision {
+            ui,
+            name: "test".into(),
+            config,
+            hook,
+        };
+        assert!(step_prov.run(&mut state).await.is_ok());
+
+        let mut empty_state = StateBag::new();
+        assert!(step_prov.run(&mut empty_state).await.is_ok());
     }
 
     #[test]
@@ -848,12 +870,43 @@ mod tests {
             resolve_nvme_device_path("/dev/nvme1n1"),
             "/dev/nvme1n1".to_string()
         );
-        // Non-existent Nitro path returns original in test environment without physical disks
-        let res = resolve_nvme_device_path("/dev/xvdf");
-        assert!(res == "/dev/xvdf" || res == "/dev/nvme1n1");
         assert_eq!(
             resolve_nvme_device_path("/dev/mapper/root"),
             "/dev/mapper/root".to_string()
         );
+        assert_eq!(resolve_nvme_device_path("/dev/123"), "/dev/123".to_string());
+        assert_eq!(resolve_nvme_device_path(""), "".to_string());
+
+        // Test with mocked by-id directory containing a symlink
+        let tmp = std::env::temp_dir().join("stamp_nvme_by_id_test");
+        let _ = std::fs::create_dir_all(&tmp);
+        let target_file = tmp.join("real_device");
+        let _ = std::fs::write(&target_file, b"");
+        let link_path = tmp.join("nvme-ebs-xvdf");
+        #[cfg(unix)]
+        let _ = std::os::unix::fs::symlink(&target_file, &link_path);
+
+        let resolved = resolve_nvme_device_path_internal(
+            "/dev/xvdf",
+            &tmp,
+            std::path::Path::new("/nonexistent_dev"),
+        );
+        assert!(!resolved.is_empty());
+
+        // Test with mocked dev directory containing candidate file
+        let dev_tmp = std::env::temp_dir().join("stamp_nvme_dev_test");
+        let _ = std::fs::create_dir_all(&dev_tmp);
+        let candidate_file = dev_tmp.join("nvme1n1");
+        let _ = std::fs::write(&candidate_file, b"");
+
+        let resolved_cand = resolve_nvme_device_path_internal(
+            "/dev/xvdf",
+            std::path::Path::new("/nonexistent_by_id"),
+            &dev_tmp,
+        );
+        assert!(resolved_cand.ends_with("nvme1n1"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(&dev_tmp);
     }
 }

@@ -824,25 +824,124 @@ fn parse_artifact_metadata(builder_id: &str, artifact_id: &str) -> (String, Stri
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[allow(clippy::all, clippy::pedantic)]
 mod tests {
     use super::*;
 
+    /// Tests derived traits (Display, Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize) for all HCP types.
     #[test]
-    fn test_types_display_and_traits() {
+    fn test_types_display_and_traits() -> Result<(), serde_json::Error> {
         let org = HcpOrganizationId("org-123".to_string());
         assert_eq!(org.to_string(), "org-123");
+        assert_eq!(format!("{org:?}"), r#"HcpOrganizationId("org-123")"#);
+        assert_eq!(org, org.clone());
+        let mut map = HashMap::new();
+        map.insert(org.clone(), 1);
+        assert_eq!(map.get(&org), Some(&1));
+        let org_json = serde_json::to_string(&org)?;
+        let org_de: HcpOrganizationId = serde_json::from_str(&org_json)?;
+        assert_eq!(org, org_de);
+
         let proj = HcpProjectId("proj-123".to_string());
         assert_eq!(proj.to_string(), "proj-123");
+        assert_eq!(format!("{proj:?}"), r#"HcpProjectId("proj-123")"#);
+        assert_eq!(proj, proj.clone());
+        let mut pmap = HashMap::new();
+        pmap.insert(proj.clone(), 1);
+        assert_eq!(pmap.get(&proj), Some(&1));
+        let proj_json = serde_json::to_string(&proj)?;
+        let proj_de: HcpProjectId = serde_json::from_str(&proj_json)?;
+        assert_eq!(proj, proj_de);
+
         let bucket = HcpBucketName("bucket-abc".to_string());
         assert_eq!(bucket.to_string(), "bucket-abc");
+        assert_eq!(format!("{bucket:?}"), r#"HcpBucketName("bucket-abc")"#);
+        assert_eq!(bucket, bucket.clone());
+        let mut bmap = HashMap::new();
+        bmap.insert(bucket.clone(), 1);
+        assert_eq!(bmap.get(&bucket), Some(&1));
+        let bucket_json = serde_json::to_string(&bucket)?;
+        let bucket_de: HcpBucketName = serde_json::from_str(&bucket_json)?;
+        assert_eq!(bucket, bucket_de);
+
         let iter = HcpIterationId("iter-1".to_string());
         assert_eq!(iter.to_string(), "iter-1");
+        assert_eq!(format!("{iter:?}"), r#"HcpIterationId("iter-1")"#);
+        assert_eq!(iter, iter.clone());
+        let mut imap = HashMap::new();
+        imap.insert(iter.clone(), 1);
+        assert_eq!(imap.get(&iter), Some(&1));
+        let iter_json = serde_json::to_string(&iter)?;
+        let iter_de: HcpIterationId = serde_json::from_str(&iter_json)?;
+        assert_eq!(iter, iter_de);
+
         let chan = HcpChannelName("prod".to_string());
         assert_eq!(chan.to_string(), "prod");
+        assert_eq!(format!("{chan:?}"), r#"HcpChannelName("prod")"#);
+        assert_eq!(chan, chan.clone());
+        let mut cmap = HashMap::new();
+        cmap.insert(chan.clone(), 1);
+        assert_eq!(cmap.get(&chan), Some(&1));
+        let chan_json = serde_json::to_string(&chan)?;
+        let chan_de: HcpChannelName = serde_json::from_str(&chan_json)?;
+        assert_eq!(chan, chan_de);
+
         let img = HcpImageId("img-1".to_string());
         assert_eq!(img.to_string(), "img-1");
+        assert_eq!(format!("{img:?}"), r#"HcpImageId("img-1")"#);
+        assert_eq!(img, img.clone());
+        let mut img_map = HashMap::new();
+        img_map.insert(img.clone(), 1);
+        assert_eq!(img_map.get(&img), Some(&1));
+        let img_json = serde_json::to_string(&img)?;
+        let img_de: HcpImageId = serde_json::from_str(&img_json)?;
+        assert_eq!(img, img_de);
+
+        let build_iter = HcpBuildIteration {
+            id: iter.clone(),
+            bucket_name: bucket.clone(),
+            fingerprint: "fp-1".to_string(),
+            description: Some("desc".to_string()),
+            labels: HashMap::from([("k".to_string(), "v".to_string())]),
+            status: "READY".to_string(),
+            revoked: false,
+            revocation_reason: None,
+            created_at: "2023-01-01T00:00:00Z".to_string(),
+        };
+        assert_eq!(build_iter, build_iter.clone());
+        assert!(format!("{build_iter:?}").contains("HcpBuildIteration"));
+        let bi_json = serde_json::to_string(&build_iter)?;
+        let bi_de: HcpBuildIteration = serde_json::from_str(&bi_json)?;
+        assert_eq!(build_iter, bi_de);
+
+        let build_img = HcpBuildImage {
+            id: img.clone(),
+            iteration_id: iter.clone(),
+            component_type: "amazon-ebs".to_string(),
+            cloud_provider: "aws".to_string(),
+            region: "us-east-1".to_string(),
+            cloud_image_id: "ami-123".to_string(),
+            labels: HashMap::from([("k".to_string(), "v".to_string())]),
+            revoked: false,
+            revocation_reason: None,
+        };
+        assert_eq!(build_img, build_img.clone());
+        assert!(format!("{build_img:?}").contains("HcpBuildImage"));
+        let bimg_json = serde_json::to_string(&build_img)?;
+        let bimg_de: HcpBuildImage = serde_json::from_str(&bimg_json)?;
+        assert_eq!(build_img, bimg_de);
+
+        let cfg = HcpClientConfig::default();
+        assert_eq!(cfg, cfg.clone());
+        assert!(format!("{cfg:?}").contains("HcpClientConfig"));
+        let client = HcpRegistryClient::new(cfg);
+        let client_clone = client.clone();
+        assert!(format!("{client_clone:?}").contains("HcpRegistryClient"));
+        Ok(())
     }
 
+    /// Tests default configuration values.
     #[test]
     fn test_client_config_default() {
         let cfg = HcpClientConfig::default();
@@ -852,73 +951,150 @@ mod tests {
         assert_eq!(cfg.auth_url, "https://auth.hashicorp.com/oauth/token");
     }
 
+    /// Tests client initialization from environment variables across all configurations.
     #[test]
-    fn test_client_from_env_missing_creds() {
-        let prev_token = std::env::var("HCP_AUTH_TOKEN").ok();
-        let prev_id = std::env::var("HCP_CLIENT_ID").ok();
-        let prev_sec = std::env::var("HCP_CLIENT_SECRET").ok();
+    fn test_client_from_env_all_cases() -> Result<(), StampError> {
+        let _guard = crate::utils::ENV_MUTEX.lock();
 
+        // Clean env
         unsafe {
-            std::env::remove_var("HCP_AUTH_TOKEN");
             std::env::remove_var("HCP_CLIENT_ID");
             std::env::remove_var("HCP_CLIENT_SECRET");
+            std::env::remove_var("HCP_AUTH_TOKEN");
+            std::env::remove_var("HCP_ORGANIZATION_ID");
+            std::env::remove_var("HCP_PROJECT_ID");
+            std::env::remove_var("HCP_API_URL");
+            std::env::remove_var("HCP_AUTH_URL");
         }
 
-        let res = HcpRegistryClient::from_env();
-        assert!(res.is_err());
+        // 1. All missing -> error
+        assert!(HcpRegistryClient::from_env().is_err());
 
+        // 2. Only client_id set -> error
         unsafe {
-            if let Some(v) = prev_token {
-                std::env::set_var("HCP_AUTH_TOKEN", v);
-            }
-            if let Some(v) = prev_id {
-                std::env::set_var("HCP_CLIENT_ID", v);
-            }
-            if let Some(v) = prev_sec {
-                std::env::set_var("HCP_CLIENT_SECRET", v);
-            }
+            std::env::set_var("HCP_CLIENT_ID", "my-id");
         }
-    }
+        assert!(HcpRegistryClient::from_env().is_err());
 
-    #[test]
-    fn test_client_from_env_success_token() {
-        let prev_token = std::env::var("HCP_AUTH_TOKEN").ok();
-        let prev_org = std::env::var("HCP_ORGANIZATION_ID").ok();
-        let prev_proj = std::env::var("HCP_PROJECT_ID").ok();
-
+        // 3. Only client_secret set -> error
         unsafe {
-            std::env::set_var("HCP_AUTH_TOKEN", "test-bearer-token");
+            std::env::remove_var("HCP_CLIENT_ID");
+            std::env::set_var("HCP_CLIENT_SECRET", "my-secret");
+        }
+        assert!(HcpRegistryClient::from_env().is_err());
+
+        // 4. Client id and secret set with custom org/proj/urls -> success
+        unsafe {
+            std::env::set_var("HCP_CLIENT_ID", "my-id");
+            std::env::set_var("HCP_CLIENT_SECRET", "my-secret");
             std::env::set_var("HCP_ORGANIZATION_ID", "my-org");
             std::env::set_var("HCP_PROJECT_ID", "my-proj");
+            std::env::set_var("HCP_API_URL", "https://custom.api");
+            std::env::set_var("HCP_AUTH_URL", "https://custom.auth");
         }
+        let c = HcpRegistryClient::from_env()?;
+        assert_eq!(c.config.client_id.as_deref(), Some("my-id"));
+        assert_eq!(c.config.client_secret.as_deref(), Some("my-secret"));
+        assert_eq!(c.config.organization_id.0, "my-org");
+        assert_eq!(c.config.project_id.0, "my-proj");
+        assert_eq!(c.config.api_url, "https://custom.api");
+        assert_eq!(c.config.auth_url, "https://custom.auth");
 
-        let client = HcpRegistryClient::from_env().unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(
-            client.config.auth_token.as_deref(),
-            Some("test-bearer-token")
-        );
-        assert_eq!(client.config.organization_id.0, "my-org");
-        assert_eq!(client.config.project_id.0, "my-proj");
-
+        // 5. Auth token set -> success (and tests fallback closures)
         unsafe {
-            if let Some(v) = prev_token {
-                std::env::set_var("HCP_AUTH_TOKEN", v);
-            } else {
-                std::env::remove_var("HCP_AUTH_TOKEN");
-            }
-            if let Some(v) = prev_org {
-                std::env::set_var("HCP_ORGANIZATION_ID", v);
-            } else {
-                std::env::remove_var("HCP_ORGANIZATION_ID");
-            }
-            if let Some(v) = prev_proj {
-                std::env::set_var("HCP_PROJECT_ID", v);
-            } else {
-                std::env::remove_var("HCP_PROJECT_ID");
-            }
+            std::env::remove_var("HCP_CLIENT_ID");
+            std::env::remove_var("HCP_CLIENT_SECRET");
+            std::env::remove_var("HCP_ORGANIZATION_ID");
+            std::env::remove_var("HCP_PROJECT_ID");
+            std::env::remove_var("HCP_API_URL");
+            std::env::remove_var("HCP_AUTH_URL");
+            std::env::set_var("HCP_AUTH_TOKEN", "bearer-token-123");
         }
+        let c_tok = HcpRegistryClient::from_env()?;
+        assert_eq!(c_tok.config.auth_token.as_deref(), Some("bearer-token-123"));
+        assert_eq!(c_tok.config.organization_id.0, "default-org");
+        assert_eq!(c_tok.config.project_id.0, "default-project");
+        assert_eq!(c_tok.config.api_url, "https://api.hashicorp.cloud");
+        assert_eq!(
+            c_tok.config.auth_url,
+            "https://auth.hashicorp.com/oauth/token"
+        );
+
+        // Clean env
+        unsafe {
+            std::env::remove_var("HCP_CLIENT_ID");
+            std::env::remove_var("HCP_CLIENT_SECRET");
+            std::env::remove_var("HCP_AUTH_TOKEN");
+            std::env::remove_var("HCP_ORGANIZATION_ID");
+            std::env::remove_var("HCP_PROJECT_ID");
+            std::env::remove_var("HCP_API_URL");
+            std::env::remove_var("HCP_AUTH_URL");
+        }
+        Ok(())
     }
 
+    /// Tests unauthenticated client failures across all API methods.
+    #[tokio::test]
+    async fn test_unauthenticated_client_errors() {
+        let unauth_client = HcpRegistryClient::new(HcpClientConfig {
+            client_id: None,
+            client_secret: None,
+            auth_token: None,
+            ..Default::default()
+        });
+        let bucket = HcpBucketName("b".to_string());
+        let iter_id = HcpIterationId("i".to_string());
+        let chan = HcpChannelName("c".to_string());
+
+        assert!(matches!(
+            unauth_client
+                .create_iteration(&bucket, "fp", None, &HashMap::new())
+                .await,
+            Err(StampError::HcpApi(_))
+        ));
+        assert!(matches!(
+            unauth_client
+                .register_image(
+                    &bucket,
+                    &iter_id,
+                    "comp",
+                    "aws",
+                    "us-east-1",
+                    "ami-1",
+                    &HashMap::new()
+                )
+                .await,
+            Err(StampError::HcpApi(_))
+        ));
+        assert!(matches!(
+            unauth_client.assign_channel(&bucket, &iter_id, &chan).await,
+            Err(StampError::HcpApi(_))
+        ));
+        assert!(matches!(
+            unauth_client
+                .get_channel_iteration(&bucket, &chan, false)
+                .await,
+            Err(StampError::HcpApi(_))
+        ));
+        assert!(matches!(
+            unauth_client
+                .get_image(&bucket, &iter_id, "aws", "us-east-1", false)
+                .await,
+            Err(StampError::HcpApi(_))
+        ));
+        assert!(matches!(
+            unauth_client
+                .revoke_iteration(&bucket, &iter_id, "reason")
+                .await,
+            Err(StampError::HcpApi(_))
+        ));
+        assert!(matches!(
+            unauth_client.activate_iteration(&bucket, &iter_id).await,
+            Err(StampError::HcpApi(_))
+        ));
+    }
+
+    /// Tests artifact identifier metadata extraction.
     #[test]
     fn test_parse_artifact_metadata() {
         let (p, r, id) =
@@ -942,6 +1118,11 @@ mod tests {
         assert_eq!(r4, "global");
         assert_eq!(id4, "gcp-image-name");
 
+        let (p4b, r4b, id4b) = parse_artifact_metadata("gce.custom", "gcp-image-2");
+        assert_eq!(p4b, "gcp");
+        assert_eq!(r4b, "global");
+        assert_eq!(id4b, "gcp-image-2");
+
         let (p5, r5, id5) = parse_artifact_metadata("docker.test", "sha256:abcd");
         assert_eq!(p5, "docker");
         assert_eq!(r5, "local");
@@ -953,284 +1134,682 @@ mod tests {
         assert_eq!(id6, "custom-artifact");
     }
 
+    /// Tests authentication flows including token cache, missing credentials, and HTTP errors.
     #[tokio::test]
-    async fn test_hcp_auth_flow() {
-        let mut server = mockito::Server::new_async().await;
-        let auth_mock = server
-            .mock("POST", "/oauth/token")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{"access_token": "mock-oauth-token"}"#)
-            .create_async()
-            .await;
-
-        let config = HcpClientConfig {
-            client_id: Some("id123".to_string()),
-            client_secret: Some("secret123".to_string()),
-            auth_token: None,
-            organization_id: HcpOrganizationId("org".to_string()),
-            project_id: HcpProjectId("proj".to_string()),
-            api_url: server.url(),
-            auth_url: format!("{}/oauth/token", server.url()),
+    async fn test_hcp_auth_flow_and_errors() -> Result<(), StampError> {
+        // Direct token cached
+        let cached_cfg = HcpClientConfig {
+            auth_token: Some("cached-token".to_string()),
+            ..Default::default()
         };
+        let cached_client = HcpRegistryClient::new(cached_cfg);
+        let res_cached = cached_client.authenticate().await?;
+        assert_eq!(res_cached, "cached-token");
 
-        let client = HcpRegistryClient::new(config);
-        let token = client
-            .authenticate()
-            .await
-            .unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(token, "mock-oauth-token");
-        auth_mock.assert_async().await;
-    }
+        // Missing client_id
+        let no_id_cfg = HcpClientConfig {
+            client_id: None,
+            client_secret: Some("sec".to_string()),
+            auth_token: None,
+            ..Default::default()
+        };
+        assert!(matches!(
+            HcpRegistryClient::new(no_id_cfg).authenticate().await,
+            Err(StampError::HcpApi(_))
+        ));
 
-    #[tokio::test]
-    async fn test_hcp_auth_flow_failure() {
+        // Missing client_secret
+        let no_sec_cfg = HcpClientConfig {
+            client_id: Some("id".to_string()),
+            client_secret: None,
+            auth_token: None,
+            ..Default::default()
+        };
+        assert!(matches!(
+            HcpRegistryClient::new(no_sec_cfg).authenticate().await,
+            Err(StampError::HcpApi(_))
+        ));
+
+        // Network connection error
+        let net_err_cfg = HcpClientConfig {
+            client_id: Some("id".to_string()),
+            client_secret: Some("sec".to_string()),
+            auth_token: None,
+            auth_url: "http://127.0.0.1:1/oauth/token".to_string(),
+            ..Default::default()
+        };
+        assert!(matches!(
+            HcpRegistryClient::new(net_err_cfg).authenticate().await,
+            Err(StampError::HcpApi(_))
+        ));
+
+        // Invalid Authorization header value
+        let bad_token_cfg = HcpClientConfig {
+            auth_token: Some("bad\ntoken\r".to_string()),
+            ..Default::default()
+        };
+        let bad_client = HcpRegistryClient::new(bad_token_cfg);
+        let bad_hdr_res = bad_client
+            .create_iteration(&HcpBucketName("b".to_string()), "fp", None, &HashMap::new())
+            .await;
+        assert!(matches!(bad_hdr_res, Err(StampError::HcpApi(_))));
+
+        // HTTP error, invalid JSON, missing access_token, and success
         let mut server = mockito::Server::new_async().await;
-        let _auth_mock = server
+
+        // 1. HTTP 401
+        let mock_401 = server
             .mock("POST", "/oauth/token")
             .with_status(401)
             .with_body("Unauthorized")
             .create_async()
             .await;
 
-        let config = HcpClientConfig {
-            client_id: Some("id123".to_string()),
-            client_secret: Some("secret123".to_string()),
+        let auth_url = format!("{}/oauth/token", server.url());
+        let client_401 = HcpRegistryClient::new(HcpClientConfig {
+            client_id: Some("id".to_string()),
+            client_secret: Some("sec".to_string()),
             auth_token: None,
-            organization_id: HcpOrganizationId("org".to_string()),
-            project_id: HcpProjectId("proj".to_string()),
-            api_url: server.url(),
-            auth_url: format!("{}/oauth/token", server.url()),
-        };
+            auth_url: auth_url.clone(),
+            ..Default::default()
+        });
+        assert!(matches!(
+            client_401.authenticate().await,
+            Err(StampError::HcpApi(_))
+        ));
+        mock_401.assert_async().await;
 
-        let client = HcpRegistryClient::new(config);
-        let res = client.authenticate().await;
-        assert!(matches!(res, Err(StampError::HcpApi(_))));
+        // 2. Invalid JSON
+        let mock_bad_json = server
+            .mock("POST", "/oauth/token")
+            .with_status(200)
+            .with_body("not-json")
+            .create_async()
+            .await;
+        assert!(matches!(
+            client_401.authenticate().await,
+            Err(StampError::HcpApi(_))
+        ));
+        mock_bad_json.assert_async().await;
+
+        // 3. Missing access_token
+        let mock_no_token = server
+            .mock("POST", "/oauth/token")
+            .with_status(200)
+            .with_body(r#"{"expires_in": 3600}"#)
+            .create_async()
+            .await;
+        assert!(matches!(
+            client_401.authenticate().await,
+            Err(StampError::HcpApi(_))
+        ));
+        mock_no_token.assert_async().await;
+
+        // 4. Success
+        let mock_ok = server
+            .mock("POST", "/oauth/token")
+            .with_status(200)
+            .with_body(r#"{"access_token": "token-valid"}"#)
+            .create_async()
+            .await;
+        let tok = client_401.authenticate().await?;
+        assert_eq!(tok, "token-valid");
+        mock_ok.assert_async().await;
+        Ok(())
     }
 
+    /// Tests create_iteration under success, fallbacks, and failure conditions.
     #[tokio::test]
-    async fn test_create_iteration_and_register_image_and_assign_channel() {
+    async fn test_create_iteration_lifecycle() -> Result<(), StampError> {
         let mut server = mockito::Server::new_async().await;
 
-        let create_iter_mock = server
+        // Success nested
+        let mock_ok = server
             .mock(
                 "POST",
-                "/packer/2021-04-30/organizations/org/projects/proj/buckets/ubuntu/iterations",
+                "/packer/2021-04-30/organizations/org/projects/proj/buckets/b/iterations",
             )
-            .match_header("authorization", "Bearer mock-token")
             .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{"iteration": {"id": "iter_01", "status": "READY"}}"#)
+            .with_body(r#"{"iteration": {"id": "iter_nested"}}"#)
             .create_async()
             .await;
 
-        let register_img_mock = server
-            .mock("POST", "/packer/2021-04-30/organizations/org/projects/proj/buckets/ubuntu/iterations/iter_01/images")
-            .match_header("authorization", "Bearer mock-token")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{"image": {"id": "img_01"}}"#)
-            .create_async()
-            .await;
-
-        let assign_chan_mock = server
-            .mock("PATCH", "/packer/2021-04-30/organizations/org/projects/proj/buckets/ubuntu/channels/production")
-            .match_header("authorization", "Bearer mock-token")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{}"#)
-            .create_async()
-            .await;
-
-        let config = HcpClientConfig {
-            client_id: None,
-            client_secret: None,
-            auth_token: Some("mock-token".to_string()),
+        let client = HcpRegistryClient::new(HcpClientConfig {
+            auth_token: Some("token".to_string()),
             organization_id: HcpOrganizationId("org".to_string()),
             project_id: HcpProjectId("proj".to_string()),
             api_url: server.url(),
             auth_url: format!("{}/oauth/token", server.url()),
-        };
-
-        let client = HcpRegistryClient::new(config);
-        let bucket = HcpBucketName("ubuntu".to_string());
-        let labels = HashMap::from([("tier".to_string(), "base".to_string())]);
-
-        let iter = client
-            .create_iteration(&bucket, "fp-123", Some("Base Ubuntu"), &labels)
-            .await
-            .unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(iter.id.0, "iter_01");
-
-        let img = client
-            .register_image(
-                &bucket,
-                &iter.id,
-                "amazon-ebs",
-                "aws",
-                "us-east-1",
-                "ami-12345678",
-                &labels,
-            )
-            .await
-            .unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(img.id.0, "img_01");
-
-        let chan_res = client
-            .assign_channel(&bucket, &iter.id, &HcpChannelName("production".to_string()))
-            .await;
-        assert!(chan_res.is_ok());
-
-        create_iter_mock.assert_async().await;
-        register_img_mock.assert_async().await;
-        assign_chan_mock.assert_async().await;
-    }
-
-    #[tokio::test]
-    async fn test_get_channel_iteration_and_get_image_revocation() {
-        let mut server = mockito::Server::new_async().await;
-
-        let _chan_mock = server
-            .mock("GET", "/packer/2021-04-30/organizations/org/projects/proj/buckets/ubuntu/channels/staging")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{
-                "id": "iter_revoked",
-                "revoked": true,
-                "revocation_reason": "CVE-2023-9999 critical vulnerability"
-            }"#)
-            .create_async()
-            .await;
-
-        let _img_mock = server
-            .mock("GET", "/packer/2021-04-30/organizations/org/projects/proj/buckets/ubuntu/iterations/iter_revoked/images?cloud_provider=aws&region=us-east-1")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{
-                "images": [{
-                    "id": "img_revoked",
-                    "cloud_image_id": "ami-9999",
-                    "revoked": true,
-                    "revocation_reason": "Outdated kernel"
-                }]
-            }"#)
-            .create_async()
-            .await;
-
-        let config = HcpClientConfig {
-            client_id: None,
-            client_secret: None,
-            auth_token: Some("mock-token".to_string()),
-            organization_id: HcpOrganizationId("org".to_string()),
-            project_id: HcpProjectId("proj".to_string()),
-            api_url: server.url(),
-            auth_url: format!("{}/oauth/token", server.url()),
-        };
-
-        let client = HcpRegistryClient::new(config);
-        let bucket = HcpBucketName("ubuntu".to_string());
-
-        // Channel iteration revoked - should fail revocation enforcement
-        let res_iter = client
-            .get_channel_iteration(&bucket, &HcpChannelName("staging".to_string()), false)
-            .await;
-        assert!(matches!(res_iter, Err(StampError::PolicyViolation { .. })));
-
-        // Channel iteration revoked - allowed when allow_revoked is true
-        let res_iter_ok = client
-            .get_channel_iteration(&bucket, &HcpChannelName("staging".to_string()), true)
-            .await;
-        assert!(res_iter_ok.is_ok());
-
-        // Image revoked - should fail revocation enforcement
-        let res_img = client
-            .get_image(
-                &bucket,
-                &HcpIterationId("iter_revoked".to_string()),
-                "aws",
-                "us-east-1",
-                false,
-            )
-            .await;
-        assert!(matches!(res_img, Err(StampError::PolicyViolation { .. })));
-
-        // Image revoked - allowed when allow_revoked is true
-        let res_img_ok = client
-            .get_image(
-                &bucket,
-                &HcpIterationId("iter_revoked".to_string()),
-                "aws",
-                "us-east-1",
-                true,
-            )
-            .await;
-        assert!(res_img_ok.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_push_build_artifacts_pipeline() {
-        let mut server = mockito::Server::new_async().await;
-
-        let _create_iter_mock = server
-            .mock(
-                "POST",
-                "/packer/2021-04-30/organizations/org/projects/proj/buckets/prod-images/iterations",
-            )
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{"iteration": {"id": "iter_pipeline", "status": "READY"}}"#)
-            .create_async()
-            .await;
-
-        let _reg_mock = server
-            .mock("POST", "/packer/2021-04-30/organizations/org/projects/proj/buckets/prod-images/iterations/iter_pipeline/images")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{"image": {"id": "img_pipeline"}}"#)
-            .create_async()
-            .await;
-
-        let _chan_mock = server
-            .mock("PATCH", "/packer/2021-04-30/organizations/org/projects/proj/buckets/prod-images/channels/production")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{}"#)
-            .create_async()
-            .await;
-
-        let config = HcpClientConfig {
-            client_id: None,
-            client_secret: None,
-            auth_token: Some("mock-token".to_string()),
-            organization_id: HcpOrganizationId("org".to_string()),
-            project_id: HcpProjectId("proj".to_string()),
-            api_url: server.url(),
-            auth_url: format!("{}/oauth/token", server.url()),
-        };
-
-        let client = HcpRegistryClient::new(config);
-        let registry = HcpPackerRegistryConfig {
-            bucket_name: crate::template::BucketName("prod-images".to_string()),
-            description: Some("Production golden images".to_string()),
-            labels: HashMap::from([("env".to_string(), "prod".to_string())]),
-            bucket_labels: HashMap::new(),
-            build_labels: HashMap::new(),
-            channels: vec!["production".to_string()],
-        };
-
-        let artifact: Box<dyn Artifact> = Box::new(crate::artifact::MockArtifact {
-            builder_id: "amazon-ebs.web".to_string(),
-            id: "us-east-1:ami-0123456789abcdef0".to_string(),
-            files: vec![],
+            ..Default::default()
         });
 
-        let iter = client
-            .push_build_artifacts(&registry, &[artifact])
-            .await
-            .unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(iter.id.0, "iter_pipeline");
+        let bucket = HcpBucketName("b".to_string());
+        let res_ok = client
+            .create_iteration(&bucket, "fp1", Some("desc"), &HashMap::new())
+            .await?;
+        assert_eq!(res_ok.id.0, "iter_nested");
+        mock_ok.assert_async().await;
+
+        // Success top-level id
+        let mock_top = server
+            .mock(
+                "POST",
+                "/packer/2021-04-30/organizations/org/projects/proj/buckets/b/iterations",
+            )
+            .with_status(200)
+            .with_body(r#"{"id": "iter_top"}"#)
+            .create_async()
+            .await;
+        let res_top = client
+            .create_iteration(&bucket, "fp1", None, &HashMap::new())
+            .await?;
+        assert_eq!(res_top.id.0, "iter_top");
+        mock_top.assert_async().await;
+
+        // Success fallback unknown id
+        let mock_unknown = server
+            .mock(
+                "POST",
+                "/packer/2021-04-30/organizations/org/projects/proj/buckets/b/iterations",
+            )
+            .with_status(200)
+            .with_body(r#"{}"#)
+            .create_async()
+            .await;
+        let res_unknown = client
+            .create_iteration(&bucket, "fp1", None, &HashMap::new())
+            .await?;
+        assert_eq!(res_unknown.id.0, "iter_unknown");
+        mock_unknown.assert_async().await;
+
+        // HTTP 500
+        let mock_500 = server
+            .mock(
+                "POST",
+                "/packer/2021-04-30/organizations/org/projects/proj/buckets/b/iterations",
+            )
+            .with_status(500)
+            .with_body("Internal Server Error")
+            .create_async()
+            .await;
+        assert!(matches!(
+            client
+                .create_iteration(&bucket, "fp1", None, &HashMap::new())
+                .await,
+            Err(StampError::HcpApi(_))
+        ));
+        mock_500.assert_async().await;
+
+        // Invalid JSON
+        let mock_bad_json = server
+            .mock(
+                "POST",
+                "/packer/2021-04-30/organizations/org/projects/proj/buckets/b/iterations",
+            )
+            .with_status(200)
+            .with_body("bad-json")
+            .create_async()
+            .await;
+        assert!(matches!(
+            client
+                .create_iteration(&bucket, "fp1", None, &HashMap::new())
+                .await,
+            Err(StampError::HcpApi(_))
+        ));
+        mock_bad_json.assert_async().await;
+
+        // Network error
+        let net_client = HcpRegistryClient::new(HcpClientConfig {
+            auth_token: Some("token".to_string()),
+            api_url: "http://127.0.0.1:1".to_string(),
+            ..Default::default()
+        });
+        assert!(matches!(
+            net_client
+                .create_iteration(&bucket, "fp1", None, &HashMap::new())
+                .await,
+            Err(StampError::HcpApi(_))
+        ));
+        Ok(())
     }
 
+    /// Tests register_image under success, fallbacks, and failure conditions.
+    #[tokio::test]
+    async fn test_register_image_lifecycle() -> Result<(), StampError> {
+        let mut server = mockito::Server::new_async().await;
+
+        // Success nested
+        let mock_ok = server
+            .mock("POST", "/packer/2021-04-30/organizations/org/projects/proj/buckets/b/iterations/iter_1/images")
+            .with_status(200)
+            .with_body(r#"{"image": {"id": "img_nested"}}"#)
+            .create_async()
+            .await;
+
+        let client = HcpRegistryClient::new(HcpClientConfig {
+            auth_token: Some("token".to_string()),
+            organization_id: HcpOrganizationId("org".to_string()),
+            project_id: HcpProjectId("proj".to_string()),
+            api_url: server.url(),
+            auth_url: format!("{}/oauth/token", server.url()),
+            ..Default::default()
+        });
+
+        let bucket = HcpBucketName("b".to_string());
+        let iter_id = HcpIterationId("iter_1".to_string());
+        let res_ok = client
+            .register_image(
+                &bucket,
+                &iter_id,
+                "comp",
+                "aws",
+                "us-east-1",
+                "ami-123",
+                &HashMap::new(),
+            )
+            .await?;
+        assert_eq!(res_ok.id.0, "img_nested");
+        mock_ok.assert_async().await;
+
+        // Success top-level id
+        let mock_top = server
+            .mock("POST", "/packer/2021-04-30/organizations/org/projects/proj/buckets/b/iterations/iter_1/images")
+            .with_status(200)
+            .with_body(r#"{"id": "img_top"}"#)
+            .create_async()
+            .await;
+        let res_top = client
+            .register_image(
+                &bucket,
+                &iter_id,
+                "comp",
+                "aws",
+                "us-east-1",
+                "ami-123",
+                &HashMap::new(),
+            )
+            .await?;
+        assert_eq!(res_top.id.0, "img_top");
+        mock_top.assert_async().await;
+
+        // Success fallback unknown id
+        let mock_unknown = server
+            .mock("POST", "/packer/2021-04-30/organizations/org/projects/proj/buckets/b/iterations/iter_1/images")
+            .with_status(200)
+            .with_body(r#"{}"#)
+            .create_async()
+            .await;
+        let res_unknown = client
+            .register_image(
+                &bucket,
+                &iter_id,
+                "comp",
+                "aws",
+                "us-east-1",
+                "ami-123",
+                &HashMap::new(),
+            )
+            .await?;
+        assert_eq!(res_unknown.id.0, "img_unknown");
+        mock_unknown.assert_async().await;
+
+        // HTTP 500
+        let mock_500 = server
+            .mock("POST", "/packer/2021-04-30/organizations/org/projects/proj/buckets/b/iterations/iter_1/images")
+            .with_status(500)
+            .with_body("error")
+            .create_async()
+            .await;
+        assert!(matches!(
+            client
+                .register_image(
+                    &bucket,
+                    &iter_id,
+                    "comp",
+                    "aws",
+                    "us-east-1",
+                    "ami-123",
+                    &HashMap::new()
+                )
+                .await,
+            Err(StampError::HcpApi(_))
+        ));
+        mock_500.assert_async().await;
+
+        // Invalid JSON
+        let mock_bad_json = server
+            .mock("POST", "/packer/2021-04-30/organizations/org/projects/proj/buckets/b/iterations/iter_1/images")
+            .with_status(200)
+            .with_body("bad-json")
+            .create_async()
+            .await;
+        assert!(matches!(
+            client
+                .register_image(
+                    &bucket,
+                    &iter_id,
+                    "comp",
+                    "aws",
+                    "us-east-1",
+                    "ami-123",
+                    &HashMap::new()
+                )
+                .await,
+            Err(StampError::HcpApi(_))
+        ));
+        mock_bad_json.assert_async().await;
+
+        // Network error
+        let net_client = HcpRegistryClient::new(HcpClientConfig {
+            auth_token: Some("token".to_string()),
+            api_url: "http://127.0.0.1:1".to_string(),
+            ..Default::default()
+        });
+        assert!(matches!(
+            net_client
+                .register_image(
+                    &bucket,
+                    &iter_id,
+                    "comp",
+                    "aws",
+                    "us-east-1",
+                    "ami-123",
+                    &HashMap::new()
+                )
+                .await,
+            Err(StampError::HcpApi(_))
+        ));
+        Ok(())
+    }
+
+    /// Tests assign_channel failure branches.
+    #[tokio::test]
+    async fn test_assign_channel_lifecycle() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock_500 = server
+            .mock(
+                "PATCH",
+                "/packer/2021-04-30/organizations/org/projects/proj/buckets/b/channels/prod",
+            )
+            .with_status(500)
+            .with_body("failed channel assign")
+            .create_async()
+            .await;
+
+        let client = HcpRegistryClient::new(HcpClientConfig {
+            auth_token: Some("token".to_string()),
+            organization_id: HcpOrganizationId("org".to_string()),
+            project_id: HcpProjectId("proj".to_string()),
+            api_url: server.url(),
+            auth_url: format!("{}/oauth/token", server.url()),
+            ..Default::default()
+        });
+
+        let bucket = HcpBucketName("b".to_string());
+        let iter_id = HcpIterationId("iter_1".to_string());
+        let chan = HcpChannelName("prod".to_string());
+
+        assert!(matches!(
+            client.assign_channel(&bucket, &iter_id, &chan).await,
+            Err(StampError::HcpApi(_))
+        ));
+        mock_500.assert_async().await;
+
+        // Network error
+        let net_client = HcpRegistryClient::new(HcpClientConfig {
+            auth_token: Some("token".to_string()),
+            api_url: "http://127.0.0.1:1".to_string(),
+            ..Default::default()
+        });
+        assert!(matches!(
+            net_client.assign_channel(&bucket, &iter_id, &chan).await,
+            Err(StampError::HcpApi(_))
+        ));
+    }
+
+    /// Tests get_channel_iteration under all revocation and error conditions.
+    #[tokio::test]
+    async fn test_get_channel_iteration_lifecycle() -> Result<(), StampError> {
+        let mut server = mockito::Server::new_async().await;
+
+        let client = HcpRegistryClient::new(HcpClientConfig {
+            auth_token: Some("token".to_string()),
+            organization_id: HcpOrganizationId("org".to_string()),
+            project_id: HcpProjectId("proj".to_string()),
+            api_url: server.url(),
+            auth_url: format!("{}/oauth/token", server.url()),
+            ..Default::default()
+        });
+
+        let bucket = HcpBucketName("b".to_string());
+        let chan = HcpChannelName("prod".to_string());
+
+        // 1. Success without nested "iteration" key
+        let mock_top = server
+            .mock(
+                "GET",
+                "/packer/2021-04-30/organizations/org/projects/proj/buckets/b/channels/prod",
+            )
+            .with_status(200)
+            .with_body(r#"{"id": "iter_flat", "status": "READY"}"#)
+            .create_async()
+            .await;
+        let res_flat = client.get_channel_iteration(&bucket, &chan, false).await?;
+        assert_eq!(res_flat.id.0, "iter_flat");
+        mock_top.assert_async().await;
+
+        // 2. Revoked via status "REVOKED" with no reason provided
+        let mock_rev_status = server
+            .mock(
+                "GET",
+                "/packer/2021-04-30/organizations/org/projects/proj/buckets/b/channels/prod",
+            )
+            .with_status(200)
+            .with_body(r#"{"id": "iter_rev", "status": "REVOKED"}"#)
+            .create_async()
+            .await;
+        assert!(matches!(
+            client.get_channel_iteration(&bucket, &chan, false).await,
+            Err(StampError::PolicyViolation { .. })
+        ));
+        mock_rev_status.assert_async().await;
+
+        // 3. Revoked via revoked_at key
+        let mock_rev_at = server
+            .mock(
+                "GET",
+                "/packer/2021-04-30/organizations/org/projects/proj/buckets/b/channels/prod",
+            )
+            .with_status(200)
+            .with_body(r#"{"id": "iter_rev2", "revoked_at": "2023-01-01T00:00:00Z"}"#)
+            .create_async()
+            .await;
+        assert!(matches!(
+            client.get_channel_iteration(&bucket, &chan, false).await,
+            Err(StampError::PolicyViolation { .. })
+        ));
+        mock_rev_at.assert_async().await;
+
+        // 4. HTTP 500
+        let mock_500 = server
+            .mock(
+                "GET",
+                "/packer/2021-04-30/organizations/org/projects/proj/buckets/b/channels/prod",
+            )
+            .with_status(500)
+            .with_body("get channel failed")
+            .create_async()
+            .await;
+        assert!(matches!(
+            client.get_channel_iteration(&bucket, &chan, false).await,
+            Err(StampError::HcpApi(_))
+        ));
+        mock_500.assert_async().await;
+
+        // 5. Invalid JSON
+        let mock_bad_json = server
+            .mock(
+                "GET",
+                "/packer/2021-04-30/organizations/org/projects/proj/buckets/b/channels/prod",
+            )
+            .with_status(200)
+            .with_body("bad json")
+            .create_async()
+            .await;
+        assert!(matches!(
+            client.get_channel_iteration(&bucket, &chan, false).await,
+            Err(StampError::HcpApi(_))
+        ));
+        mock_bad_json.assert_async().await;
+
+        // 6. Network error
+        let net_client = HcpRegistryClient::new(HcpClientConfig {
+            auth_token: Some("token".to_string()),
+            api_url: "http://127.0.0.1:1".to_string(),
+            ..Default::default()
+        });
+        assert!(matches!(
+            net_client
+                .get_channel_iteration(&bucket, &chan, false)
+                .await,
+            Err(StampError::HcpApi(_))
+        ));
+        Ok(())
+    }
+
+    /// Tests get_image under all revocation, response shape, and error conditions.
+    #[tokio::test]
+    async fn test_get_image_lifecycle() -> Result<(), StampError> {
+        let mut server = mockito::Server::new_async().await;
+
+        let client = HcpRegistryClient::new(HcpClientConfig {
+            auth_token: Some("token".to_string()),
+            organization_id: HcpOrganizationId("org".to_string()),
+            project_id: HcpProjectId("proj".to_string()),
+            api_url: server.url(),
+            auth_url: format!("{}/oauth/token", server.url()),
+            ..Default::default()
+        });
+
+        let bucket = HcpBucketName("b".to_string());
+        let iter_id = HcpIterationId("iter_1".to_string());
+
+        // 1. Success with empty images array (fallback to &json)
+        let mock_empty_arr = server
+            .mock("GET", "/packer/2021-04-30/organizations/org/projects/proj/buckets/b/iterations/iter_1/images?cloud_provider=aws&region=us-east-1")
+            .with_status(200)
+            .with_body(r#"{"images": [], "id": "fallback_id", "cloud_image_id": "ami-fallback"}"#)
+            .create_async()
+            .await;
+        let res_empty = client
+            .get_image(&bucket, &iter_id, "aws", "us-east-1", false)
+            .await?;
+        assert_eq!(res_empty.id.0, "fallback_id");
+        mock_empty_arr.assert_async().await;
+
+        // 2. Success with nested "image" object
+        let mock_obj = server
+            .mock("GET", "/packer/2021-04-30/organizations/org/projects/proj/buckets/b/iterations/iter_1/images?cloud_provider=aws&region=us-east-1")
+            .with_status(200)
+            .with_body(r#"{"image": {"id": "single_obj", "cloud_image_id": "ami-single"}}"#)
+            .create_async()
+            .await;
+        let res_obj = client
+            .get_image(&bucket, &iter_id, "aws", "us-east-1", false)
+            .await?;
+        assert_eq!(res_obj.id.0, "single_obj");
+        mock_obj.assert_async().await;
+
+        // 3. Success with top-level fields (no images array and no image object)
+        let mock_flat = server
+            .mock("GET", "/packer/2021-04-30/organizations/org/projects/proj/buckets/b/iterations/iter_1/images?cloud_provider=aws&region=us-east-1")
+            .with_status(200)
+            .with_body(r#"{"id": "flat_id", "cloud_image_id": "ami-flat"}"#)
+            .create_async()
+            .await;
+        let res_flat = client
+            .get_image(&bucket, &iter_id, "aws", "us-east-1", false)
+            .await?;
+        assert_eq!(res_flat.id.0, "flat_id");
+        mock_flat.assert_async().await;
+
+        // 4. Revoked via status: "REVOKED" without reason
+        let mock_rev_status = server
+            .mock("GET", "/packer/2021-04-30/organizations/org/projects/proj/buckets/b/iterations/iter_1/images?cloud_provider=aws&region=us-east-1")
+            .with_status(200)
+            .with_body(r#"{"id": "img_rev", "cloud_image_id": "ami-rev", "status": "REVOKED"}"#)
+            .create_async()
+            .await;
+        assert!(matches!(
+            client
+                .get_image(&bucket, &iter_id, "aws", "us-east-1", false)
+                .await,
+            Err(StampError::PolicyViolation { .. })
+        ));
+        mock_rev_status.assert_async().await;
+
+        // 5. Revoked via revoked_at key
+        let mock_rev_at = server
+            .mock("GET", "/packer/2021-04-30/organizations/org/projects/proj/buckets/b/iterations/iter_1/images?cloud_provider=aws&region=us-east-1")
+            .with_status(200)
+            .with_body(r#"{"id": "img_rev2", "cloud_image_id": "ami-rev2", "revoked_at": "2023-01-01"}"#)
+            .create_async()
+            .await;
+        assert!(matches!(
+            client
+                .get_image(&bucket, &iter_id, "aws", "us-east-1", false)
+                .await,
+            Err(StampError::PolicyViolation { .. })
+        ));
+        mock_rev_at.assert_async().await;
+
+        // 6. HTTP 500
+        let mock_500 = server
+            .mock("GET", "/packer/2021-04-30/organizations/org/projects/proj/buckets/b/iterations/iter_1/images?cloud_provider=aws&region=us-east-1")
+            .with_status(500)
+            .with_body("failed get image")
+            .create_async()
+            .await;
+        assert!(matches!(
+            client
+                .get_image(&bucket, &iter_id, "aws", "us-east-1", false)
+                .await,
+            Err(StampError::HcpApi(_))
+        ));
+        mock_500.assert_async().await;
+
+        // 7. Invalid JSON
+        let mock_bad_json = server
+            .mock("GET", "/packer/2021-04-30/organizations/org/projects/proj/buckets/b/iterations/iter_1/images?cloud_provider=aws&region=us-east-1")
+            .with_status(200)
+            .with_body("invalid json")
+            .create_async()
+            .await;
+        assert!(matches!(
+            client
+                .get_image(&bucket, &iter_id, "aws", "us-east-1", false)
+                .await,
+            Err(StampError::HcpApi(_))
+        ));
+        mock_bad_json.assert_async().await;
+
+        // 8. Network error
+        let net_client = HcpRegistryClient::new(HcpClientConfig {
+            auth_token: Some("token".to_string()),
+            api_url: "http://127.0.0.1:1".to_string(),
+            ..Default::default()
+        });
+        assert!(matches!(
+            net_client
+                .get_image(&bucket, &iter_id, "aws", "us-east-1", false)
+                .await,
+            Err(StampError::HcpApi(_))
+        ));
+        Ok(())
+    }
+
+    /// Tests revoke_iteration and activate_iteration under success and error circumstances.
     #[tokio::test]
     async fn test_revoke_and_activate_iteration() {
         let mut server = mockito::Server::new_async().await;
@@ -1251,17 +1830,15 @@ mod tests {
             .create_async()
             .await;
 
-        let config = HcpClientConfig {
-            client_id: None,
-            client_secret: None,
+        let client = HcpRegistryClient::new(HcpClientConfig {
             auth_token: Some("mock-token".to_string()),
             organization_id: HcpOrganizationId("org".to_string()),
             project_id: HcpProjectId("proj".to_string()),
             api_url: server.url(),
             auth_url: format!("{}/oauth/token", server.url()),
-        };
+            ..Default::default()
+        });
 
-        let client = HcpRegistryClient::new(config);
         let bucket = HcpBucketName("ubuntu".to_string());
         let iteration = HcpIterationId("iter_1".to_string());
 
@@ -1272,5 +1849,204 @@ mod tests {
                 .is_ok()
         );
         assert!(client.activate_iteration(&bucket, &iteration).await.is_ok());
+
+        // Revoke 500 error
+        let mock_rev_500 = server
+            .mock("POST", "/packer/2021-04-30/organizations/org/projects/proj/buckets/ubuntu/iterations/iter_1/revoke")
+            .with_status(500)
+            .with_body("revoke failed")
+            .create_async()
+            .await;
+        assert!(matches!(
+            client.revoke_iteration(&bucket, &iteration, "CVE").await,
+            Err(StampError::HcpApi(_))
+        ));
+        mock_rev_500.assert_async().await;
+
+        // Activate 500 error
+        let mock_act_500 = server
+            .mock("POST", "/packer/2021-04-30/organizations/org/projects/proj/buckets/ubuntu/iterations/iter_1/complete")
+            .with_status(500)
+            .with_body("complete failed")
+            .create_async()
+            .await;
+        assert!(matches!(
+            client.activate_iteration(&bucket, &iteration).await,
+            Err(StampError::HcpApi(_))
+        ));
+        mock_act_500.assert_async().await;
+
+        // Network errors
+        let net_client = HcpRegistryClient::new(HcpClientConfig {
+            auth_token: Some("token".to_string()),
+            api_url: "http://127.0.0.1:1".to_string(),
+            ..Default::default()
+        });
+        assert!(matches!(
+            net_client
+                .revoke_iteration(&bucket, &iteration, "cve")
+                .await,
+            Err(StampError::HcpApi(_))
+        ));
+        assert!(matches!(
+            net_client.activate_iteration(&bucket, &iteration).await,
+            Err(StampError::HcpApi(_))
+        ));
+    }
+
+    /// Tests the push_build_artifacts pipeline across all builder types and error points.
+    #[tokio::test]
+    async fn test_push_build_artifacts_pipeline() -> Result<(), StampError> {
+        let mut server = mockito::Server::new_async().await;
+
+        let _create_iter_mock = server
+            .mock(
+                "POST",
+                "/packer/2021-04-30/organizations/org/projects/proj/buckets/prod-images/iterations",
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"iteration": {"id": "iter_pipeline", "status": "READY"}}"#)
+            .create_async()
+            .await;
+
+        let _reg_mock = server
+            .mock("POST", "/packer/2021-04-30/organizations/org/projects/proj/buckets/prod-images/iterations/iter_pipeline/images")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"image": {"id": "img_pipeline"}}"#)
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let _chan_mock = server
+            .mock("PATCH", "/packer/2021-04-30/organizations/org/projects/proj/buckets/prod-images/channels/production")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{}"#)
+            .create_async()
+            .await;
+
+        let client = HcpRegistryClient::new(HcpClientConfig {
+            auth_token: Some("mock-token".to_string()),
+            organization_id: HcpOrganizationId("org".to_string()),
+            project_id: HcpProjectId("proj".to_string()),
+            api_url: server.url(),
+            auth_url: format!("{}/oauth/token", server.url()),
+            ..Default::default()
+        });
+
+        let registry = HcpPackerRegistryConfig {
+            bucket_name: crate::template::BucketName("prod-images".to_string()),
+            description: Some("Production golden images".to_string()),
+            labels: HashMap::from([("env".to_string(), "prod".to_string())]),
+            bucket_labels: HashMap::from([("team".to_string(), "infra".to_string())]),
+            build_labels: HashMap::from([("ci".to_string(), "true".to_string())]),
+            channels: vec!["production".to_string()],
+        };
+
+        let artifacts: Vec<Box<dyn Artifact>> = vec![
+            Box::new(crate::artifact::MockArtifact {
+                builder_id: "amazon-ebs.web".to_string(),
+                id: "us-east-1:ami-0123456789abcdef0".to_string(),
+                files: vec![],
+            }),
+            Box::new(crate::artifact::MockArtifact {
+                builder_id: "amazon-ebs".to_string(),
+                id: "ami-99998888".to_string(),
+                files: vec![],
+            }),
+            Box::new(crate::artifact::MockArtifact {
+                builder_id: "azure-arm.app".to_string(),
+                id: "azure-img-123".to_string(),
+                files: vec![],
+            }),
+            Box::new(crate::artifact::MockArtifact {
+                builder_id: "googlecompute.core".to_string(),
+                id: "gcp-img-123".to_string(),
+                files: vec![],
+            }),
+            Box::new(crate::artifact::MockArtifact {
+                builder_id: "docker".to_string(),
+                id: "sha256:1234".to_string(),
+                files: vec![],
+            }),
+            Box::new(crate::artifact::MockArtifact {
+                builder_id: "other".to_string(),
+                id: "custom-file".to_string(),
+                files: vec![],
+            }),
+        ];
+
+        let iter = client.push_build_artifacts(&registry, &artifacts).await?;
+        assert_eq!(iter.id.0, "iter_pipeline");
+
+        // Failure at create_iteration step
+        let mock_create_fail = server
+            .mock(
+                "POST",
+                "/packer/2021-04-30/organizations/org/projects/proj/buckets/prod-images/iterations",
+            )
+            .with_status(500)
+            .with_body("create iter failed")
+            .create_async()
+            .await;
+        assert!(matches!(
+            client.push_build_artifacts(&registry, &artifacts).await,
+            Err(StampError::HcpApi(_))
+        ));
+        mock_create_fail.assert_async().await;
+
+        // Failure at register_image step
+        let _create_ok2 = server
+            .mock(
+                "POST",
+                "/packer/2021-04-30/organizations/org/projects/proj/buckets/prod-images/iterations",
+            )
+            .with_status(200)
+            .with_body(r#"{"iteration": {"id": "iter_pipeline2"}}"#)
+            .create_async()
+            .await;
+        let mock_reg_fail = server
+            .mock("POST", "/packer/2021-04-30/organizations/org/projects/proj/buckets/prod-images/iterations/iter_pipeline2/images")
+            .with_status(500)
+            .with_body("reg img failed")
+            .create_async()
+            .await;
+        assert!(matches!(
+            client.push_build_artifacts(&registry, &artifacts).await,
+            Err(StampError::HcpApi(_))
+        ));
+        mock_reg_fail.assert_async().await;
+
+        // Failure at assign_channel step
+        let _create_ok3 = server
+            .mock(
+                "POST",
+                "/packer/2021-04-30/organizations/org/projects/proj/buckets/prod-images/iterations",
+            )
+            .with_status(200)
+            .with_body(r#"{"iteration": {"id": "iter_pipeline3"}}"#)
+            .create_async()
+            .await;
+        let _reg_ok3 = server
+            .mock("POST", "/packer/2021-04-30/organizations/org/projects/proj/buckets/prod-images/iterations/iter_pipeline3/images")
+            .with_status(200)
+            .with_body(r#"{"image": {"id": "img_ok"}}"#)
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        let mock_chan_fail = server
+            .mock("PATCH", "/packer/2021-04-30/organizations/org/projects/proj/buckets/prod-images/channels/production")
+            .with_status(500)
+            .with_body("chan assign failed")
+            .create_async()
+            .await;
+        assert!(matches!(
+            client.push_build_artifacts(&registry, &artifacts).await,
+            Err(StampError::HcpApi(_))
+        ));
+        mock_chan_fail.assert_async().await;
+        Ok(())
     }
 }

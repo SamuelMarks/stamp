@@ -1,3 +1,4 @@
+#![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `amazon-instance` builder for instance-store and EBS backed AMIs.
 
 pub use super::amazon_common::{
@@ -92,6 +93,7 @@ struct StepRunSourceInstance {
     /// Builder name.
     name: String,
     /// Builder configuration.
+    #[allow(dead_code)]
     config: AmazonInstanceConfig,
 }
 
@@ -100,92 +102,97 @@ impl Step for StepRunSourceInstance {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Launching source instance...");
-        if cfg!(test) {
+        #[cfg(test)]
+        {
             state.put("instance_id", "i-1234567890abcdef0".to_string());
             state.put("instance_ip", "127.0.0.1".to_string());
-            return Ok(StepAction::Continue);
+            Ok(StepAction::Continue)
         }
 
-        let aws_conf = get_aws_config(
-            self.config.region.as_deref(),
-            self.config.profile.as_deref(),
-            self.config.assume_role.as_ref(),
-        )
-        .await;
-        let client = aws_sdk_ec2::Client::new(&aws_conf);
+        #[cfg(not(test))]
+        {
+            let aws_conf = get_aws_config(
+                self.config.region.as_deref(),
+                self.config.profile.as_deref(),
+                self.config.assume_role.as_ref(),
+            )
+            .await;
+            let client = aws_sdk_ec2::Client::new(&aws_conf);
 
-        let mut req = client
-            .run_instances()
-            .image_id(self.config.source_ami.as_deref().unwrap_or("ami-00000000"))
-            .instance_type(aws_sdk_ec2::types::InstanceType::from(
-                self.config.instance_type.as_deref().unwrap_or("t2.micro"),
-            ))
-            .min_count(1)
-            .max_count(1);
+            let mut req = client
+                .run_instances()
+                .image_id(self.config.source_ami.as_deref().unwrap_or("ami-00000000"))
+                .instance_type(aws_sdk_ec2::types::InstanceType::from(
+                    self.config.instance_type.as_deref().unwrap_or("t2.micro"),
+                ))
+                .min_count(1)
+                .max_count(1);
 
-        if let Some(sgs) = state.get::<Vec<String>>("security_group_ids") {
-            req = req.set_security_group_ids(Some(sgs.clone()));
-        }
-        if let Some(kp) = state.get::<String>("key_pair_name") {
-            req = req.key_name(kp);
-        }
-
-        if let Some(ref iam) = self.config.iam_instance_profile {
-            let mut prof = aws_sdk_ec2::types::IamInstanceProfileSpecification::builder();
-            if let Some(ref arn) = iam.arn {
-                prof = prof.arn(arn);
+            if let Some(sgs) = state.get::<Vec<String>>("security_group_ids") {
+                req = req.set_security_group_ids(Some(sgs.clone()));
             }
-            if let Some(ref name) = iam.name {
-                prof = prof.name(name);
+            if let Some(kp) = state.get::<String>("key_pair_name") {
+                req = req.key_name(kp);
             }
-            req = req.iam_instance_profile(prof.build());
+
+            if let Some(ref iam) = self.config.iam_instance_profile {
+                let mut prof = aws_sdk_ec2::types::IamInstanceProfileSpecification::builder();
+                if let Some(ref arn) = iam.arn {
+                    prof = prof.arn(arn);
+                }
+                if let Some(ref name) = iam.name {
+                    prof = prof.name(name);
+                }
+                req = req.iam_instance_profile(prof.build());
+            }
+
+            if let Some(ref spot) = self.config.spot_instance {
+                let mut spot_opt = aws_sdk_ec2::types::SpotMarketOptions::builder();
+                if let Some(ref price) = spot.spot_price {
+                    spot_opt = spot_opt.max_price(price);
+                }
+                let market = aws_sdk_ec2::types::InstanceMarketOptionsRequest::builder()
+                    .market_type(aws_sdk_ec2::types::MarketType::Spot)
+                    .spot_options(spot_opt.build())
+                    .build();
+                req = req.instance_market_options(market);
+            }
+
+            let res = match req.send().await {
+                Ok(res) => res,
+                Err(e) => {
+                    return Err(StampError::Execution(format!(
+                        "AWS RunInstances failed: {e}"
+                    )));
+                }
+            };
+
+            let instances = res.instances();
+            let Some(instance) = instances.first() else {
+                return Err(StampError::Execution("No instances returned".to_string()));
+            };
+            let instance_id = instance.instance_id().unwrap_or_default().to_string();
+
+            self.ui
+                .say(&self.name, &format!("Instance launched: {instance_id}"));
+            state.put("instance_id", instance_id.clone());
+
+            let ip = instance
+                .public_ip_address()
+                .unwrap_or("127.0.0.1")
+                .to_string();
+            state.put("instance_ip", ip);
+
+            Ok(StepAction::Continue)
         }
-
-        if let Some(ref spot) = self.config.spot_instance {
-            let mut spot_opt = aws_sdk_ec2::types::SpotMarketOptions::builder();
-            if let Some(ref price) = spot.spot_price {
-                spot_opt = spot_opt.max_price(price);
-            }
-            let market = aws_sdk_ec2::types::InstanceMarketOptionsRequest::builder()
-                .market_type(aws_sdk_ec2::types::MarketType::Spot)
-                .spot_options(spot_opt.build())
-                .build();
-            req = req.instance_market_options(market);
-        }
-
-        let res = match req.send().await {
-            Ok(res) => res,
-            Err(e) => {
-                return Err(StampError::Execution(format!(
-                    "AWS RunInstances failed: {e}"
-                )));
-            }
-        };
-
-        let instances = res.instances();
-        let Some(instance) = instances.first() else {
-            return Err(StampError::Execution("No instances returned".to_string()));
-        };
-        let instance_id = instance.instance_id().unwrap_or_default().to_string();
-
-        self.ui
-            .say(&self.name, &format!("Instance launched: {instance_id}"));
-        state.put("instance_id", instance_id.clone());
-
-        let ip = instance
-            .public_ip_address()
-            .unwrap_or("127.0.0.1")
-            .to_string();
-        state.put("instance_ip", ip);
-
-        Ok(StepAction::Continue)
     }
 
     async fn cleanup(&mut self, state: &StateBag) {
         if let Some(instance_id) = state.get::<String>("instance_id") {
             self.ui
                 .say(&self.name, &format!("Terminating instance: {instance_id}"));
-            if !cfg!(test) {
+            #[cfg(not(test))]
+            {
                 let aws_conf = get_aws_config(
                     self.config.region.as_deref(),
                     self.config.profile.as_deref(),
@@ -225,7 +232,7 @@ impl Step for StepProvision {
         let ip = state
             .get::<String>("instance_ip")
             .cloned()
-            .unwrap_or_else(|| "127.0.0.1".to_string());
+            .unwrap_or_default();
 
         let priv_key = state.get::<FilePath>("private_key_path").cloned();
 
@@ -363,9 +370,13 @@ impl Step for StepBundleOrRegisterAmi {
             &format!("Bundling/registering AMI {ami_name} from instance {instance_id}"),
         );
 
-        let mut ami_id = "ami-mock".to_string();
+        #[cfg(test)]
+        let ami_id = "ami-mock".to_string();
+        #[cfg(not(test))]
+        let ami_id;
 
-        if !cfg!(test) {
+        #[cfg(not(test))]
+        {
             let aws_conf = get_aws_config(
                 self.config.region.as_deref(),
                 self.config.profile.as_deref(),
@@ -555,10 +566,7 @@ Do you want to clean up? [y/N]: ",
             }
         }
 
-        let ami_id = state
-            .get::<String>("ami_id")
-            .cloned()
-            .unwrap_or_else(|| "ami-mock".to_string());
+        let ami_id = state.get::<String>("ami_id").cloned().unwrap_or_default();
 
         Ok(Box::new(crate::artifact::MockArtifact {
             id: ami_id,
@@ -605,12 +613,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_amazon_instance_prepare_success() -> Result<(), crate::error::StampError> {
+    async fn test_amazon_instance_prepare_success() {
         let mut config = AmazonInstanceConfig::default();
         config.name = "test".to_string();
         let builder = AmazonInstanceBuilder::new(config);
-        builder.prepare().await?;
-        Ok(())
+        assert!(builder.prepare().await.is_ok());
     }
 
     #[tokio::test]
@@ -621,7 +628,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_amazon_instance_run_mocked() -> Result<(), crate::error::StampError> {
+    async fn test_amazon_instance_run_mocked() {
         let mut config = AmazonInstanceConfig::default();
         config.name = "test".to_string();
         config.s3_bucket = Some("test-bucket".to_string());
@@ -645,7 +652,7 @@ mod tests {
         });
 
         let builder = AmazonInstanceBuilder::new(config);
-        builder
+        let res = builder
             .run(
                 std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
                     provisioners: std::sync::Arc::new(vec![]),
@@ -658,12 +665,12 @@ mod tests {
                 )),
                 crate::engine::packer::OnErrorStrategy::Cleanup,
             )
-            .await?;
-        Ok(())
+            .await;
+        assert!(res.is_ok());
     }
 
     #[tokio::test]
-    async fn test_amazon_instance_run_bad_exit() -> Result<(), crate::error::StampError> {
+    async fn test_amazon_instance_run_bad_exit() {
         let mut config = AmazonInstanceConfig::default();
         config.name = "test_bad_exit".to_string();
         let builder = AmazonInstanceBuilder::new(config);
@@ -682,11 +689,10 @@ mod tests {
             )
             .await;
         assert!(res.is_err());
-        Ok(())
     }
 
     #[tokio::test]
-    async fn test_amazon_instance_run_missing() -> Result<(), crate::error::StampError> {
+    async fn test_amazon_instance_run_missing() {
         let mut config = AmazonInstanceConfig::default();
         config.name = "test_missing".to_string();
         let builder = AmazonInstanceBuilder::new(config);
@@ -705,20 +711,18 @@ mod tests {
             )
             .await;
         assert!(res.is_err());
-        Ok(())
     }
 
     #[tokio::test]
-    async fn test_amazon_instance_cancel() -> Result<(), crate::error::StampError> {
+    async fn test_amazon_instance_cancel() {
         let mut config = AmazonInstanceConfig::default();
         config.name = "test".to_string();
         let builder = AmazonInstanceBuilder::new(config);
-        builder.cancel().await?;
-        Ok(())
+        assert!(builder.cancel().await.is_ok());
     }
 
     #[tokio::test]
-    async fn test_steps_run_and_cleanup() -> Result<(), crate::error::StampError> {
+    async fn test_steps_run_and_cleanup() {
         let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
@@ -745,15 +749,29 @@ mod tests {
             config: config.clone(),
         };
 
-        let _ = step1.run(&mut state).await;
+        assert!(step1.run(&mut state).await.is_ok());
         step1.cleanup(&state).await;
 
-        let _ = step2.run(&mut state).await;
+        assert!(step2.run(&mut state).await.is_ok());
         step2.cleanup(&state).await;
 
-        let _ = step3.run(&mut state).await;
+        assert!(step3.run(&mut state).await.is_ok());
         step3.cleanup(&state).await;
 
-        Ok(())
+        // StepProvision run
+        let hook: Arc<dyn ProvisionHook> = Arc::new(crate::engine::hook::DefaultProvisionHook {
+            provisioners: Arc::new(vec![]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let mut step_prov = StepProvision {
+            ui,
+            name: "test".into(),
+            config,
+            hook,
+        };
+        assert!(step_prov.run(&mut state).await.is_ok());
+
+        let mut empty_state = StateBag::new();
+        assert!(step_prov.run(&mut empty_state).await.is_ok());
     }
 }

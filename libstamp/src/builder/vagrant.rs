@@ -328,14 +328,54 @@ mod tests {
             FeatureState::Disabled,
         ));
 
-        let artifact = builder
-            .run(hook, ui, OnErrorStrategy::Cleanup)
-            .await
-            .unwrap();
+        let artifact = builder.run(hook, ui, OnErrorStrategy::Cleanup).await;
+        assert!(artifact.is_ok());
+        let artifact = match artifact {
+            Ok(a) => a,
+            Err(e) => panic!("{e}"),
+        };
         assert!(artifact.id().contains("vagrant-builder"));
         assert!(!artifact.files().is_empty());
         assert!(artifact.string().contains("Vagrant box"));
         assert!(artifact.destroy().is_ok());
         assert!(builder.cancel().await.is_ok());
+        assert_eq!(artifact.builder_id(), "vagrant");
+        assert!(artifact.state("foo").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_vagrant_cleanups() {
+        let ui = Arc::new(Ui::new(
+            FeatureState::Disabled,
+            FeatureState::Disabled,
+            FeatureState::Disabled,
+        ));
+
+        let mut step_up = StepVagrantUp {
+            config: VagrantConfig {
+                teardown: true,
+                ..Default::default()
+            },
+            ui: ui.clone(),
+        };
+        let mut state = StateBag::new();
+        step_up.cleanup(&state).await;
+        state.put("vagrant_box", "ubuntu/focal64".to_string());
+        step_up.cleanup(&state).await;
+
+        let mut step_up_no_teardown = StepVagrantUp {
+            config: VagrantConfig {
+                teardown: false,
+                ..Default::default()
+            },
+            ui: ui.clone(),
+        };
+        step_up_no_teardown.cleanup(&state).await;
+
+        let mut step_pkg = StepVagrantPackage {
+            config: VagrantConfig::default(),
+            ui,
+        };
+        step_pkg.cleanup(&state).await;
     }
 }

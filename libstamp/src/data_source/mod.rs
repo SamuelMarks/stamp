@@ -95,6 +95,7 @@ pub fn create_data_source(config: &DataSourceConfig) -> Result<Box<dyn DataSourc
                     bucket_name,
                     channel,
                     allow_revoked,
+                    ..Default::default()
                 },
             )))
         }
@@ -128,6 +129,7 @@ pub fn create_data_source(config: &DataSourceConfig) -> Result<Box<dyn DataSourc
                     cloud_provider,
                     region,
                     allow_revoked,
+                    ..Default::default()
                 },
             )))
         }

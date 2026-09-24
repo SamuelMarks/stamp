@@ -234,7 +234,10 @@ impl SsmCommunicator {
             ),
         );
 
-        if cfg!(test) {
+        let aws_cmd = std::env::var("AWS_CMD").unwrap_or_default();
+        let cmd_name = if aws_cmd.is_empty() { "aws" } else { &aws_cmd };
+
+        if cfg!(test) && aws_cmd.is_empty() {
             return Ok(());
         }
 
@@ -255,7 +258,7 @@ impl SsmCommunicator {
                 args.push(p.clone());
             }
 
-            if let Ok(output) = tokio::process::Command::new("aws")
+            if let Ok(output) = tokio::process::Command::new(cmd_name)
                 .args(&args)
                 .output()
                 .await
@@ -266,9 +269,14 @@ impl SsmCommunicator {
                     ui.say("ssm", "SSM agent is online and ready!");
                     return Ok(());
                 }
+                ui.say("ssm", "SSM agent not yet online; retrying...");
             }
 
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            #[cfg(test)]
+            let sleep_dur = Duration::from_millis(5);
+            #[cfg(not(test))]
+            let sleep_dur = Duration::from_secs(5);
+            tokio::time::sleep(sleep_dur).await;
         }
 
         Err(StampError::Execution(format!(
@@ -286,17 +294,21 @@ impl Communicator for SsmCommunicator {
         if self.config.instance_id == "invalid_instance" {
             return Err(StampError::Execution("Instance not found".to_string()));
         }
-        if std::env::var("STAMP_TEST_MODE").is_ok() || cfg!(test) {
+
+        if let Some(ref ssh_cfg) = self.config.ssh_config {
+            let ssh_comm = SshCommunicator::new(ssh_cfg.clone());
+            return ssh_comm.execute(cmd).await;
+        }
+
+        let aws_cmd = std::env::var("AWS_CMD").unwrap_or_default();
+        let cmd_name = if aws_cmd.is_empty() { "aws" } else { &aws_cmd };
+
+        if cfg!(test) && aws_cmd.is_empty() {
             return Ok(CommandResult {
                 exit_code: 0,
                 stdout: String::new(),
                 stderr: String::new(),
             });
-        }
-
-        if let Some(ref ssh_cfg) = self.config.ssh_config {
-            let ssh_comm = SshCommunicator::new(ssh_cfg.clone());
-            return ssh_comm.execute(cmd).await;
         }
 
         let args = build_ssm_send_command_args(
@@ -306,7 +318,7 @@ impl Communicator for SsmCommunicator {
             self.config.profile.as_deref(),
         );
 
-        let output = tokio::process::Command::new("aws")
+        let output = tokio::process::Command::new(cmd_name)
             .args(&args)
             .output()
             .await
@@ -329,9 +341,6 @@ impl Communicator for SsmCommunicator {
         if self.config.instance_id == "invalid_instance" {
             return Err(StampError::Execution("Instance not found".to_string()));
         }
-        if std::env::var("STAMP_TEST_MODE").is_ok() || cfg!(test) {
-            return Ok(());
-        }
 
         if let Some(ref ssh_cfg) = self.config.ssh_config {
             let ssh_comm = SshCommunicator::new(ssh_cfg.clone());
@@ -351,9 +360,6 @@ impl Communicator for SsmCommunicator {
         if self.config.instance_id == "invalid_instance" {
             return Err(StampError::Execution("Instance not found".to_string()));
         }
-        if std::env::var("STAMP_TEST_MODE").is_ok() || cfg!(test) {
-            return Ok(());
-        }
 
         if let Some(ref ssh_cfg) = self.config.ssh_config {
             let ssh_comm = SshCommunicator::new(ssh_cfg.clone());
@@ -366,13 +372,22 @@ impl Communicator for SsmCommunicator {
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::pedantic,
+    clippy::all,
+    for_loops_over_fallibles
+)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[tokio::test]
     async fn test_ssm_communicator_coverage() {
+        let _lock = ENV_LOCK.lock().await;
+
         let config = SsmConfig {
             instance_id: "i-0123456789abcdef0".to_string(),
             region: "us-east-1".to_string(),
@@ -386,7 +401,7 @@ mod tests {
 
         let res = c.execute(&Command::new("echo hello".to_string())).await;
         assert!(res.is_ok());
-        if let Ok(cmd_res) = res {
+        for cmd_res in res {
             assert_eq!(cmd_res.exit_code, 0);
         }
 
@@ -397,6 +412,40 @@ mod tests {
         let c2 = c.clone();
         assert_eq!(c.config, c2.config);
         assert_eq!(format!("{c:?}"), format!("{c2:?}"));
+
+        // Test with ssh_config: None
+        let mut no_ssh_config = config.clone();
+        no_ssh_config.ssh_config = None;
+        let c_no_ssh = SsmCommunicator::new(no_ssh_config);
+        let res_no_ssh = c_no_ssh
+            .execute(&Command::new("echo hello".to_string()))
+            .await;
+        assert!(res_no_ssh.is_ok());
+        assert!(c_no_ssh.upload(&fp, &fp).await.is_ok());
+        assert!(c_no_ssh.download(&fp, &fp).await.is_ok());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let temp_dir_res = tempfile::tempdir();
+            assert!(temp_dir_res.is_ok());
+            for temp_dir in temp_dir_res {
+                let echo_script = temp_dir.path().join("aws_echo.sh");
+                let _ = std::fs::write(&echo_script, "#!/bin/sh\necho ok\nexit 0\n");
+                let _ =
+                    std::fs::set_permissions(&echo_script, std::fs::Permissions::from_mode(0o755));
+                unsafe {
+                    std::env::set_var("AWS_CMD", echo_script.to_string_lossy().as_ref());
+                }
+                let res_aws = c_no_ssh
+                    .execute(&Command::new("echo hello".to_string()))
+                    .await;
+                assert!(res_aws.is_ok());
+                unsafe {
+                    std::env::remove_var("AWS_CMD");
+                }
+            }
+        }
 
         assert!(!c.has_session_manager_plugin());
 
@@ -409,10 +458,12 @@ mod tests {
         assert!(!nonexistent_comm.has_session_manager_plugin());
 
         // Test existing plugin path using a named temporary file
-        if let Ok(temp_plugin) = tempfile::NamedTempFile::new() {
-            let mut existing_config = config;
+        let temp_plugin = tempfile::NamedTempFile::new();
+        assert!(temp_plugin.is_ok());
+        for tp in temp_plugin {
+            let mut existing_config = config.clone();
             existing_config.session_manager_plugin_path =
-                Some(FilePath::new(temp_plugin.path().to_path_buf()));
+                Some(FilePath::new(tp.path().to_path_buf()));
             let existing_comm = SsmCommunicator::new(existing_config);
             assert!(existing_comm.has_session_manager_plugin());
         }
@@ -492,6 +543,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_ssm_wait_for_agent_online() {
+        let _lock = ENV_LOCK.lock().await;
+
         let ui = crate::engine::ui::Ui::new(
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
@@ -503,5 +556,73 @@ mod tests {
 
         let invalid_comm = SsmCommunicator::new(SsmConfig::new("invalid_instance", "us-east-1"));
         assert!(invalid_comm.wait_for_agent_online(&ui).await.is_err());
+
+        let fail_comm = SsmCommunicator::new(SsmConfig::new("fail_ssm", "us-east-1"));
+        assert!(fail_comm.wait_for_agent_online(&ui).await.is_err());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let temp_dir_res = tempfile::tempdir();
+            assert!(temp_dir_res.is_ok());
+            for temp_dir in temp_dir_res {
+                // Online script
+                let online_script = temp_dir.path().join("aws_online.sh");
+                let script_content = "#!/bin/sh\necho '\"PingStatus\": \"Online\"'\nexit 0\n";
+                let _ = std::fs::write(&online_script, script_content);
+                let _ = std::fs::set_permissions(
+                    &online_script,
+                    std::fs::Permissions::from_mode(0o755),
+                );
+
+                unsafe {
+                    std::env::set_var("AWS_CMD", online_script.to_string_lossy().as_ref());
+                }
+
+                let mut online_config = SsmConfig::new("i-online", "us-east-1");
+                online_config.profile = Some("prod".to_string());
+                online_config.timeout = Timeout::new(Duration::from_millis(500));
+                let online_comm = SsmCommunicator::new(online_config);
+                assert!(online_comm.wait_for_agent_online(&ui).await.is_ok());
+
+                // Offline/timeout script
+                let offline_script = temp_dir.path().join("aws_offline.sh");
+                let script_content_offline =
+                    "#!/bin/sh\necho '\"PingStatus\": \"Offline\"'\nexit 0\n";
+                let _ = std::fs::write(&offline_script, script_content_offline);
+                let _ = std::fs::set_permissions(
+                    &offline_script,
+                    std::fs::Permissions::from_mode(0o755),
+                );
+
+                unsafe {
+                    std::env::set_var("AWS_CMD", offline_script.to_string_lossy().as_ref());
+                }
+
+                let mut timeout_config = SsmConfig::new("i-timeout", "us-east-1");
+                timeout_config.timeout = Timeout::new(Duration::from_millis(15));
+                let timeout_comm = SsmCommunicator::new(timeout_config);
+                assert!(timeout_comm.wait_for_agent_online(&ui).await.is_err());
+
+                // Error exit code script
+                let err_script = temp_dir.path().join("aws_err.sh");
+                let _ = std::fs::write(&err_script, "#!/bin/sh\nexit 1\n");
+                let _ =
+                    std::fs::set_permissions(&err_script, std::fs::Permissions::from_mode(0o755));
+
+                unsafe {
+                    std::env::set_var("AWS_CMD", err_script.to_string_lossy().as_ref());
+                }
+
+                let mut err_config = SsmConfig::new("i-err", "us-east-1");
+                err_config.timeout = Timeout::new(Duration::from_millis(15));
+                let err_comm = SsmCommunicator::new(err_config);
+                assert!(err_comm.wait_for_agent_online(&ui).await.is_err());
+
+                unsafe {
+                    std::env::remove_var("AWS_CMD");
+                }
+            }
+        }
     }
 }

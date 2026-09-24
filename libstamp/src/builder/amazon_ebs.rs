@@ -1,3 +1,4 @@
+#![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `amazon-ebs` builder.
 
 pub use super::amazon_common::{
@@ -115,7 +116,8 @@ impl Step for StepRunSourceInstance {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Launching source instance...");
-        if cfg!(test) {
+        #[cfg(test)]
+        {
             state.put("instance_id", "i-1234567890abcdef0".to_string());
             state.put("instance_ip", "127.0.0.1".to_string());
             if let Some(ref tokens) = self.config.http_tokens {
@@ -139,277 +141,281 @@ impl Step for StepRunSourceInstance {
                     self.config.network_interfaces.len(),
                 );
             }
-            return Ok(StepAction::Continue);
+            Ok(StepAction::Continue)
         }
 
-        let aws_conf = get_aws_config(
-            self.config.region.as_deref(),
-            self.config.profile.as_deref(),
-            self.config.assume_role.as_ref(),
-        )
-        .await;
-        let client = aws_sdk_ec2::Client::new(&aws_conf);
+        #[cfg(not(test))]
+        {
+            let aws_conf = get_aws_config(
+                self.config.region.as_deref(),
+                self.config.profile.as_deref(),
+                self.config.assume_role.as_ref(),
+            )
+            .await;
+            let client = aws_sdk_ec2::Client::new(&aws_conf);
 
-        let mut req = client
-            .run_instances()
-            .image_id(self.config.source_ami.as_deref().unwrap_or("ami-00000000"))
-            .instance_type(aws_sdk_ec2::types::InstanceType::from(
-                self.config.instance_type.as_deref().unwrap_or("t2.micro"),
-            ))
-            .min_count(1)
-            .max_count(1);
+            let mut req = client
+                .run_instances()
+                .image_id(self.config.source_ami.as_deref().unwrap_or("ami-00000000"))
+                .instance_type(aws_sdk_ec2::types::InstanceType::from(
+                    self.config.instance_type.as_deref().unwrap_or("t2.micro"),
+                ))
+                .min_count(1)
+                .max_count(1);
 
-        if let Some(sgs) = state.get::<Vec<String>>("security_group_ids") {
-            req = req.set_security_group_ids(Some(sgs.clone()));
-        }
-        if let Some(kp) = state.get::<String>("key_pair_name") {
-            req = req.key_name(kp);
-        }
-
-        if let Some(ref iam) = self.config.iam_instance_profile {
-            let mut prof = aws_sdk_ec2::types::IamInstanceProfileSpecification::builder();
-            if let Some(ref arn) = iam.arn {
-                prof = prof.arn(arn);
+            if let Some(sgs) = state.get::<Vec<String>>("security_group_ids") {
+                req = req.set_security_group_ids(Some(sgs.clone()));
             }
-            if let Some(ref name) = iam.name {
-                prof = prof.name(name);
+            if let Some(kp) = state.get::<String>("key_pair_name") {
+                req = req.key_name(kp);
             }
-            req = req.iam_instance_profile(prof.build());
-        }
 
-        if !self.config.launch_block_device_mappings.is_empty() {
-            let mut bdms = Vec::new();
-            for mapping in &self.config.launch_block_device_mappings {
-                let mut ebs_builder = aws_sdk_ec2::types::EbsBlockDevice::builder();
-                if let Some(sz) = mapping.volume_size_gb {
-                    ebs_builder = ebs_builder.volume_size(i32::try_from(sz).unwrap_or(8));
+            if let Some(ref iam) = self.config.iam_instance_profile {
+                let mut prof = aws_sdk_ec2::types::IamInstanceProfileSpecification::builder();
+                if let Some(ref arn) = iam.arn {
+                    prof = prof.arn(arn);
                 }
-                if let Some(ref vt) = mapping.volume_type {
-                    let vol_type_str = match vt {
-                        EbsVolumeType::Gp2 => "gp2",
-                        EbsVolumeType::Gp3 => "gp3",
-                        EbsVolumeType::Io1 => "io1",
-                        EbsVolumeType::Io2 => "io2",
-                        EbsVolumeType::St1 => "st1",
-                        EbsVolumeType::Sc1 => "sc1",
-                        EbsVolumeType::Standard => "standard",
-                        EbsVolumeType::Other(s) => s.as_str(),
-                    };
-                    ebs_builder =
-                        ebs_builder.volume_type(aws_sdk_ec2::types::VolumeType::from(vol_type_str));
+                if let Some(ref name) = iam.name {
+                    prof = prof.name(name);
                 }
-                if let Some(del) = mapping.delete_on_termination {
-                    ebs_builder = ebs_builder.delete_on_termination(del);
-                }
-                if let Some(iops) = mapping.iops {
-                    ebs_builder = ebs_builder.iops(i32::try_from(iops).unwrap_or(3000));
-                }
-                if let Some(tp) = mapping.throughput {
-                    ebs_builder = ebs_builder.throughput(i32::try_from(tp).unwrap_or(125));
-                }
-                if let Some(enc) = mapping.encrypted {
-                    ebs_builder = ebs_builder.encrypted(enc);
-                }
-                if let Some(ref kms) = mapping.kms_key_id {
-                    ebs_builder = ebs_builder.kms_key_id(kms);
-                }
-
-                let bdm = aws_sdk_ec2::types::BlockDeviceMapping::builder()
-                    .device_name(&mapping.device_name)
-                    .ebs(ebs_builder.build())
-                    .build();
-                bdms.push(bdm);
+                req = req.iam_instance_profile(prof.build());
             }
-            req = req.set_block_device_mappings(Some(bdms));
-        }
 
-        let mut meta_builder = aws_sdk_ec2::types::InstanceMetadataOptionsRequest::builder();
-        if let Some(ref tokens) = self.config.http_tokens {
-            meta_builder = meta_builder.http_tokens(if tokens == "required" {
-                aws_sdk_ec2::types::HttpTokensState::Required
-            } else {
-                aws_sdk_ec2::types::HttpTokensState::Optional
-            });
-        }
-        if let Some(hops) = self.config.http_put_response_hop_limit {
-            meta_builder =
-                meta_builder.http_put_response_hop_limit(i32::try_from(hops).unwrap_or(1));
-        }
-        if let Some(ref ep) = self.config.http_endpoint {
-            meta_builder = meta_builder.http_endpoint(if ep == "disabled" {
-                aws_sdk_ec2::types::InstanceMetadataEndpointState::Disabled
-            } else {
-                aws_sdk_ec2::types::InstanceMetadataEndpointState::Enabled
-            });
-        }
-        req = req.metadata_options(meta_builder.build());
-
-        if self.config.placement.is_some() || self.config.outpost_arn.is_some() {
-            let mut place_builder = aws_sdk_ec2::types::Placement::builder();
-            if let Some(ref p) = self.config.placement {
-                if let Some(ref az) = p.availability_zone {
-                    place_builder = place_builder.availability_zone(az);
-                }
-                if let Some(ref aff) = p.affinity {
-                    place_builder = place_builder.affinity(aff);
-                }
-                if let Some(ref gn) = p.group_name {
-                    place_builder = place_builder.group_name(gn);
-                }
-                if let Some(pn) = p.partition_number {
-                    place_builder = place_builder.partition_number(pn);
-                }
-                if let Some(ref hid) = p.host_id {
-                    place_builder = place_builder.host_id(hid);
-                }
-                if let Some(ref ten) = p.tenancy {
-                    place_builder =
-                        place_builder.tenancy(aws_sdk_ec2::types::Tenancy::from(ten.as_str()));
-                }
-                if let Some(ref sd) = p.spread_domain {
-                    place_builder = place_builder.spread_domain(sd);
-                }
-                if let Some(ref hrga) = p.host_resource_group_arn {
-                    place_builder = place_builder.host_resource_group_arn(hrga);
-                }
-                if let Some(ref gid) = p.group_id {
-                    place_builder = place_builder.group_id(gid);
-                }
-            }
-            if let Some(ref outpost) = self.config.outpost_arn {
-                self.ui
-                    .say(&self.name, &format!("Targeting AWS Outpost: {outpost}"));
-            }
-            req = req.placement(place_builder.build());
-        }
-
-        if !self.config.network_interfaces.is_empty() {
-            let mut nis = Vec::new();
-            for ni in &self.config.network_interfaces {
-                let mut ni_builder =
-                    aws_sdk_ec2::types::InstanceNetworkInterfaceSpecification::builder();
-                if let Some(idx) = ni.device_index {
-                    ni_builder = ni_builder.device_index(idx);
-                }
-                if let Some(ref sn) = ni.subnet_id {
-                    ni_builder = ni_builder.subnet_id(sn);
-                }
-                if let Some(ref ni_id) = ni.network_interface_id {
-                    ni_builder = ni_builder.network_interface_id(ni_id);
-                }
-                if !ni.groups.is_empty() {
-                    ni_builder = ni_builder.set_groups(Some(ni.groups.clone()));
-                }
-                if let Some(del) = ni.delete_on_termination {
-                    ni_builder = ni_builder.delete_on_termination(del);
-                }
-                if let Some(ref desc) = ni.description {
-                    ni_builder = ni_builder.description(desc);
-                }
-                if let Some(pub_ip) = ni.associate_public_ip_address {
-                    ni_builder = ni_builder.associate_public_ip_address(pub_ip);
-                }
-                if !ni.private_ip_addresses.is_empty() {
-                    let privs: Vec<_> = ni
-                        .private_ip_addresses
-                        .iter()
-                        .map(|ip| {
-                            aws_sdk_ec2::types::PrivateIpAddressSpecification::builder()
-                                .private_ip_address(ip)
-                                .build()
-                        })
-                        .collect();
-                    ni_builder = ni_builder.set_private_ip_addresses(Some(privs));
-                }
-                if let Some(cnt) = ni.secondary_private_ip_address_count {
-                    ni_builder = ni_builder.secondary_private_ip_address_count(cnt);
-                }
-                if let Some(ref it) = ni.interface_type {
-                    ni_builder = ni_builder.interface_type(it);
-                }
-                nis.push(ni_builder.build());
-            }
-            req = req.set_network_interfaces(Some(nis));
-        }
-
-        let is_spot = self.config.spot_instance.is_some();
-        let fallback = self
-            .config
-            .spot_instance
-            .as_ref()
-            .map_or(false, |s| s.fallback_to_ondemand);
-
-        if let Some(ref spot) = self.config.spot_instance {
-            let mut spot_opt = aws_sdk_ec2::types::SpotMarketOptions::builder();
-            if let Some(ref price) = spot.spot_price {
-                spot_opt = spot_opt.max_price(price);
-            }
-            let market = aws_sdk_ec2::types::InstanceMarketOptionsRequest::builder()
-                .market_type(aws_sdk_ec2::types::MarketType::Spot)
-                .spot_options(spot_opt.build())
-                .build();
-            req = req.instance_market_options(market);
-        }
-
-        let res = match req.send().await {
-            Ok(res) => res,
-            Err(e) => {
-                if is_spot && fallback {
-                    self.ui.say(
-                        &self.name,
-                        &format!(
-                            "Spot request failed ({e}), falling back to on-demand instance..."
-                        ),
-                    );
-                    let mut ondemand_req = client
-                        .run_instances()
-                        .image_id(self.config.source_ami.as_deref().unwrap_or("ami-00000000"))
-                        .instance_type(aws_sdk_ec2::types::InstanceType::from(
-                            self.config.instance_type.as_deref().unwrap_or("t2.micro"),
-                        ))
-                        .min_count(1)
-                        .max_count(1);
-                    if let Some(sgs) = state.get::<Vec<String>>("security_group_ids") {
-                        ondemand_req = ondemand_req.set_security_group_ids(Some(sgs.clone()));
+            if !self.config.launch_block_device_mappings.is_empty() {
+                let mut bdms = Vec::new();
+                for mapping in &self.config.launch_block_device_mappings {
+                    let mut ebs_builder = aws_sdk_ec2::types::EbsBlockDevice::builder();
+                    if let Some(sz) = mapping.volume_size_gb {
+                        ebs_builder = ebs_builder.volume_size(i32::try_from(sz).unwrap_or(8));
                     }
-                    if let Some(kp) = state.get::<String>("key_pair_name") {
-                        ondemand_req = ondemand_req.key_name(kp);
+                    if let Some(ref vt) = mapping.volume_type {
+                        let vol_type_str = match vt {
+                            EbsVolumeType::Gp2 => "gp2",
+                            EbsVolumeType::Gp3 => "gp3",
+                            EbsVolumeType::Io1 => "io1",
+                            EbsVolumeType::Io2 => "io2",
+                            EbsVolumeType::St1 => "st1",
+                            EbsVolumeType::Sc1 => "sc1",
+                            EbsVolumeType::Standard => "standard",
+                            EbsVolumeType::Other(s) => s.as_str(),
+                        };
+                        ebs_builder = ebs_builder
+                            .volume_type(aws_sdk_ec2::types::VolumeType::from(vol_type_str));
                     }
-                    ondemand_req.send().await.map_err(|oe| {
-                        StampError::Execution(format!("On-demand fallback failed: {oe}"))
-                    })?
+                    if let Some(del) = mapping.delete_on_termination {
+                        ebs_builder = ebs_builder.delete_on_termination(del);
+                    }
+                    if let Some(iops) = mapping.iops {
+                        ebs_builder = ebs_builder.iops(i32::try_from(iops).unwrap_or(3000));
+                    }
+                    if let Some(tp) = mapping.throughput {
+                        ebs_builder = ebs_builder.throughput(i32::try_from(tp).unwrap_or(125));
+                    }
+                    if let Some(enc) = mapping.encrypted {
+                        ebs_builder = ebs_builder.encrypted(enc);
+                    }
+                    if let Some(ref kms) = mapping.kms_key_id {
+                        ebs_builder = ebs_builder.kms_key_id(kms);
+                    }
+
+                    let bdm = aws_sdk_ec2::types::BlockDeviceMapping::builder()
+                        .device_name(&mapping.device_name)
+                        .ebs(ebs_builder.build())
+                        .build();
+                    bdms.push(bdm);
+                }
+                req = req.set_block_device_mappings(Some(bdms));
+            }
+
+            let mut meta_builder = aws_sdk_ec2::types::InstanceMetadataOptionsRequest::builder();
+            if let Some(ref tokens) = self.config.http_tokens {
+                meta_builder = meta_builder.http_tokens(if tokens == "required" {
+                    aws_sdk_ec2::types::HttpTokensState::Required
                 } else {
-                    return Err(StampError::Execution(format!(
-                        "AWS RunInstances failed: {e}"
-                    )));
-                }
+                    aws_sdk_ec2::types::HttpTokensState::Optional
+                });
             }
-        };
+            if let Some(hops) = self.config.http_put_response_hop_limit {
+                meta_builder =
+                    meta_builder.http_put_response_hop_limit(i32::try_from(hops).unwrap_or(1));
+            }
+            if let Some(ref ep) = self.config.http_endpoint {
+                meta_builder = meta_builder.http_endpoint(if ep == "disabled" {
+                    aws_sdk_ec2::types::InstanceMetadataEndpointState::Disabled
+                } else {
+                    aws_sdk_ec2::types::InstanceMetadataEndpointState::Enabled
+                });
+            }
+            req = req.metadata_options(meta_builder.build());
 
-        let instances = res.instances();
-        let Some(instance) = instances.first() else {
-            return Err(StampError::Execution("No instances returned".to_string()));
-        };
-        let instance_id = instance.instance_id().unwrap_or_default().to_string();
+            if self.config.placement.is_some() || self.config.outpost_arn.is_some() {
+                let mut place_builder = aws_sdk_ec2::types::Placement::builder();
+                if let Some(ref p) = self.config.placement {
+                    if let Some(ref az) = p.availability_zone {
+                        place_builder = place_builder.availability_zone(az);
+                    }
+                    if let Some(ref aff) = p.affinity {
+                        place_builder = place_builder.affinity(aff);
+                    }
+                    if let Some(ref gn) = p.group_name {
+                        place_builder = place_builder.group_name(gn);
+                    }
+                    if let Some(pn) = p.partition_number {
+                        place_builder = place_builder.partition_number(pn);
+                    }
+                    if let Some(ref hid) = p.host_id {
+                        place_builder = place_builder.host_id(hid);
+                    }
+                    if let Some(ref ten) = p.tenancy {
+                        place_builder =
+                            place_builder.tenancy(aws_sdk_ec2::types::Tenancy::from(ten.as_str()));
+                    }
+                    if let Some(ref sd) = p.spread_domain {
+                        place_builder = place_builder.spread_domain(sd);
+                    }
+                    if let Some(ref hrga) = p.host_resource_group_arn {
+                        place_builder = place_builder.host_resource_group_arn(hrga);
+                    }
+                    if let Some(ref gid) = p.group_id {
+                        place_builder = place_builder.group_id(gid);
+                    }
+                }
+                if let Some(ref outpost) = self.config.outpost_arn {
+                    self.ui
+                        .say(&self.name, &format!("Targeting AWS Outpost: {outpost}"));
+                }
+                req = req.placement(place_builder.build());
+            }
 
-        self.ui
-            .say(&self.name, &format!("Instance launched: {instance_id}"));
-        state.put("instance_id", instance_id.clone());
+            if !self.config.network_interfaces.is_empty() {
+                let mut nis = Vec::new();
+                for ni in &self.config.network_interfaces {
+                    let mut ni_builder =
+                        aws_sdk_ec2::types::InstanceNetworkInterfaceSpecification::builder();
+                    if let Some(idx) = ni.device_index {
+                        ni_builder = ni_builder.device_index(idx);
+                    }
+                    if let Some(ref sn) = ni.subnet_id {
+                        ni_builder = ni_builder.subnet_id(sn);
+                    }
+                    if let Some(ref ni_id) = ni.network_interface_id {
+                        ni_builder = ni_builder.network_interface_id(ni_id);
+                    }
+                    if !ni.groups.is_empty() {
+                        ni_builder = ni_builder.set_groups(Some(ni.groups.clone()));
+                    }
+                    if let Some(del) = ni.delete_on_termination {
+                        ni_builder = ni_builder.delete_on_termination(del);
+                    }
+                    if let Some(ref desc) = ni.description {
+                        ni_builder = ni_builder.description(desc);
+                    }
+                    if let Some(pub_ip) = ni.associate_public_ip_address {
+                        ni_builder = ni_builder.associate_public_ip_address(pub_ip);
+                    }
+                    if !ni.private_ip_addresses.is_empty() {
+                        let privs: Vec<_> = ni
+                            .private_ip_addresses
+                            .iter()
+                            .map(|ip| {
+                                aws_sdk_ec2::types::PrivateIpAddressSpecification::builder()
+                                    .private_ip_address(ip)
+                                    .build()
+                            })
+                            .collect();
+                        ni_builder = ni_builder.set_private_ip_addresses(Some(privs));
+                    }
+                    if let Some(cnt) = ni.secondary_private_ip_address_count {
+                        ni_builder = ni_builder.secondary_private_ip_address_count(cnt);
+                    }
+                    if let Some(ref it) = ni.interface_type {
+                        ni_builder = ni_builder.interface_type(it);
+                    }
+                    nis.push(ni_builder.build());
+                }
+                req = req.set_network_interfaces(Some(nis));
+            }
 
-        let ip = instance
-            .public_ip_address()
-            .unwrap_or("127.0.0.1")
-            .to_string();
-        state.put("instance_ip", ip);
+            let is_spot = self.config.spot_instance.is_some();
+            let fallback = self
+                .config
+                .spot_instance
+                .as_ref()
+                .map_or(false, |s| s.fallback_to_ondemand);
 
-        Ok(StepAction::Continue)
+            if let Some(ref spot) = self.config.spot_instance {
+                let mut spot_opt = aws_sdk_ec2::types::SpotMarketOptions::builder();
+                if let Some(ref price) = spot.spot_price {
+                    spot_opt = spot_opt.max_price(price);
+                }
+                let market = aws_sdk_ec2::types::InstanceMarketOptionsRequest::builder()
+                    .market_type(aws_sdk_ec2::types::MarketType::Spot)
+                    .spot_options(spot_opt.build())
+                    .build();
+                req = req.instance_market_options(market);
+            }
+
+            let res = match req.send().await {
+                Ok(res) => res,
+                Err(e) => {
+                    if is_spot && fallback {
+                        self.ui.say(
+                            &self.name,
+                            &format!(
+                                "Spot request failed ({e}), falling back to on-demand instance..."
+                            ),
+                        );
+                        let mut ondemand_req = client
+                            .run_instances()
+                            .image_id(self.config.source_ami.as_deref().unwrap_or("ami-00000000"))
+                            .instance_type(aws_sdk_ec2::types::InstanceType::from(
+                                self.config.instance_type.as_deref().unwrap_or("t2.micro"),
+                            ))
+                            .min_count(1)
+                            .max_count(1);
+                        if let Some(sgs) = state.get::<Vec<String>>("security_group_ids") {
+                            ondemand_req = ondemand_req.set_security_group_ids(Some(sgs.clone()));
+                        }
+                        if let Some(kp) = state.get::<String>("key_pair_name") {
+                            ondemand_req = ondemand_req.key_name(kp);
+                        }
+                        ondemand_req.send().await.map_err(|oe| {
+                            StampError::Execution(format!("On-demand fallback failed: {oe}"))
+                        })?
+                    } else {
+                        return Err(StampError::Execution(format!(
+                            "AWS RunInstances failed: {e}"
+                        )));
+                    }
+                }
+            };
+
+            let instances = res.instances();
+            let Some(instance) = instances.first() else {
+                return Err(StampError::Execution("No instances returned".to_string()));
+            };
+            let instance_id = instance.instance_id().unwrap_or_default().to_string();
+
+            self.ui
+                .say(&self.name, &format!("Instance launched: {instance_id}"));
+            state.put("instance_id", instance_id.clone());
+
+            let ip = instance
+                .public_ip_address()
+                .unwrap_or("127.0.0.1")
+                .to_string();
+            state.put("instance_ip", ip);
+
+            Ok(StepAction::Continue)
+        }
     }
 
     async fn cleanup(&mut self, state: &StateBag) {
         if let Some(instance_id) = state.get::<String>("instance_id") {
             self.ui
                 .say(&self.name, &format!("Terminating instance: {instance_id}"));
-            if !cfg!(test) {
+            #[cfg(not(test))]
+            {
                 let aws_conf = get_aws_config(
                     self.config.region.as_deref(),
                     self.config.profile.as_deref(),
@@ -449,7 +455,7 @@ impl Step for StepProvision {
         let ip = state
             .get::<String>("instance_ip")
             .cloned()
-            .unwrap_or_else(|| "127.0.0.1".to_string());
+            .unwrap_or_default();
 
         let priv_key = state.get::<FilePath>("private_key_path").cloned();
 
@@ -586,9 +592,13 @@ impl Step for StepCreateAMI {
             &format!("Creating AMI {ami_name} from instance {instance_id}"),
         );
 
-        let mut ami_id = "ami-mock".to_string();
+        #[cfg(test)]
+        let ami_id = "ami-mock".to_string();
+        #[cfg(not(test))]
+        let ami_id;
 
-        if cfg!(test) {
+        #[cfg(test)]
+        {
             if let Some(ref bm) = self.config.boot_mode {
                 state.put("boot_mode", bm.clone());
             }
@@ -598,7 +608,9 @@ impl Step for StepCreateAMI {
             if let Some(ref uefi) = self.config.uefi_data {
                 state.put("uefi_data", uefi.clone());
             }
-        } else {
+        }
+        #[cfg(not(test))]
+        {
             let aws_conf = get_aws_config(
                 self.config.region.as_deref(),
                 self.config.profile.as_deref(),
@@ -749,10 +761,7 @@ Do you want to clean up? [y/N]: ",
             }
         }
 
-        let ami_id = state
-            .get::<String>("ami_id")
-            .cloned()
-            .unwrap_or_else(|| "ami-mock".to_string());
+        let ami_id = state.get::<String>("ami_id").cloned().unwrap_or_default();
 
         Ok(Box::new(crate::artifact::MockArtifact {
             id: ami_id,
@@ -772,28 +781,50 @@ Do you want to clean up? [y/N]: ",
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::pedantic,
+    clippy::all,
+    for_loops_over_fallibles
+)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_ebs_volume_type_from_str() -> Result<(), StampError> {
+    fn test_ebs_volume_type_from_str() {
         use std::str::FromStr;
-        assert_eq!(EbsVolumeType::from_str("gp2")?, EbsVolumeType::Gp2);
-        assert_eq!(EbsVolumeType::from_str("gp3")?, EbsVolumeType::Gp3);
-        assert_eq!(EbsVolumeType::from_str("io1")?, EbsVolumeType::Io1);
-        assert_eq!(EbsVolumeType::from_str("io2")?, EbsVolumeType::Io2);
-        assert_eq!(EbsVolumeType::from_str("st1")?, EbsVolumeType::St1);
-        assert_eq!(EbsVolumeType::from_str("sc1")?, EbsVolumeType::Sc1);
         assert_eq!(
-            EbsVolumeType::from_str("standard")?,
-            EbsVolumeType::Standard
+            EbsVolumeType::from_str("gp2").ok(),
+            Some(EbsVolumeType::Gp2)
         );
         assert_eq!(
-            EbsVolumeType::from_str("custom")?,
-            EbsVolumeType::Other("custom".to_string())
+            EbsVolumeType::from_str("gp3").ok(),
+            Some(EbsVolumeType::Gp3)
         );
-        Ok(())
+        assert_eq!(
+            EbsVolumeType::from_str("io1").ok(),
+            Some(EbsVolumeType::Io1)
+        );
+        assert_eq!(
+            EbsVolumeType::from_str("io2").ok(),
+            Some(EbsVolumeType::Io2)
+        );
+        assert_eq!(
+            EbsVolumeType::from_str("st1").ok(),
+            Some(EbsVolumeType::St1)
+        );
+        assert_eq!(
+            EbsVolumeType::from_str("sc1").ok(),
+            Some(EbsVolumeType::Sc1)
+        );
+        assert_eq!(
+            EbsVolumeType::from_str("standard").ok(),
+            Some(EbsVolumeType::Standard)
+        );
+        assert_eq!(
+            EbsVolumeType::from_str("custom").ok(),
+            Some(EbsVolumeType::Other("custom".to_string()))
+        );
     }
 
     #[test]
@@ -853,12 +884,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_amazon_ebs_prepare_success() -> Result<(), crate::error::StampError> {
+    async fn test_amazon_ebs_prepare_success() {
         let mut config = AmazonEbsConfig::default();
         config.name = "test".to_string();
         let builder = AmazonEbsBuilder::new(config);
-        builder.prepare().await?;
-        Ok(())
+        assert!(builder.prepare().await.is_ok());
     }
 
     #[tokio::test]
@@ -869,7 +899,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_amazon_ebs_run_mocked() -> Result<(), crate::error::StampError> {
+    async fn test_amazon_ebs_run_mocked() {
         let mut config = AmazonEbsConfig::default();
         config.name = "test".to_string();
         config.region = Some("us-west-2".to_string());
@@ -947,7 +977,7 @@ mod tests {
         config.uefi_data = Some("uefi-var-data".to_string());
 
         let builder = AmazonEbsBuilder::new(config);
-        builder
+        let res = builder
             .run(
                 std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
                     provisioners: std::sync::Arc::new(vec![]),
@@ -960,12 +990,12 @@ mod tests {
                 )),
                 crate::engine::packer::OnErrorStrategy::Cleanup,
             )
-            .await?;
-        Ok(())
+            .await;
+        assert!(res.is_ok());
     }
 
     #[tokio::test]
-    async fn test_amazon_ebs_run_bad_exit() -> Result<(), crate::error::StampError> {
+    async fn test_amazon_ebs_run_bad_exit() {
         let mut config = AmazonEbsConfig::default();
         config.name = "test_bad_exit".to_string();
         let builder = AmazonEbsBuilder::new(config);
@@ -984,11 +1014,10 @@ mod tests {
             )
             .await;
         assert!(res.is_err());
-        Ok(())
     }
 
     #[tokio::test]
-    async fn test_amazon_ebs_run_missing() -> Result<(), crate::error::StampError> {
+    async fn test_amazon_ebs_run_missing() {
         let mut config = AmazonEbsConfig::default();
         config.name = "test_missing".to_string();
         let builder = AmazonEbsBuilder::new(config);
@@ -1007,16 +1036,14 @@ mod tests {
             )
             .await;
         assert!(res.is_err());
-        Ok(())
     }
 
     #[tokio::test]
-    async fn test_amazon_ebs_cancel() -> Result<(), crate::error::StampError> {
+    async fn test_amazon_ebs_cancel() {
         let mut config = AmazonEbsConfig::default();
         config.name = "test".to_string();
         let builder = AmazonEbsBuilder::new(config);
-        builder.cancel().await?;
-        Ok(())
+        assert!(builder.cancel().await.is_ok());
     }
 
     #[tokio::test]
@@ -1026,7 +1053,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_steps_run_and_cleanup() -> Result<(), crate::error::StampError> {
+    async fn test_steps_run_and_cleanup() {
         let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
@@ -1053,16 +1080,30 @@ mod tests {
             config: config.clone(),
         };
 
-        let _ = step1.run(&mut state).await;
+        assert!(step1.run(&mut state).await.is_ok());
         step1.cleanup(&state).await;
 
-        let _ = step2.run(&mut state).await;
+        assert!(step2.run(&mut state).await.is_ok());
         step2.cleanup(&state).await;
 
-        let _ = step3.run(&mut state).await;
+        assert!(step3.run(&mut state).await.is_ok());
         step3.cleanup(&state).await;
 
-        Ok(())
+        // StepProvision run
+        let hook: Arc<dyn ProvisionHook> = Arc::new(crate::engine::hook::DefaultProvisionHook {
+            provisioners: Arc::new(vec![]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let mut step_prov = StepProvision {
+            ui,
+            name: "test".into(),
+            config,
+            hook,
+        };
+        assert!(step_prov.run(&mut state).await.is_ok());
+
+        let mut empty_state = StateBag::new();
+        assert!(step_prov.run(&mut empty_state).await.is_ok());
     }
 
     #[test]

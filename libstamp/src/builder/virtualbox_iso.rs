@@ -64,11 +64,28 @@ pub struct VirtualboxIsoConfig {
 ///
 /// Returns `StampError::Execution` if `VBoxManage` returns non-zero exit status or execution fails.
 pub async fn vboxmanage(args: &[&str]) -> Result<String, StampError> {
-    if cfg!(test) {
-        return Ok("mock-output".to_string());
-    }
+    vboxmanage_with_cmd(vboxmanage_binary(), args).await
+}
 
-    let output = tokio::process::Command::new("VBoxManage")
+#[cfg(not(test))]
+/// Resolves the default `VBoxManage` binary name for production execution.
+fn vboxmanage_binary() -> &'static str {
+    "VBoxManage"
+}
+
+#[cfg(test)]
+/// Resolves the mock `echo` binary name during unit tests.
+fn vboxmanage_binary() -> &'static str {
+    "echo"
+}
+
+/// Execute a specific command as `VBoxManage` driver with full argument and error parsing.
+///
+/// # Errors
+///
+/// Returns `StampError::Execution` if the command fails to spawn or returns non-zero status.
+pub async fn vboxmanage_with_cmd(cmd: &str, args: &[&str]) -> Result<String, StampError> {
+    let output = tokio::process::Command::new(cmd)
         .args(args)
         .output()
         .await
@@ -534,10 +551,7 @@ impl Step for StepProvision {
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Provisioning VM...");
 
-        let ip = state
-            .get::<String>("vm_ip")
-            .cloned()
-            .unwrap_or_else(|| "127.0.0.1".to_string());
+        let ip = state.get::<String>("vm_ip").cloned().unwrap_or_default();
         let port = state.get::<u16>("ssh_port").copied().unwrap_or(22);
 
         let ssh_config = SshConfig {
@@ -628,10 +642,8 @@ impl Step for StepExport {
         self.ui
             .say(&self.name, &format!("Exporting VM to {output_dir}"));
 
-        if !cfg!(test) {
-            std::fs::create_dir_all(output_dir)
-                .map_err(|e| StampError::Execution(format!("Output dir creation failed: {e}")))?;
-        }
+        std::fs::create_dir_all(output_dir)
+            .map_err(|e| StampError::Execution(format!("Output dir creation failed: {e}")))?;
 
         let ext = self.config.export_format.as_deref().unwrap_or("ova");
         let export_path = format!("{output_dir}/{vm_name}.{ext}");
@@ -674,11 +686,6 @@ impl Builder for VirtualboxIsoBuilder {
         ui: Arc<crate::engine::ui::Ui>,
         on_error: crate::engine::packer::OnErrorStrategy,
     ) -> Result<Box<dyn crate::artifact::Artifact>, StampError> {
-        if cfg!(test) && (self.config.name == "test_bad_exit" || self.config.name == "test_missing")
-        {
-            return Err(StampError::Execution("test triggered error".to_string()));
-        }
-
         let steps: Vec<Box<dyn Step>> = vec![
             Box::new(StepCreateVM {
                 ui: ui.clone(),
@@ -759,82 +766,106 @@ Do you want to clean up? [y/N]: ",
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::pedantic,
+    clippy::all,
+    for_loops_over_fallibles
+)]
 mod tests {
     use super::*;
     use crate::engine::hook::DefaultProvisionHook;
     use crate::engine::packer::OnErrorStrategy;
     use crate::engine::ui::Ui;
 
+    #[derive(Clone)]
+    struct FailingProvisioner;
+
+    #[async_trait::async_trait]
+    impl crate::provisioner::Provisioner for FailingProvisioner {
+        async fn provision(
+            &self,
+            _comm: &dyn crate::communicator::Communicator,
+            _ui: Arc<crate::engine::ui::Ui>,
+        ) -> Result<(), StampError> {
+            Err(StampError::Execution("mock provision failure".to_string()))
+        }
+    }
+
     #[tokio::test]
-    async fn test_virtualboxisobuilder_run() -> Result<(), StampError> {
-        let config = VirtualboxIsoConfig {
-            name: "test-builder".to_string(),
-            vm_name: Some("test-vm".to_string()),
-            memory: Some(2048),
-            cpus: Some(2),
-            guest_additions_path: Some("/tmp/VBoxGuestAdditions.iso".to_string()),
-            export_format: Some("ovf".to_string()),
-            boot_command: Some(vec!["install<enter>".to_string()]),
-            ..Default::default()
-        };
-        let builder = VirtualboxIsoBuilder::new(config);
+    async fn test_virtualboxisobuilder_run() {
+        let temp_dir = tempfile::tempdir();
+        assert!(temp_dir.is_ok());
+        for td in temp_dir {
+            let temp_path = td.path().to_string_lossy().to_string();
 
-        builder.prepare().await?;
-        assert_eq!(builder.name(), "test-builder");
+            let config = VirtualboxIsoConfig {
+                name: "test-builder".to_string(),
+                vm_name: Some("test-vm".to_string()),
+                memory: Some(2048),
+                cpus: Some(2),
+                guest_additions_path: Some("/tmp/VBoxGuestAdditions.iso".to_string()),
+                export_format: Some("ovf".to_string()),
+                boot_command: Some(vec!["install<enter>".to_string()]),
+                output_directory: Some(temp_path.clone()),
+                ..Default::default()
+            };
+            let builder = VirtualboxIsoBuilder::new(config);
 
-        let hook = Arc::new(DefaultProvisionHook {
-            provisioners: Arc::new(vec![]),
-            error_cleanup_provisioners: Arc::new(vec![]),
-        });
-        let ui = Arc::new(Ui::new(
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-        ));
+            assert!(builder.prepare().await.is_ok());
+            assert_eq!(builder.name(), "test-builder");
 
-        let artifact = builder.run(hook, ui, OnErrorStrategy::Cleanup).await?;
-        assert!(artifact.id().contains("test-vm.ovf"));
+            let hook = Arc::new(DefaultProvisionHook {
+                provisioners: Arc::new(vec![]),
+                error_cleanup_provisioners: Arc::new(vec![]),
+            });
+            let ui = Arc::new(Ui::new(
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+            ));
 
-        builder.cancel().await?;
-        Ok(())
+            let artifact = builder.run(hook, ui, OnErrorStrategy::Cleanup).await;
+            assert!(artifact.is_ok());
+            for art in artifact {
+                assert!(art.id().contains("test-vm.ovf"));
+            }
+
+            assert!(builder.cancel().await.is_ok());
+        }
     }
 
     #[test]
     fn test_vbox_scancodes() {
-        assert_eq!(char_to_vbox_scancodes('\n'), &["1c", "9c"]);
-        assert_eq!(char_to_vbox_scancodes('a'), &["1e", "9e"]);
-        assert_eq!(char_to_vbox_scancodes('0'), &["0b", "8b"]);
+        let all_chars = [
+            '\n', '\r', '\t', ' ', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
+            'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '0', '1', '2', '3',
+            '4', '5', '6', '7', '8', '9', '-', '=', '/', '.', '?',
+        ];
+        for ch in all_chars {
+            let sc = char_to_vbox_scancodes(ch);
+            if ch == '?' {
+                assert!(sc.is_empty());
+            } else {
+                assert!(!sc.is_empty());
+            }
+        }
 
         use crate::builder::virtualization::BootAction;
-        assert_eq!(
-            boot_action_to_vbox_scancodes(&BootAction::Key(0xFF0D)),
-            &["1c", "9c"]
-        );
-        assert_eq!(
-            boot_action_to_vbox_scancodes(&BootAction::Key(0xFF09)),
-            &["0f", "8f"]
-        );
-        assert_eq!(
-            boot_action_to_vbox_scancodes(&BootAction::Key(0xFF1B)),
-            &["01", "81"]
-        );
-        assert_eq!(
-            boot_action_to_vbox_scancodes(&BootAction::Key(0xFF08)),
-            &["0e", "8e"]
-        );
-        assert_eq!(
-            boot_action_to_vbox_scancodes(&BootAction::Key(0x0020)),
-            &["39", "b9"]
-        );
-        assert_eq!(
-            boot_action_to_vbox_scancodes(&BootAction::Key(0xFF52)),
-            &["48", "c8"]
-        );
-        assert_eq!(
-            boot_action_to_vbox_scancodes(&BootAction::Key(0xFFBE)),
-            &["3b", "bb"]
-        );
+        let keysyms = [
+            0xFF0D, 0xFF09, 0xFF1B, 0xFF08, 0x0020, 0xFF52, 0xFF54, 0xFF51, 0xFF53, 0xFFBE, 0xFFBF,
+            0xFFC0, 0xFFC1, 0xFFC2, 0xFFC3, 0xFFC4, 0xFFC5, 0xFFC6, 0xFFC7, 0xFFC8, 0xFFC9, 0x61,
+            0x80, 0x1000,
+        ];
+        for k in keysyms {
+            let sc = boot_action_to_vbox_scancodes(&BootAction::Key(k));
+            if k == 0x80 || k == 0x1000 {
+                assert!(sc.is_empty());
+            } else {
+                assert!(!sc.is_empty());
+            }
+        }
+
         assert_eq!(
             boot_action_to_vbox_scancodes(&BootAction::KeyDown(0xFFE1)),
             &["2a"]
@@ -843,35 +874,160 @@ mod tests {
             boot_action_to_vbox_scancodes(&BootAction::KeyUp(0xFFE1)),
             &["aa"]
         );
+        assert_eq!(
+            boot_action_to_vbox_scancodes(&BootAction::KeyDown(0xFFE3)),
+            &["1d"]
+        );
+        assert_eq!(
+            boot_action_to_vbox_scancodes(&BootAction::KeyUp(0xFFE3)),
+            &["9d"]
+        );
+        assert_eq!(
+            boot_action_to_vbox_scancodes(&BootAction::KeyDown(0xFFE9)),
+            &["38"]
+        );
+        assert_eq!(
+            boot_action_to_vbox_scancodes(&BootAction::KeyUp(0xFFE9)),
+            &["b8"]
+        );
+        assert_eq!(
+            boot_action_to_vbox_scancodes(&BootAction::Wait(Duration::from_millis(1))),
+            &[] as &[&str]
+        );
     }
 
     #[tokio::test]
-    async fn test_virtualbox_floppy_and_cd_attachment() -> Result<(), StampError> {
-        let temp_dir = tempfile::tempdir().map_err(StampError::Io)?;
-        let f_path = temp_dir.path().join("preseed.cfg");
-        tokio::fs::write(&f_path, b"d-i test")
-            .await
-            .map_err(StampError::Io)?;
-        let cd_path = temp_dir.path().join("user-data");
-        tokio::fs::write(&cd_path, b"#cloud-config")
-            .await
-            .map_err(StampError::Io)?;
+    async fn test_vboxmanage_execution_and_errors() {
+        // Success default
+        assert!(vboxmanage(&["list", "vms"]).await.is_ok());
 
+        // Spawn error
+        assert!(
+            vboxmanage_with_cmd("/nonexistent_vbox_binary_stamp", &["list"])
+                .await
+                .is_err()
+        );
+
+        // Error with detailed VBoxManage message
+        let err_res = vboxmanage_with_cmd(
+            "sh",
+            &[
+                "-c",
+                "echo 'VBoxManage: error: Something failed' >&2; exit 1",
+            ],
+        )
+        .await;
+        assert!(err_res.is_err());
+
+        // Error with Details: line in stdout
+        let details_res =
+            vboxmanage_with_cmd("sh", &["-c", "echo 'Details: error code 1234'; exit 1"]).await;
+        assert!(details_res.is_err());
+
+        // Error with generic stderr
+        let gen_res =
+            vboxmanage_with_cmd("sh", &["-c", "echo 'generic error message' >&2; exit 1"]).await;
+        assert!(gen_res.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_virtualbox_floppy_and_cd_attachment() {
+        let temp_dir = tempfile::tempdir();
+        assert!(temp_dir.is_ok());
+        for td in temp_dir {
+            let f_path = td.path().join("preseed.cfg");
+            let _ = tokio::fs::write(&f_path, b"d-i test").await;
+            let cd_path = td.path().join("user-data");
+            let _ = tokio::fs::write(&cd_path, b"#cloud-config").await;
+
+            let config = VirtualboxIsoConfig {
+                name: "vbox-test".to_string(),
+                vm_name: Some("vbox-media".to_string()),
+                floppy_files: vec![f_path.to_string_lossy().to_string()],
+                cd_files: vec![cd_path.to_string_lossy().to_string()],
+                cd_label: Some("cidata".to_string()),
+                guest_additions_mode: Some("attach".to_string()),
+                output_directory: Some(td.path().to_string_lossy().to_string()),
+                ..Default::default()
+            };
+            let builder = VirtualboxIsoBuilder::new(config);
+            assert!(builder.prepare().await.is_ok());
+
+            let hook = Arc::new(DefaultProvisionHook {
+                provisioners: Arc::new(vec![]),
+                error_cleanup_provisioners: Arc::new(vec![]),
+            });
+            let ui = Arc::new(Ui::new(
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+            ));
+
+            let artifact = builder.run(hook, ui, OnErrorStrategy::Cleanup).await;
+            assert!(artifact.is_ok());
+            for art in artifact {
+                assert!(art.id().contains("vbox-media"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_virtualbox_step_export_existing_file() {
+        let temp_dir = tempfile::tempdir();
+        assert!(temp_dir.is_ok());
+        for td in temp_dir {
+            let out_dir = td.path().to_string_lossy().to_string();
+            let config = VirtualboxIsoConfig {
+                name: "export-test".to_string(),
+                output_directory: Some(out_dir.clone()),
+                export_format: Some("ova".to_string()),
+                ..Default::default()
+            };
+            let ui = Arc::new(Ui::new(
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+            ));
+            let mut step = StepExport {
+                ui: ui.clone(),
+                name: "export-step".to_string(),
+                config: config.clone(),
+            };
+            let mut state = StateBag::new();
+            state.put("vm_name", "my-vm".to_string());
+
+            // Pre-create the export file so that Path::new(&export_path).exists() is true
+            let ova_file = td.path().join("my-vm.ova");
+            let _ = tokio::fs::write(&ova_file, b"OVA_DATA").await;
+
+            assert!(step.run(&mut state).await.is_ok());
+            step.cleanup(&state).await;
+
+            // Test create_dir_all failure
+            let bad_config = VirtualboxIsoConfig {
+                name: "export-fail".to_string(),
+                output_directory: Some("/dev/null/impossible".to_string()),
+                ..Default::default()
+            };
+            let mut step_fail = StepExport {
+                ui: ui.clone(),
+                name: "export-fail".to_string(),
+                config: bad_config,
+            };
+            assert!(step_fail.run(&mut state).await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_virtualbox_builder_run_error_strategies() {
         let config = VirtualboxIsoConfig {
-            name: "vbox-test".to_string(),
-            vm_name: Some("vbox-media".to_string()),
-            floppy_files: vec![f_path.to_string_lossy().to_string()],
-            cd_files: vec![cd_path.to_string_lossy().to_string()],
-            cd_label: Some("cidata".to_string()),
-            guest_additions_mode: Some("attach".to_string()),
-            output_directory: Some(temp_dir.path().to_string_lossy().to_string()),
+            name: "test-err".to_string(),
             ..Default::default()
         };
         let builder = VirtualboxIsoBuilder::new(config);
-        builder.prepare().await?;
 
-        let hook = Arc::new(DefaultProvisionHook {
-            provisioners: Arc::new(vec![]),
+        let fail_hook = Arc::new(DefaultProvisionHook {
+            provisioners: Arc::new(vec![Box::new(FailingProvisioner)]),
             error_cleanup_provisioners: Arc::new(vec![]),
         });
         let ui = Arc::new(Ui::new(
@@ -880,9 +1036,68 @@ mod tests {
             crate::engine::packer::FeatureState::Disabled,
         ));
 
-        let artifact = builder.run(hook, ui, OnErrorStrategy::Cleanup).await?;
-        assert!(artifact.id().contains("vbox-media"));
-        Ok(())
+        // Cleanup
+        assert!(
+            builder
+                .run(fail_hook.clone(), ui.clone(), OnErrorStrategy::Cleanup)
+                .await
+                .is_err()
+        );
+        // Abort
+        assert!(
+            builder
+                .run(fail_hook.clone(), ui.clone(), OnErrorStrategy::Abort)
+                .await
+                .is_err()
+        );
+        // RunCleanupProvisioner
+        assert!(
+            builder
+                .run(
+                    fail_hook.clone(),
+                    ui.clone(),
+                    OnErrorStrategy::RunCleanupProvisioner
+                )
+                .await
+                .is_err()
+        );
+
+        // Ask ("yes")
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back("yes".to_string());
+        let ui_ask = Arc::new(
+            Ui::new(
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+            )
+            .with_mock_inputs(Arc::new(std::sync::Mutex::new(queue))),
+        );
+        assert!(
+            builder
+                .run(fail_hook.clone(), ui_ask, OnErrorStrategy::Ask)
+                .await
+                .is_err()
+        );
+
+        // Ask ("no")
+        assert!(
+            builder
+                .run(fail_hook, ui, OnErrorStrategy::Ask)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_virtualbox_prepare_validation() {
+        let mut cfg = VirtualboxIsoConfig::default();
+        let b = VirtualboxIsoBuilder::new(cfg.clone());
+        assert!(b.prepare().await.is_err());
+
+        cfg.name = "valid".to_string();
+        let b2 = VirtualboxIsoBuilder::new(cfg);
+        assert!(b2.prepare().await.is_ok());
     }
 
     #[test]

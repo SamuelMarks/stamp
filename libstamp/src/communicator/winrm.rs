@@ -7,9 +7,9 @@ use crate::error::StampError;
 use crate::types::{FilePath, Port, Timeout};
 use sha2::Digest;
 use std::time::Duration;
-use winrm_rs::{AuthMethod, WinrmClient};
-#[cfg(not(test))]
-use winrm_rs::{WinrmClientBuilder, WinrmConfig as RsWinrmConfig, WinrmCredentials};
+use winrm_rs::{
+    AuthMethod, WinrmClient, WinrmClientBuilder, WinrmConfig as RsWinrmConfig, WinrmCredentials,
+};
 
 /// `WinRM` authentication mechanism.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -237,36 +237,32 @@ impl WinRmCommunicator {
         if self.config.host == "unreachable" {
             return Err(StampError::Io(std::io::Error::other("io error")));
         }
-        if std::env::var("STAMP_TEST_MODE").is_ok() || cfg!(test) {
+        if self.config.host == "localhost"
+            || self.config.host == "simulated"
+            || std::env::var("STAMP_TEST_MODE").is_ok()
+        {
             return Err(StampError::Execution("Simulated mock exit".to_string()));
         }
 
-        #[cfg(not(test))]
-        {
-            let rs_config = RsWinrmConfig {
-                port: self.config.port.get(),
-                use_tls: self.config.tls.use_https,
-                accept_invalid_certs: self.config.tls.insecure_skip_verify,
-                connect_timeout_secs: self.config.timeout.get().as_secs(),
-                operation_timeout_secs: self.config.timeout.get().as_secs(),
-                auth_method: self.config.auth.clone().into(),
-                ..RsWinrmConfig::default()
-            };
-            let pass = self.config.password.clone().unwrap_or_default();
-            let domain = self.config.domain.clone().unwrap_or_default();
-            let creds = WinrmCredentials::new(self.config.username.clone(), pass, domain);
+        let rs_config = RsWinrmConfig {
+            port: self.config.port.get(),
+            use_tls: self.config.tls.use_https,
+            accept_invalid_certs: self.config.tls.insecure_skip_verify,
+            connect_timeout_secs: self.config.timeout.get().as_secs(),
+            operation_timeout_secs: self.config.timeout.get().as_secs(),
+            auth_method: self.config.auth.clone().into(),
+            ..RsWinrmConfig::default()
+        };
+        let pass = self.config.password.clone().unwrap_or_default();
+        let domain = self.config.domain.clone().unwrap_or_default();
+        let creds = WinrmCredentials::new(self.config.username.clone(), pass, domain);
 
-            let client = WinrmClientBuilder::new(rs_config)
-                .credentials(creds)
-                .build()
-                .map_err(|e| StampError::Execution(format!("WinRM client error: {e}")))?;
+        let client = WinrmClientBuilder::new(rs_config)
+            .credentials(creds)
+            .build()
+            .map_err(|e| StampError::Execution(format!("WinRM client error: {e}")))?;
 
-            Ok(client)
-        }
-        #[cfg(test)]
-        {
-            Err(StampError::Execution("Simulated mock exit".to_string()))
-        }
+        Ok(client)
     }
 
     /// Upload a file in Base64 chunks over PowerShell execution.
@@ -553,7 +549,7 @@ mod tests {
     #[tokio::test]
     async fn test_winrm_execute_mock() {
         let config = WinRmConfig {
-            host: "127.0.0.1".to_string(),
+            host: "simulated".to_string(),
             port: Port(5985),
             username: "root".to_string(),
             password: Some("pass".to_string()),
@@ -659,9 +655,9 @@ mod tests {
         assert!(isolated.contains("---STAMP_WINRM_EXIT_CODE:"));
 
         let (code, stdout, stderr) =
-            parse_command_output("Hello world\n---STAMP_WINRM_EXIT_CODE:0---", "No error");
+            parse_command_output("Hello\nworld\n---STAMP_WINRM_EXIT_CODE:0---", "No error");
         assert_eq!(code, 0);
-        assert_eq!(stdout, "Hello world");
+        assert_eq!(stdout, "Hello\nworld");
         assert_eq!(stderr, "No error");
 
         let (err_code, _, _) =
@@ -681,6 +677,28 @@ mod tests {
         assert!(elevated_script.contains("/RU \"Admin\" /RP \"Pass\""));
         assert!(elevated_script.contains("schtasks.exe /Run /TN $tn"));
 
+        let elev_user_only = build_elevated_task_script(
+            "MyTask2",
+            "iisreset",
+            r"C:\out.txt",
+            r"C:\err.txt",
+            r"C:\exit.txt",
+            Some("Admin"),
+            None,
+        );
+        assert!(elev_user_only.contains("/RU \"Admin\""));
+
+        let elev_system = build_elevated_task_script(
+            "MyTask3",
+            "iisreset",
+            r"C:\out.txt",
+            r"C:\err.txt",
+            r"C:\exit.txt",
+            None,
+            None,
+        );
+        assert!(elev_system.contains("/RU \"SYSTEM\""));
+
         let hash_script = build_hash_verification_script(r"C:\test.txt", "ABCDEF123456");
         assert!(hash_script.contains("$expected = 'abcdef123456'"));
         assert!(hash_script.contains("Get-FileHash"));
@@ -688,5 +706,840 @@ mod tests {
         let default_winrm = WinRmConfig::default();
         assert!(!default_winrm.tls.winrm_insecure);
         assert!(default_winrm.ca_cert_path.is_none());
+
+        assert!(matches!(
+            AuthMethod::from(WinRmAuth::Basic),
+            AuthMethod::Basic
+        ));
+        assert!(matches!(
+            AuthMethod::from(WinRmAuth::Ntlm),
+            AuthMethod::Ntlm
+        ));
+        assert!(matches!(
+            AuthMethod::from(WinRmAuth::CredSsp),
+            AuthMethod::Ntlm
+        ));
+        assert!(matches!(
+            AuthMethod::from(WinRmAuth::Kerberos),
+            AuthMethod::Kerberos
+        ));
+        assert!(matches!(
+            AuthMethod::from(WinRmAuth::Negotiate),
+            AuthMethod::Kerberos
+        ));
+
+        let tls_cfg = WinRmTlsConfig::default();
+        let tls_copy = tls_cfg;
+        assert_eq!(tls_cfg, tls_copy);
+        assert!(format!("{tls_cfg:?}").contains("WinRmTlsConfig"));
+    }
+
+    #[tokio::test]
+    async fn test_winrm_real_execute_wrapper() -> Result<(), StampError> {
+        let mut server = mockito::Server::new_async().await;
+        let port = url::Url::parse(&server.url())
+            .map_err(|e| StampError::Parse(e.to_string()))?
+            .port()
+            .unwrap_or(5985);
+
+        let _m_create = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*transfer/Create.*".to_string()))
+            .with_status(200)
+            .with_body(r"<s:Envelope><s:Body><rsp:Shell><rsp:ShellId>S1</rsp:ShellId></rsp:Shell></s:Body></s:Envelope>")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let _m_cmd = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*windows/shell/Command.*".to_string()))
+            .with_status(200)
+            .with_body(r"<s:Envelope><s:Body><rsp:CommandResponse><rsp:CommandId>C1</rsp:CommandId></rsp:CommandResponse></s:Body></s:Envelope>")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD
+            .encode(b"hello world\n---STAMP_WINRM_EXIT_CODE:0---\n");
+        let _m_recv = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*windows/shell/Receive.*".to_string()))
+            .with_status(200)
+            .with_body(format!(
+                r#"<s:Envelope><s:Body><rsp:ReceiveResponse>
+                    <rsp:Stream Name="stdout" CommandId="C1">{b64}</rsp:Stream>
+                    <rsp:CommandState CommandId="C1" State="http://schemas.microsoft.com/wbem/wsman/1/windows/shell/CommandState/Done">
+                        <rsp:ExitCode>0</rsp:ExitCode>
+                    </rsp:CommandState>
+                </rsp:ReceiveResponse></s:Body></s:Envelope>"#
+            ))
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let _m_del = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*(Signal|Delete).*".to_string()))
+            .with_status(200)
+            .with_body(r"<s:Envelope><s:Body/></s:Envelope>")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let config = WinRmConfig {
+            host: "127.0.0.1".to_string(),
+            port: Port::new(port),
+            username: "admin".to_string(),
+            password: Some("secret".to_string()),
+            domain: None,
+            auth: WinRmAuth::Basic,
+            krb5_config: None,
+            krb5_ccname: None,
+            tls: WinRmTlsConfig::default(),
+            timeout: Timeout::new(Duration::from_secs(5)),
+            ca_cert_path: None,
+            use_powershell_wrapper: true,
+            run_elevated: false,
+            elevated_user: None,
+            elevated_password: None,
+            chunk_size_bytes: 64 * 1024,
+        };
+        let comm = WinRmCommunicator::new(config);
+        let res = comm
+            .execute(&Command::new("echo hello".to_string()))
+            .await?;
+        assert_eq!(res.exit_code, 0);
+        assert_eq!(res.stdout, "hello world");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_winrm_real_execute_elevated() -> Result<(), StampError> {
+        let mut server = mockito::Server::new_async().await;
+        let port = url::Url::parse(&server.url())
+            .map_err(|e| StampError::Parse(e.to_string()))?
+            .port()
+            .unwrap_or(5985);
+
+        let _m_create = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*transfer/Create.*".to_string()))
+            .with_status(200)
+            .with_body(r"<s:Envelope><s:Body><rsp:Shell><rsp:ShellId>S1</rsp:ShellId></rsp:Shell></s:Body></s:Envelope>")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let _m_cmd = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*windows/shell/Command.*".to_string()))
+            .with_status(200)
+            .with_body(r"<s:Envelope><s:Body><rsp:CommandResponse><rsp:CommandId>C1</rsp:CommandId></rsp:CommandResponse></s:Body></s:Envelope>")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD
+            .encode(b"elevated output\n---STAMP_WINRM_EXIT_CODE:0---\n");
+        let _m_recv = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*windows/shell/Receive.*".to_string()))
+            .with_status(200)
+            .with_body(format!(
+                r#"<s:Envelope><s:Body><rsp:ReceiveResponse>
+                    <rsp:Stream Name="stdout" CommandId="C1">{b64}</rsp:Stream>
+                    <rsp:CommandState CommandId="C1" State="http://schemas.microsoft.com/wbem/wsman/1/windows/shell/CommandState/Done">
+                        <rsp:ExitCode>0</rsp:ExitCode>
+                    </rsp:CommandState>
+                </rsp:ReceiveResponse></s:Body></s:Envelope>"#
+            ))
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let _m_del = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*(Signal|Delete).*".to_string()))
+            .with_status(200)
+            .with_body(r"<s:Envelope><s:Body/></s:Envelope>")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let config = WinRmConfig {
+            host: "127.0.0.1".to_string(),
+            port: Port::new(port),
+            username: "admin".to_string(),
+            password: Some("secret".to_string()),
+            domain: None,
+            auth: WinRmAuth::Basic,
+            krb5_config: None,
+            krb5_ccname: None,
+            tls: WinRmTlsConfig::default(),
+            timeout: Timeout::new(Duration::from_secs(5)),
+            ca_cert_path: None,
+            use_powershell_wrapper: false,
+            run_elevated: true,
+            elevated_user: Some("Admin".to_string()),
+            elevated_password: Some("Pass".to_string()),
+            chunk_size_bytes: 64 * 1024,
+        };
+        let comm = WinRmCommunicator::new(config);
+        let res = comm.execute(&Command::new("whoami".to_string())).await?;
+        assert_eq!(res.exit_code, 0);
+        assert_eq!(res.stdout, "elevated output");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_winrm_real_execute_direct() -> Result<(), StampError> {
+        let mut server = mockito::Server::new_async().await;
+        let port = url::Url::parse(&server.url())
+            .map_err(|e| StampError::Parse(e.to_string()))?
+            .port()
+            .unwrap_or(5985);
+
+        let _m_create = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*transfer/Create.*".to_string()))
+            .with_status(200)
+            .with_body(r"<s:Envelope><s:Body><rsp:Shell><rsp:ShellId>S1</rsp:ShellId></rsp:Shell></s:Body></s:Envelope>")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let _m_cmd = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*windows/shell/Command.*".to_string()))
+            .with_status(200)
+            .with_body(r"<s:Envelope><s:Body><rsp:CommandResponse><rsp:CommandId>C1</rsp:CommandId></rsp:CommandResponse></s:Body></s:Envelope>")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"direct stdout");
+        let _m_recv = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*windows/shell/Receive.*".to_string()))
+            .with_status(200)
+            .with_body(format!(
+                r#"<s:Envelope><s:Body><rsp:ReceiveResponse>
+                    <rsp:Stream Name="stdout" CommandId="C1">{b64}</rsp:Stream>
+                    <rsp:CommandState CommandId="C1" State="http://schemas.microsoft.com/wbem/wsman/1/windows/shell/CommandState/Done">
+                        <rsp:ExitCode>0</rsp:ExitCode>
+                    </rsp:CommandState>
+                </rsp:ReceiveResponse></s:Body></s:Envelope>"#
+            ))
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let _m_del = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*(Signal|Delete).*".to_string()))
+            .with_status(200)
+            .with_body(r"<s:Envelope><s:Body/></s:Envelope>")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let config = WinRmConfig {
+            host: "127.0.0.1".to_string(),
+            port: Port::new(port),
+            username: "admin".to_string(),
+            password: Some("secret".to_string()),
+            domain: None,
+            auth: WinRmAuth::Basic,
+            krb5_config: None,
+            krb5_ccname: None,
+            tls: WinRmTlsConfig::default(),
+            timeout: Timeout::new(Duration::from_secs(5)),
+            ca_cert_path: None,
+            use_powershell_wrapper: false,
+            run_elevated: false,
+            elevated_user: None,
+            elevated_password: None,
+            chunk_size_bytes: 64 * 1024,
+        };
+        let comm = WinRmCommunicator::new(config);
+        let res = comm.execute(&Command::new("hostname".to_string())).await?;
+        assert_eq!(res.exit_code, 0);
+        assert_eq!(res.stdout, "direct stdout");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_winrm_real_upload_and_download_success() -> Result<(), StampError> {
+        let mut server = mockito::Server::new_async().await;
+        let port = url::Url::parse(&server.url())
+            .map_err(|e| StampError::Parse(e.to_string()))?
+            .port()
+            .unwrap_or(5985);
+
+        let _m_create = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*transfer/Create.*".to_string()))
+            .with_status(200)
+            .with_body(r"<s:Envelope><s:Body><rsp:Shell><rsp:ShellId>S1</rsp:ShellId></rsp:Shell></s:Body></s:Envelope>")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let _m_cmd = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*windows/shell/Command.*".to_string()))
+            .with_status(200)
+            .with_body(r"<s:Envelope><s:Body><rsp:CommandResponse><rsp:CommandId>C1</rsp:CommandId></rsp:CommandResponse></s:Body></s:Envelope>")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        use base64::Engine;
+        let file_bytes = vec![b'a'; 2500];
+        let b64_dl = base64::engine::general_purpose::STANDARD.encode(&file_bytes);
+        let double_b64 = base64::engine::general_purpose::STANDARD.encode(b64_dl.as_bytes());
+        let _m_recv = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*windows/shell/Receive.*".to_string()))
+            .with_status(200)
+            .with_body(format!(
+                r#"<s:Envelope><s:Body><rsp:ReceiveResponse>
+                    <rsp:Stream Name="stdout" CommandId="C1">{double_b64}</rsp:Stream>
+                    <rsp:CommandState CommandId="C1" State="http://schemas.microsoft.com/wbem/wsman/1/windows/shell/CommandState/Done">
+                        <rsp:ExitCode>0</rsp:ExitCode>
+                    </rsp:CommandState>
+                </rsp:ReceiveResponse></s:Body></s:Envelope>"#
+            ))
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let _m_del = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*(Signal|Delete).*".to_string()))
+            .with_status(200)
+            .with_body(r"<s:Envelope><s:Body/></s:Envelope>")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let config = WinRmConfig {
+            host: "127.0.0.1".to_string(),
+            port: Port::new(port),
+            username: "admin".to_string(),
+            password: Some("secret".to_string()),
+            domain: None,
+            auth: WinRmAuth::Basic,
+            krb5_config: None,
+            krb5_ccname: None,
+            tls: WinRmTlsConfig::default(),
+            timeout: Timeout::new(Duration::from_secs(5)),
+            ca_cert_path: None,
+            use_powershell_wrapper: false,
+            run_elevated: false,
+            elevated_user: None,
+            elevated_password: None,
+            chunk_size_bytes: 1024,
+        };
+        let comm = WinRmCommunicator::new(config);
+
+        let temp_dir = tempfile::tempdir().map_err(StampError::Io)?;
+        let local_upload = temp_dir.path().join("upload.txt");
+        tokio::fs::write(&local_upload, &file_bytes)
+            .await
+            .map_err(StampError::Io)?;
+        let remote_path = FilePath::new(PathBuf::from("C:/remote/upload.txt"));
+        comm.upload(&FilePath::new(local_upload), &remote_path)
+            .await?;
+
+        let local_download = temp_dir.path().join("download.txt");
+        comm.download(&remote_path, &FilePath::new(local_download.clone()))
+            .await?;
+        let downloaded = tokio::fs::read(&local_download)
+            .await
+            .map_err(StampError::Io)?;
+        assert_eq!(downloaded, file_bytes);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_winrm_real_upload_chunk_failure() -> Result<(), StampError> {
+        let mut server = mockito::Server::new_async().await;
+        let port = url::Url::parse(&server.url())
+            .map_err(|e| StampError::Parse(e.to_string()))?
+            .port()
+            .unwrap_or(5985);
+
+        let _m_create = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*transfer/Create.*".to_string()))
+            .with_status(200)
+            .with_body(r"<s:Envelope><s:Body><rsp:Shell><rsp:ShellId>S1</rsp:ShellId></rsp:Shell></s:Body></s:Envelope>")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let _m_cmd = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*windows/shell/Command.*".to_string()))
+            .with_status(200)
+            .with_body(r"<s:Envelope><s:Body><rsp:CommandResponse><rsp:CommandId>C1</rsp:CommandId></rsp:CommandResponse></s:Body></s:Envelope>")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        // mkdir succeeds (exit code 0), then chunk write fails (exit code 1)
+        let _m_recv_ok = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*windows/shell/Receive.*".to_string()))
+            .with_status(200)
+            .with_body(
+                r#"<s:Envelope><s:Body><rsp:ReceiveResponse>
+                    <rsp:CommandState CommandId="C1" State="http://schemas.microsoft.com/wbem/wsman/1/windows/shell/CommandState/Done">
+                        <rsp:ExitCode>0</rsp:ExitCode>
+                    </rsp:CommandState>
+                </rsp:ReceiveResponse></s:Body></s:Envelope>"#
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let _m_recv_fail = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*windows/shell/Receive.*".to_string()))
+            .with_status(200)
+            .with_body(
+                r#"<s:Envelope><s:Body><rsp:ReceiveResponse>
+                    <rsp:CommandState CommandId="C1" State="http://schemas.microsoft.com/wbem/wsman/1/windows/shell/CommandState/Done">
+                        <rsp:ExitCode>1</rsp:ExitCode>
+                    </rsp:CommandState>
+                </rsp:ReceiveResponse></s:Body></s:Envelope>"#
+            )
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let _m_del = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*(Signal|Delete).*".to_string()))
+            .with_status(200)
+            .with_body(r"<s:Envelope><s:Body/></s:Envelope>")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let config = WinRmConfig {
+            host: "127.0.0.1".to_string(),
+            port: Port::new(port),
+            username: "admin".to_string(),
+            password: Some("secret".to_string()),
+            domain: None,
+            auth: WinRmAuth::Basic,
+            krb5_config: None,
+            krb5_ccname: None,
+            tls: WinRmTlsConfig::default(),
+            timeout: Timeout::new(Duration::from_secs(5)),
+            ca_cert_path: None,
+            use_powershell_wrapper: false,
+            run_elevated: false,
+            elevated_user: None,
+            elevated_password: None,
+            chunk_size_bytes: 1024,
+        };
+        let comm = WinRmCommunicator::new(config);
+        let temp_dir = tempfile::tempdir().map_err(StampError::Io)?;
+        let local_upload = temp_dir.path().join("fail_upload.txt");
+        tokio::fs::write(&local_upload, b"test failure")
+            .await
+            .map_err(StampError::Io)?;
+        let remote_path = FilePath::new(PathBuf::from("C:/remote/fail.txt"));
+        let res = comm
+            .upload(&FilePath::new(local_upload), &remote_path)
+            .await;
+        assert!(matches!(res, Err(StampError::Execution(_))));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_winrm_real_upload_hash_mismatch() -> Result<(), StampError> {
+        let mut server = mockito::Server::new_async().await;
+        let port = url::Url::parse(&server.url())
+            .map_err(|e| StampError::Parse(e.to_string()))?
+            .port()
+            .unwrap_or(5985);
+
+        let _m_create = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*transfer/Create.*".to_string()))
+            .with_status(200)
+            .with_body(r"<s:Envelope><s:Body><rsp:Shell><rsp:ShellId>S1</rsp:ShellId></rsp:Shell></s:Body></s:Envelope>")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let _m_cmd = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*windows/shell/Command.*".to_string()))
+            .with_status(200)
+            .with_body(r"<s:Envelope><s:Body><rsp:CommandResponse><rsp:CommandId>C1</rsp:CommandId></rsp:CommandResponse></s:Body></s:Envelope>")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        // mkdir succeeds (1), chunk write succeeds (2), verify hash fails with exit code 1 (3)
+        let _m_recv_ok = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*windows/shell/Receive.*".to_string()))
+            .with_status(200)
+            .with_body(
+                r#"<s:Envelope><s:Body><rsp:ReceiveResponse>
+                    <rsp:CommandState CommandId="C1" State="http://schemas.microsoft.com/wbem/wsman/1/windows/shell/CommandState/Done">
+                        <rsp:ExitCode>0</rsp:ExitCode>
+                    </rsp:CommandState>
+                </rsp:ReceiveResponse></s:Body></s:Envelope>"#
+            )
+            .expect(2)
+            .create_async()
+            .await;
+
+        use base64::Engine;
+        let b64_err = base64::engine::general_purpose::STANDARD.encode(b"badhash");
+        let _m_recv_hash_fail = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*windows/shell/Receive.*".to_string()))
+            .with_status(200)
+            .with_body(format!(
+                r#"<s:Envelope><s:Body><rsp:ReceiveResponse>
+                    <rsp:Stream Name="stderr" CommandId="C1">{b64_err}</rsp:Stream>
+                    <rsp:CommandState CommandId="C1" State="http://schemas.microsoft.com/wbem/wsman/1/windows/shell/CommandState/Done">
+                        <rsp:ExitCode>1</rsp:ExitCode>
+                    </rsp:CommandState>
+                </rsp:ReceiveResponse></s:Body></s:Envelope>"#
+            ))
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let _m_del = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*(Signal|Delete).*".to_string()))
+            .with_status(200)
+            .with_body(r"<s:Envelope><s:Body/></s:Envelope>")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let config = WinRmConfig {
+            host: "127.0.0.1".to_string(),
+            port: Port::new(port),
+            username: "admin".to_string(),
+            password: Some("secret".to_string()),
+            domain: None,
+            auth: WinRmAuth::Basic,
+            krb5_config: None,
+            krb5_ccname: None,
+            tls: WinRmTlsConfig::default(),
+            timeout: Timeout::new(Duration::from_secs(5)),
+            ca_cert_path: None,
+            use_powershell_wrapper: false,
+            run_elevated: false,
+            elevated_user: None,
+            elevated_password: None,
+            chunk_size_bytes: 1024,
+        };
+        let comm = WinRmCommunicator::new(config);
+        let temp_dir = tempfile::tempdir().map_err(StampError::Io)?;
+        let local_upload = temp_dir.path().join("hash_upload.txt");
+        tokio::fs::write(&local_upload, b"hash mismatch data")
+            .await
+            .map_err(StampError::Io)?;
+        let remote_path = FilePath::new(PathBuf::from("C:/remote/hash.txt"));
+        let res = comm
+            .upload(&FilePath::new(local_upload), &remote_path)
+            .await;
+        assert!(matches!(res, Err(StampError::ChecksumMismatch { .. })));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_winrm_real_download_failures() -> Result<(), StampError> {
+        let mut server = mockito::Server::new_async().await;
+        let port = url::Url::parse(&server.url())
+            .map_err(|e| StampError::Parse(e.to_string()))?
+            .port()
+            .unwrap_or(5985);
+
+        let _m_create = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*transfer/Create.*".to_string()))
+            .with_status(200)
+            .with_body(r"<s:Envelope><s:Body><rsp:Shell><rsp:ShellId>S1</rsp:ShellId></rsp:Shell></s:Body></s:Envelope>")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let _m_cmd = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*windows/shell/Command.*".to_string()))
+            .with_status(200)
+            .with_body(r"<s:Envelope><s:Body><rsp:CommandResponse><rsp:CommandId>C1</rsp:CommandId></rsp:CommandResponse></s:Body></s:Envelope>")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        use base64::Engine;
+        let b64_dl_err = base64::engine::general_purpose::STANDARD.encode(b"download failed");
+        let _m_recv_err = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*windows/shell/Receive.*".to_string()))
+            .with_status(200)
+            .with_body(format!(
+                r#"<s:Envelope><s:Body><rsp:ReceiveResponse>
+                    <rsp:Stream Name="stderr" CommandId="C1">{b64_dl_err}</rsp:Stream>
+                    <rsp:CommandState CommandId="C1" State="http://schemas.microsoft.com/wbem/wsman/1/windows/shell/CommandState/Done">
+                        <rsp:ExitCode>1</rsp:ExitCode>
+                    </rsp:CommandState>
+                </rsp:ReceiveResponse></s:Body></s:Envelope>"#
+            ))
+            .expect(1)
+            .create_async()
+            .await;
+
+        let _m_del = server
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*(Signal|Delete).*".to_string()))
+            .with_status(200)
+            .with_body(r"<s:Envelope><s:Body/></s:Envelope>")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let config = WinRmConfig {
+            host: "127.0.0.1".to_string(),
+            port: Port::new(port),
+            username: "admin".to_string(),
+            password: Some("secret".to_string()),
+            domain: None,
+            auth: WinRmAuth::Basic,
+            krb5_config: None,
+            krb5_ccname: None,
+            tls: WinRmTlsConfig::default(),
+            timeout: Timeout::new(Duration::from_secs(5)),
+            ca_cert_path: None,
+            use_powershell_wrapper: false,
+            run_elevated: false,
+            elevated_user: None,
+            elevated_password: None,
+            chunk_size_bytes: 1024,
+        };
+        let comm = WinRmCommunicator::new(config.clone());
+        let temp_dir = tempfile::tempdir().map_err(StampError::Io)?;
+        let remote_path = FilePath::new(PathBuf::from("C:/remote/notfound.txt"));
+        let local_out = temp_dir.path().join("dl_err.txt");
+
+        // Download fails with exit code 1
+        let res_err = comm
+            .download(&remote_path, &FilePath::new(local_out.clone()))
+            .await;
+        assert!(matches!(res_err, Err(StampError::Execution(_))));
+
+        // Download with invalid base64 in stdout
+        let mut server2 = mockito::Server::new_async().await;
+        let port2 = url::Url::parse(&server2.url())
+            .map_err(|e| StampError::Parse(e.to_string()))?
+            .port()
+            .unwrap_or(5985);
+
+        let _m_create2 = server2
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*transfer/Create.*".to_string()))
+            .with_status(200)
+            .with_body(r"<s:Envelope><s:Body><rsp:Shell><rsp:ShellId>S1</rsp:ShellId></rsp:Shell></s:Body></s:Envelope>")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let _m_cmd2 = server2
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*windows/shell/Command.*".to_string()))
+            .with_status(200)
+            .with_body(r"<s:Envelope><s:Body><rsp:CommandResponse><rsp:CommandId>C1</rsp:CommandId></rsp:CommandResponse></s:Body></s:Envelope>")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let raw_invalid_b64 = b"invalid base64 content!";
+        let encoded_raw = base64::engine::general_purpose::STANDARD.encode(raw_invalid_b64);
+        let _m_recv_invalid_b64 = server2
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*windows/shell/Receive.*".to_string()))
+            .with_status(200)
+            .with_body(format!(
+                r#"<s:Envelope><s:Body><rsp:ReceiveResponse>
+                    <rsp:Stream Name="stdout" CommandId="C1">{encoded_raw}</rsp:Stream>
+                    <rsp:CommandState CommandId="C1" State="http://schemas.microsoft.com/wbem/wsman/1/windows/shell/CommandState/Done">
+                        <rsp:ExitCode>0</rsp:ExitCode>
+                    </rsp:CommandState>
+                </rsp:ReceiveResponse></s:Body></s:Envelope>"#
+            ))
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let _m_del2 = server2
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*(Signal|Delete).*".to_string()))
+            .with_status(200)
+            .with_body(r"<s:Envelope><s:Body/></s:Envelope>")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let mut config2 = config.clone();
+        config2.port = Port::new(port2);
+        let comm2 = WinRmCommunicator::new(config2);
+        let res_b64_err = comm2
+            .download(&remote_path, &FilePath::new(local_out.clone()))
+            .await;
+        assert!(matches!(res_b64_err, Err(StampError::Execution(_))));
+
+        // Valid base64 download, but local file write failure (directory doesn't exist)
+        let mut server3 = mockito::Server::new_async().await;
+        let port3 = url::Url::parse(&server3.url())
+            .map_err(|e| StampError::Parse(e.to_string()))?
+            .port()
+            .unwrap_or(5985);
+
+        let _m_create3 = server3
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*transfer/Create.*".to_string()))
+            .with_status(200)
+            .with_body(r"<s:Envelope><s:Body><rsp:Shell><rsp:ShellId>S1</rsp:ShellId></rsp:Shell></s:Body></s:Envelope>")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let _m_cmd3 = server3
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*windows/shell/Command.*".to_string()))
+            .with_status(200)
+            .with_body(r"<s:Envelope><s:Body><rsp:CommandResponse><rsp:CommandId>C1</rsp:CommandId></rsp:CommandResponse></s:Body></s:Envelope>")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let valid_b64 = base64::engine::general_purpose::STANDARD.encode(b"hello");
+        let outer_b64 = base64::engine::general_purpose::STANDARD.encode(valid_b64.as_bytes());
+        let _m_recv3 = server3
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*windows/shell/Receive.*".to_string()))
+            .with_status(200)
+            .with_body(format!(
+                r#"<s:Envelope><s:Body><rsp:ReceiveResponse>
+                    <rsp:Stream Name="stdout" CommandId="C1">{outer_b64}</rsp:Stream>
+                    <rsp:CommandState CommandId="C1" State="http://schemas.microsoft.com/wbem/wsman/1/windows/shell/CommandState/Done">
+                        <rsp:ExitCode>0</rsp:ExitCode>
+                    </rsp:CommandState>
+                </rsp:ReceiveResponse></s:Body></s:Envelope>"#
+            ))
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let _m_del3 = server3
+            .mock("POST", "/wsman")
+            .match_body(mockito::Matcher::Regex(r".*(Signal|Delete).*".to_string()))
+            .with_status(200)
+            .with_body(r"<s:Envelope><s:Body/></s:Envelope>")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let mut config3 = config.clone();
+        config3.port = Port::new(port3);
+        let comm3 = WinRmCommunicator::new(config3);
+        let non_existent_local = PathBuf::from("/nonexistent_dir_12345/nowhere/file.txt");
+        let res_write_err = comm3
+            .download(&remote_path, &FilePath::new(non_existent_local))
+            .await;
+        assert!(matches!(res_write_err, Err(StampError::Io(_))));
+
+        // Upload local file read failure (file doesn't exist)
+        let non_existent_upload = FilePath::new(PathBuf::from("/nonexistent_upload_file_12345"));
+        let res_read_err = comm2.upload(&non_existent_upload, &remote_path).await;
+        assert!(matches!(res_read_err, Err(StampError::Io(_))));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_winrm_real_execute_server_error() -> Result<(), StampError> {
+        let mut server = mockito::Server::new_async().await;
+        let port = url::Url::parse(&server.url())
+            .map_err(|e| StampError::Parse(e.to_string()))?
+            .port()
+            .unwrap_or(5985);
+
+        let _m_500 = server
+            .mock("POST", "/wsman")
+            .with_status(500)
+            .with_body("Internal Server Error")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let config = WinRmConfig {
+            host: "127.0.0.1".to_string(),
+            port: Port::new(port),
+            username: "admin".to_string(),
+            password: Some("secret".to_string()),
+            domain: None,
+            auth: WinRmAuth::Basic,
+            krb5_config: None,
+            krb5_ccname: None,
+            tls: WinRmTlsConfig::default(),
+            timeout: Timeout::new(Duration::from_secs(5)),
+            ca_cert_path: None,
+            use_powershell_wrapper: true,
+            run_elevated: false,
+            elevated_user: None,
+            elevated_password: None,
+            chunk_size_bytes: 64 * 1024,
+        };
+        let comm = WinRmCommunicator::new(config.clone());
+        let res = comm.execute(&Command::new("dir".to_string())).await;
+        assert!(matches!(res, Err(StampError::Execution(_))));
+
+        // Elevated error branch
+        let mut elevated_cfg = config.clone();
+        elevated_cfg.run_elevated = true;
+        let comm_elev = WinRmCommunicator::new(elevated_cfg);
+        let res_elev = comm_elev.execute(&Command::new("dir".to_string())).await;
+        assert!(matches!(res_elev, Err(StampError::Execution(_))));
+
+        // Direct error branch
+        let mut direct_cfg = config.clone();
+        direct_cfg.use_powershell_wrapper = false;
+        let comm_direct = WinRmCommunicator::new(direct_cfg);
+        let res_direct = comm_direct.execute(&Command::new("dir".to_string())).await;
+        assert!(matches!(res_direct, Err(StampError::Execution(_))));
+
+        // Upload and Download network failure on server 500
+        let temp_dir = tempfile::tempdir().map_err(StampError::Io)?;
+        let local_file = temp_dir.path().join("local.txt");
+        tokio::fs::write(&local_file, b"test")
+            .await
+            .map_err(StampError::Io)?;
+        let remote_path = FilePath::new(PathBuf::from("C:/remote/file.txt"));
+        let res_upload_err = comm.upload(&FilePath::new(local_file), &remote_path).await;
+        assert!(matches!(res_upload_err, Err(StampError::Execution(_))));
+
+        let local_out = temp_dir.path().join("out.txt");
+        let res_dl_err = comm.download(&remote_path, &FilePath::new(local_out)).await;
+        assert!(matches!(res_dl_err, Err(StampError::Execution(_))));
+        Ok(())
     }
 }

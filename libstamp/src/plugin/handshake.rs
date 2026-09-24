@@ -433,6 +433,9 @@ mod tests {
 
     #[test]
     fn test_bounded_port_range_parsing() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         unsafe {
             std::env::remove_var(PACKER_PLUGIN_MIN_PORT_ENV);
             std::env::remove_var(PACKER_PLUGIN_MAX_PORT_ENV);

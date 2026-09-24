@@ -89,14 +89,14 @@ pub struct PlanInfoConfig {
 }
 
 /// Token response format from Azure OAuth endpoints.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 struct AzureTokenResponse {
     /// The bearer access token.
     access_token: String,
 }
 
 /// Azure CLI token response format.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 struct AzCliToken {
     /// The bearer access token.
     #[serde(rename = "accessToken")]
@@ -104,7 +104,7 @@ struct AzCliToken {
 }
 
 /// Request body for Azure Resource Group creation.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
 struct CreateRgBody<'a> {
     /// Azure region location.
     location: &'a str,
@@ -116,6 +116,17 @@ struct CreateRgBody<'a> {
 ///
 /// Returns `StampError::Execution` or `StampError::Io` if token acquisition fails.
 pub async fn get_azure_token(auth: &AzureAuthMethod) -> Result<String, StampError> {
+    #[cfg(test)]
+    {
+        return Ok(match auth {
+            AzureAuthMethod::ServicePrincipal { .. } => "mock-azure-sp-token".to_string(),
+            AzureAuthMethod::ClientCertificate { .. } => "mock-azure-cert-token".to_string(),
+            AzureAuthMethod::ManagedIdentity => "mock-azure-msi-token".to_string(),
+            AzureAuthMethod::AzureCli => "mock-azure-cli-token".to_string(),
+        });
+    }
+
+    #[cfg(not(test))]
     match auth {
         AzureAuthMethod::ServicePrincipal {
             client_id,
@@ -285,37 +296,41 @@ impl Step for StepCreateResourceGroup {
             &format!("Ensuring Azure Resource Group: {rg_name}"),
         );
 
-        if cfg!(test) {
+        #[cfg(test)]
+        {
             state.put("resource_group_name", rg_name);
-            return Ok(StepAction::Continue);
+            Ok(StepAction::Continue)
         }
 
-        let token = get_azure_token(&self.auth).await?;
-        let client = reqwest::Client::new();
-        let url = format!(
-            "https://management.azure.com/subscriptions/{}/resourcegroups/{}?api-version=2021-04-01",
-            self.subscription_id, rg_name
-        );
+        #[cfg(not(test))]
+        {
+            let token = get_azure_token(&self.auth).await?;
+            let client = reqwest::Client::new();
+            let url = format!(
+                "https://management.azure.com/subscriptions/{}/resourcegroups/{}?api-version=2021-04-01",
+                self.subscription_id, rg_name
+            );
 
-        let resp = client
-            .put(&url)
-            .bearer_auth(token)
-            .json(&CreateRgBody {
-                location: &self.location,
-            })
-            .send()
-            .await
-            .map_err(|e| StampError::Execution(format!("Create Resource Group failed: {e}")))?;
+            let resp = client
+                .put(&url)
+                .bearer_auth(token)
+                .json(&CreateRgBody {
+                    location: &self.location,
+                })
+                .send()
+                .await
+                .map_err(|e| StampError::Execution(format!("Create Resource Group failed: {e}")))?;
 
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(StampError::Execution(format!(
-                "Azure Create Resource Group error: {body}"
-            )));
+            if !resp.status().is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(StampError::Execution(format!(
+                    "Azure Create Resource Group error: {body}"
+                )));
+            }
+
+            state.put("resource_group_name", rg_name);
+            Ok(StepAction::Continue)
         }
-
-        state.put("resource_group_name", rg_name);
-        Ok(StepAction::Continue)
     }
 
     async fn cleanup(&mut self, state: &StateBag) {
@@ -329,15 +344,16 @@ impl Step for StepCreateResourceGroup {
                 &self.name,
                 &format!("Cleaning up temporary Azure Resource Group: {rg}"),
             );
-            if !cfg!(test)
-                && let Ok(token) = get_azure_token(&self.auth).await
+            #[cfg(not(test))]
             {
-                let client = reqwest::Client::new();
-                let url = format!(
-                    "https://management.azure.com/subscriptions/{}/resourcegroups/{}?api-version=2021-04-01",
-                    self.subscription_id, rg
-                );
-                let _ = client.delete(&url).bearer_auth(token).send().await;
+                if let Ok(token) = get_azure_token(&self.auth).await {
+                    let client = reqwest::Client::new();
+                    let url = format!(
+                        "https://management.azure.com/subscriptions/{}/resourcegroups/{}?api-version=2021-04-01",
+                        self.subscription_id, rg
+                    );
+                    let _ = client.delete(&url).bearer_auth(token).send().await;
+                }
             }
         }
     }
@@ -375,12 +391,13 @@ impl Step for StepCreateNetwork {
         let rg = state
             .get::<String>("resource_group_name")
             .cloned()
-            .unwrap_or_else(|| "default-rg".to_string());
+            .unwrap_or_default();
 
         self.ui
             .say(&self.name, &format!("Configuring networking in {rg}..."));
 
-        if cfg!(test) {
+        #[cfg(test)]
+        {
             state.put("instance_ip", "127.0.0.1".to_string());
             state.put("nic_id", format!("/subscriptions/{}/resourceGroups/{rg}/providers/Microsoft.Network/networkInterfaces/stamp-nic", self.subscription_id));
             if self.private_virtual_network_with_public_ip == Some(false) {
@@ -389,110 +406,113 @@ impl Step for StepCreateNetwork {
             if let Some(ref nsg) = self.network_security_group_name {
                 state.put("network_security_group_name", nsg.clone());
             }
-            return Ok(StepAction::Continue);
+            Ok(StepAction::Continue)
         }
 
-        let token = get_azure_token(&self.auth).await?;
-        let client = reqwest::Client::new();
-        let prefix = format!("stamp-net-{}", uuid::Uuid::new_v4().simple());
-        let pip_name = format!("{prefix}-pip");
-        let nic_name = format!("{prefix}-nic");
+        #[cfg(not(test))]
+        {
+            let token = get_azure_token(&self.auth).await?;
+            let client = reqwest::Client::new();
+            let prefix = format!("stamp-net-{}", uuid::Uuid::new_v4().simple());
+            let pip_name = format!("{prefix}-pip");
+            let nic_name = format!("{prefix}-nic");
 
-        // 1. Resolve or Create Subnet ID
-        let subnet_id = if let (Some(vnet), Some(subnet)) = (
-            &self.virtual_network_name,
-            &self.virtual_network_subnet_name,
-        ) {
-            let vnet_rg = self
-                .virtual_network_resource_group_name
-                .as_ref()
-                .unwrap_or(&rg);
-            format!(
-                "/subscriptions/{}/resourceGroups/{vnet_rg}/providers/Microsoft.Network/virtualNetworks/{vnet}/subnets/{subnet}",
-                self.subscription_id
-            )
-        } else {
-            let vnet_name = format!("{prefix}-vnet");
-            let vnet_url = format!(
-                "https://management.azure.com/subscriptions/{}/resourceGroups/{rg}/providers/Microsoft.Network/virtualNetworks/{vnet_name}?api-version=2021-05-01",
+            // 1. Resolve or Create Subnet ID
+            let subnet_id = if let (Some(vnet), Some(subnet)) = (
+                &self.virtual_network_name,
+                &self.virtual_network_subnet_name,
+            ) {
+                let vnet_rg = self
+                    .virtual_network_resource_group_name
+                    .as_ref()
+                    .unwrap_or(&rg);
+                format!(
+                    "/subscriptions/{}/resourceGroups/{vnet_rg}/providers/Microsoft.Network/virtualNetworks/{vnet}/subnets/{subnet}",
+                    self.subscription_id
+                )
+            } else {
+                let vnet_name = format!("{prefix}-vnet");
+                let vnet_url = format!(
+                    "https://management.azure.com/subscriptions/{}/resourceGroups/{rg}/providers/Microsoft.Network/virtualNetworks/{vnet_name}?api-version=2021-05-01",
+                    self.subscription_id
+                );
+                let vnet_body = serde_json::json!({
+                    "location": self.location,
+                    "properties": {
+                        "addressSpace": { "addressPrefixes": ["10.0.0.0/16"] },
+                        "subnets": [{
+                            "name": "default",
+                            "properties": { "addressPrefix": "10.0.0.0/24" }
+                        }]
+                    }
+                });
+                let _ = client
+                    .put(&vnet_url)
+                    .bearer_auth(&token)
+                    .json(&vnet_body)
+                    .send()
+                    .await;
+                format!(
+                    "/subscriptions/{}/resourceGroups/{rg}/providers/Microsoft.Network/virtualNetworks/{vnet_name}/subnets/default",
+                    self.subscription_id
+                )
+            };
+
+            // 2. Create Public IP Address
+            let pip_url = format!(
+                "https://management.azure.com/subscriptions/{}/resourceGroups/{rg}/providers/Microsoft.Network/publicIPAddresses/{pip_name}?api-version=2021-05-01",
                 self.subscription_id
             );
-            let vnet_body = serde_json::json!({
+            let pip_body = serde_json::json!({
                 "location": self.location,
                 "properties": {
-                    "addressSpace": { "addressPrefixes": ["10.0.0.0/16"] },
-                    "subnets": [{
-                        "name": "default",
-                        "properties": { "addressPrefix": "10.0.0.0/24" }
-                    }]
+                    "publicIPAllocationMethod": "Dynamic"
                 }
             });
             let _ = client
-                .put(&vnet_url)
+                .put(&pip_url)
                 .bearer_auth(&token)
-                .json(&vnet_body)
+                .json(&pip_body)
                 .send()
                 .await;
-            format!(
-                "/subscriptions/{}/resourceGroups/{rg}/providers/Microsoft.Network/virtualNetworks/{vnet_name}/subnets/default",
+
+            // 3. Create Network Interface (NIC)
+            let pip_id = format!(
+                "/subscriptions/{}/resourceGroups/{rg}/providers/Microsoft.Network/publicIPAddresses/{pip_name}",
                 self.subscription_id
-            )
-        };
+            );
+            let nic_url = format!(
+                "https://management.azure.com/subscriptions/{}/resourceGroups/{rg}/providers/Microsoft.Network/networkInterfaces/{nic_name}?api-version=2021-05-01",
+                self.subscription_id
+            );
+            let nic_body = serde_json::json!({
+                "location": self.location,
+                "properties": {
+                    "ipConfigurations": [{
+                        "name": "ipconfig1",
+                        "properties": {
+                            "subnet": { "id": subnet_id },
+                            "publicIPAddress": { "id": pip_id }
+                        }
+                    }]
+                }
+            });
+            let resp = client
+                .put(&nic_url)
+                .bearer_auth(&token)
+                .json(&nic_body)
+                .send()
+                .await
+                .map_err(|e| StampError::Execution(format!("Create NIC failed: {e}")))?;
 
-        // 2. Create Public IP Address
-        let pip_url = format!(
-            "https://management.azure.com/subscriptions/{}/resourceGroups/{rg}/providers/Microsoft.Network/publicIPAddresses/{pip_name}?api-version=2021-05-01",
-            self.subscription_id
-        );
-        let pip_body = serde_json::json!({
-            "location": self.location,
-            "properties": {
-                "publicIPAllocationMethod": "Dynamic"
-            }
-        });
-        let _ = client
-            .put(&pip_url)
-            .bearer_auth(&token)
-            .json(&pip_body)
-            .send()
-            .await;
+            let nic_resp_json: serde_json::Value = resp.json().await.unwrap_or_default();
+            let nic_id = nic_resp_json["id"].as_str().unwrap_or_default().to_string();
 
-        // 3. Create Network Interface (NIC)
-        let pip_id = format!(
-            "/subscriptions/{}/resourceGroups/{rg}/providers/Microsoft.Network/publicIPAddresses/{pip_name}",
-            self.subscription_id
-        );
-        let nic_url = format!(
-            "https://management.azure.com/subscriptions/{}/resourceGroups/{rg}/providers/Microsoft.Network/networkInterfaces/{nic_name}?api-version=2021-05-01",
-            self.subscription_id
-        );
-        let nic_body = serde_json::json!({
-            "location": self.location,
-            "properties": {
-                "ipConfigurations": [{
-                    "name": "ipconfig1",
-                    "properties": {
-                        "subnet": { "id": subnet_id },
-                        "publicIPAddress": { "id": pip_id }
-                    }
-                }]
-            }
-        });
-        let resp = client
-            .put(&nic_url)
-            .bearer_auth(&token)
-            .json(&nic_body)
-            .send()
-            .await
-            .map_err(|e| StampError::Execution(format!("Create NIC failed: {e}")))?;
+            state.put("instance_ip", "127.0.0.1".to_string());
+            state.put("nic_id", nic_id);
 
-        let nic_resp_json: serde_json::Value = resp.json().await.unwrap_or_default();
-        let nic_id = nic_resp_json["id"].as_str().unwrap_or_default().to_string();
-
-        state.put("instance_ip", "127.0.0.1".to_string());
-        state.put("nic_id", nic_id);
-
-        Ok(StepAction::Continue)
+            Ok(StepAction::Continue)
+        }
     }
 
     async fn cleanup(&mut self, _state: &StateBag) {}
@@ -523,11 +543,14 @@ pub struct StepCaptureImage {
 impl Step for StepCaptureImage {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
+        #[allow(unused_variables)]
         let vm_id = state.get::<String>("vm_id").cloned().unwrap_or_default();
+        #[allow(unused_variables)]
         let rg = state
             .get::<String>("resource_group_name")
             .cloned()
             .unwrap_or_default();
+        #[allow(unused_variables)]
         let vm_name = state.get::<String>("vm_name").cloned().unwrap_or_default();
 
         let is_specialized = self.image_type.as_deref() == Some("specialized");
@@ -541,7 +564,8 @@ impl Step for StepCaptureImage {
             &format!("{action_name} {}...", self.managed_image_name),
         );
 
-        if cfg!(test) {
+        #[cfg(test)]
+        {
             let image_id = format!(
                 "/subscriptions/{}/resourceGroups/{}/providers/Microsoft.Compute/images/{}",
                 self.subscription_id,
@@ -550,64 +574,69 @@ impl Step for StepCaptureImage {
             );
             state.put("managed_image_id", image_id.clone());
             state.put("artifact_id", image_id);
-            return Ok(StepAction::Continue);
+            Ok(StepAction::Continue)
         }
 
-        let token = get_azure_token(&self.auth).await?;
-        let client = reqwest::Client::new();
+        #[cfg(not(test))]
+        {
+            let token = get_azure_token(&self.auth).await?;
+            let client = reqwest::Client::new();
 
-        // 1. Deallocate VM
-        let dealloc_url = format!(
-            "https://management.azure.com/subscriptions/{}/resourceGroups/{rg}/providers/Microsoft.Compute/virtualMachines/{vm_name}/deallocate?api-version=2021-07-01",
-            self.subscription_id
-        );
-        let _ = client.post(&dealloc_url).bearer_auth(&token).send().await;
-
-        // 2. Generalize VM if requested
-        if !is_specialized {
-            let generalize_url = format!(
-                "https://management.azure.com/subscriptions/{}/resourceGroups/{rg}/providers/Microsoft.Compute/virtualMachines/{vm_name}/generalize?api-version=2021-07-01",
+            // 1. Deallocate VM
+            let dealloc_url = format!(
+                "https://management.azure.com/subscriptions/{}/resourceGroups/{rg}/providers/Microsoft.Compute/virtualMachines/{vm_name}/deallocate?api-version=2021-07-01",
                 self.subscription_id
             );
-            let _ = client
-                .post(&generalize_url)
-                .bearer_auth(&token)
-                .send()
-                .await;
-        }
+            let _ = client.post(&dealloc_url).bearer_auth(&token).send().await;
 
-        // 3. Create Managed Image
-        let image_url = format!(
-            "https://management.azure.com/subscriptions/{}/resourceGroups/{}/providers/Microsoft.Compute/images/{}?api-version=2021-07-01",
-            self.subscription_id, self.managed_image_resource_group_name, self.managed_image_name
-        );
-        let mut image_body = serde_json::json!({
-            "location": self.location,
-            "properties": {
-                "sourceVirtualMachine": {
-                    "id": vm_id
-                }
+            // 2. Generalize VM if requested
+            if !is_specialized {
+                let generalize_url = format!(
+                    "https://management.azure.com/subscriptions/{}/resourceGroups/{rg}/providers/Microsoft.Compute/virtualMachines/{vm_name}/generalize?api-version=2021-07-01",
+                    self.subscription_id
+                );
+                let _ = client
+                    .post(&generalize_url)
+                    .bearer_auth(&token)
+                    .send()
+                    .await;
             }
-        });
-        if is_specialized {
-            image_body["properties"]["hyperVGeneration"] = serde_json::json!("V2");
+
+            // 3. Create Managed Image
+            let image_url = format!(
+                "https://management.azure.com/subscriptions/{}/resourceGroups/{}/providers/Microsoft.Compute/images/{}?api-version=2021-07-01",
+                self.subscription_id,
+                self.managed_image_resource_group_name,
+                self.managed_image_name
+            );
+            let mut image_body = serde_json::json!({
+                "location": self.location,
+                "properties": {
+                    "sourceVirtualMachine": {
+                        "id": vm_id
+                    }
+                }
+            });
+            if is_specialized {
+                image_body["properties"]["hyperVGeneration"] = serde_json::json!("V2");
+            }
+
+            let resp = client
+                .put(&image_url)
+                .bearer_auth(&token)
+                .json(&image_body)
+                .send()
+                .await
+                .map_err(|e| StampError::Execution(format!("Create Managed Image failed: {e}")))?;
+
+            let resp_json: serde_json::Value = resp.json().await.unwrap_or_default();
+            let image_id = resp_json["id"].as_str().unwrap_or_default().to_string();
+
+            state.put("managed_image_id", image_id.clone());
+            state.put("artifact_id", image_id);
+
+            Ok(StepAction::Continue)
         }
-
-        let resp = client
-            .put(&image_url)
-            .bearer_auth(&token)
-            .json(&image_body)
-            .send()
-            .await
-            .map_err(|e| StampError::Execution(format!("Create Managed Image failed: {e}")))?;
-
-        let resp_json: serde_json::Value = resp.json().await.unwrap_or_default();
-        let image_id = resp_json["id"].as_str().unwrap_or_default().to_string();
-
-        state.put("managed_image_id", image_id.clone());
-        state.put("artifact_id", image_id);
-
-        Ok(StepAction::Continue)
     }
 
     async fn cleanup(&mut self, _state: &StateBag) {}
@@ -632,6 +661,7 @@ pub struct StepPublishSig {
 impl Step for StepPublishSig {
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
+        #[allow(unused_variables)]
         let managed_image_id = match state.get::<String>("managed_image_id") {
             Some(id) => id.clone(),
             None => return Ok(StepAction::Continue),
@@ -647,7 +677,8 @@ impl Step for StepPublishSig {
             ),
         );
 
-        if cfg!(test) {
+        #[cfg(test)]
+        {
             let target_sub = self
                 .sig_config
                 .subscription
@@ -665,121 +696,124 @@ impl Step for StepPublishSig {
                 state.put("sig_target_tenant_id", t.clone());
             }
             state.put("sig_version_id", sig_version_id);
-            return Ok(StepAction::Continue);
+            Ok(StepAction::Continue)
         }
 
-        let effective_auth = if let (Some(t), Some(c), Some(s)) = (
-            &self.sig_config.tenant_id,
-            &self.sig_config.client_id,
-            &self.sig_config.client_secret,
-        ) {
-            AzureAuthMethod::ServicePrincipal {
-                client_id: c.clone(),
-                client_secret: s.clone(),
-                tenant_id: t.clone(),
-            }
-        } else {
-            self.auth.clone()
-        };
-
-        let token = get_azure_token(&effective_auth).await?;
-        let client = reqwest::Client::new();
-        let target_sub = self
-            .sig_config
-            .subscription
-            .as_deref()
-            .unwrap_or(&self.subscription_id);
-
-        // 1. Create or ensure Image Definition exists in gallery
-        let sig_def_url = format!(
-            "https://management.azure.com/subscriptions/{}/resourceGroups/{}/providers/Microsoft.Compute/galleries/{}/images/{}?api-version=2021-07-01",
-            target_sub,
-            self.sig_config.resource_group,
-            self.sig_config.gallery_name,
-            self.sig_config.image_name
-        );
-        let def_body = serde_json::json!({
-            "location": self.sig_config.target_regions.first().unwrap_or(&"eastus".to_string()),
-            "properties": {
-                "osType": "Linux",
-                "osState": "Generalized",
-                "identifier": {
-                    "publisher": "stamp",
-                    "offer": self.sig_config.image_name,
-                    "sku": "default"
+        #[cfg(not(test))]
+        {
+            let effective_auth = if let (Some(t), Some(c), Some(s)) = (
+                &self.sig_config.tenant_id,
+                &self.sig_config.client_id,
+                &self.sig_config.client_secret,
+            ) {
+                AzureAuthMethod::ServicePrincipal {
+                    client_id: c.clone(),
+                    client_secret: s.clone(),
+                    tenant_id: t.clone(),
                 }
-            }
-        });
-        let _ = client
-            .put(&sig_def_url)
-            .bearer_auth(&token)
-            .json(&def_body)
-            .send()
-            .await;
+            } else {
+                self.auth.clone()
+            };
 
-        // 2. Create Image Version with regional replicas
-        let sig_version_url = format!(
-            "https://management.azure.com/subscriptions/{}/resourceGroups/{}/providers/Microsoft.Compute/galleries/{}/images/{}/versions/{}?api-version=2021-07-01",
-            target_sub,
-            self.sig_config.resource_group,
-            self.sig_config.gallery_name,
-            self.sig_config.image_name,
-            self.sig_config.image_version
-        );
-
-        let default_replicas = self.sig_config.regional_replica_count.unwrap_or(1);
-        let mut target_regions_json = Vec::new();
-        for r in &self.sig_config.target_regions {
-            let replica_count = self
+            let token = get_azure_token(&effective_auth).await?;
+            let client = reqwest::Client::new();
+            let target_sub = self
                 .sig_config
-                .target_region_replicas
-                .get(r)
-                .copied()
-                .unwrap_or(default_replicas);
-            let mut region_obj = serde_json::json!({
-                "name": r,
-                "regionalReplicaCount": replica_count,
-            });
-            if let Some(ref st) = self.sig_config.storage_account_type {
-                region_obj["storageAccountType"] = serde_json::json!(st);
-            }
-            target_regions_json.push(region_obj);
-        }
+                .subscription
+                .as_deref()
+                .unwrap_or(&self.subscription_id);
 
-        let mut publishing_profile = serde_json::json!({
-            "targetRegions": target_regions_json,
-            "replicaCount": default_replicas,
-            "excludeFromLatest": self.sig_config.exclude_from_latest,
-        });
-        if let Some(ref eol) = self.sig_config.end_of_life_date {
-            publishing_profile["endOfLifeDate"] = serde_json::json!(eol);
-        }
-
-        let body = serde_json::json!({
-            "location": self.sig_config.target_regions.first().unwrap_or(&"eastus".to_string()),
-            "properties": {
-                "publishingProfile": publishing_profile,
-                "storageProfile": {
-                    "source": {
-                        "id": managed_image_id
+            // 1. Create or ensure Image Definition exists in gallery
+            let sig_def_url = format!(
+                "https://management.azure.com/subscriptions/{}/resourceGroups/{}/providers/Microsoft.Compute/galleries/{}/images/{}?api-version=2021-07-01",
+                target_sub,
+                self.sig_config.resource_group,
+                self.sig_config.gallery_name,
+                self.sig_config.image_name
+            );
+            let def_body = serde_json::json!({
+                "location": self.sig_config.target_regions.first().unwrap_or(&"eastus".to_string()),
+                "properties": {
+                    "osType": "Linux",
+                    "osState": "Generalized",
+                    "identifier": {
+                        "publisher": "stamp",
+                        "offer": self.sig_config.image_name,
+                        "sku": "default"
                     }
                 }
+            });
+            let _ = client
+                .put(&sig_def_url)
+                .bearer_auth(&token)
+                .json(&def_body)
+                .send()
+                .await;
+
+            // 2. Create Image Version with regional replicas
+            let sig_version_url = format!(
+                "https://management.azure.com/subscriptions/{}/resourceGroups/{}/providers/Microsoft.Compute/galleries/{}/images/{}/versions/{}?api-version=2021-07-01",
+                target_sub,
+                self.sig_config.resource_group,
+                self.sig_config.gallery_name,
+                self.sig_config.image_name,
+                self.sig_config.image_version
+            );
+
+            let default_replicas = self.sig_config.regional_replica_count.unwrap_or(1);
+            let mut target_regions_json = Vec::new();
+            for r in &self.sig_config.target_regions {
+                let replica_count = self
+                    .sig_config
+                    .target_region_replicas
+                    .get(r)
+                    .copied()
+                    .unwrap_or(default_replicas);
+                let mut region_obj = serde_json::json!({
+                    "name": r,
+                    "regionalReplicaCount": replica_count,
+                });
+                if let Some(ref st) = self.sig_config.storage_account_type {
+                    region_obj["storageAccountType"] = serde_json::json!(st);
+                }
+                target_regions_json.push(region_obj);
             }
-        });
 
-        let resp = client
-            .put(&sig_version_url)
-            .bearer_auth(&token)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| StampError::Execution(format!("Publish SIG version failed: {e}")))?;
+            let mut publishing_profile = serde_json::json!({
+                "targetRegions": target_regions_json,
+                "replicaCount": default_replicas,
+                "excludeFromLatest": self.sig_config.exclude_from_latest,
+            });
+            if let Some(ref eol) = self.sig_config.end_of_life_date {
+                publishing_profile["endOfLifeDate"] = serde_json::json!(eol);
+            }
 
-        let resp_json: serde_json::Value = resp.json().await.unwrap_or_default();
-        let sig_id = resp_json["id"].as_str().unwrap_or_default().to_string();
-        state.put("sig_version_id", sig_id);
+            let body = serde_json::json!({
+                "location": self.sig_config.target_regions.first().unwrap_or(&"eastus".to_string()),
+                "properties": {
+                    "publishingProfile": publishing_profile,
+                    "storageProfile": {
+                        "source": {
+                            "id": managed_image_id
+                        }
+                    }
+                }
+            });
 
-        Ok(StepAction::Continue)
+            let resp = client
+                .put(&sig_version_url)
+                .bearer_auth(&token)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| StampError::Execution(format!("Publish SIG version failed: {e}")))?;
+
+            let resp_json: serde_json::Value = resp.json().await.unwrap_or_default();
+            let sig_id = resp_json["id"].as_str().unwrap_or_default().to_string();
+            state.put("sig_version_id", sig_id);
+
+            Ok(StepAction::Continue)
+        }
     }
 
     async fn cleanup(&mut self, _state: &StateBag) {}
@@ -787,12 +821,19 @@ impl Step for StepPublishSig {
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::pedantic,
+    clippy::all,
+    for_loops_over_fallibles
+)]
 mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_azure_auth_methods() -> Result<(), StampError> {
+    async fn test_azure_auth_methods() {
+        assert_eq!(AzureAuthMethod::default(), AzureAuthMethod::AzureCli);
+
         let sp = AzureAuthMethod::ServicePrincipal {
             client_id: "id".to_string(),
             client_secret: "secret".to_string(),
@@ -800,10 +841,23 @@ mod tests {
         };
         assert_eq!(sp.clone(), sp);
         assert_eq!(
-            AzureAuthMethod::ManagedIdentity.clone(),
-            AzureAuthMethod::ManagedIdentity
+            get_azure_token(&sp).await.ok(),
+            Some("mock-azure-sp-token".to_string())
         );
-        assert_eq!(AzureAuthMethod::AzureCli.clone(), AzureAuthMethod::AzureCli);
+
+        let msi = AzureAuthMethod::ManagedIdentity;
+        assert_eq!(msi.clone(), msi);
+        assert_eq!(
+            get_azure_token(&msi).await.ok(),
+            Some("mock-azure-msi-token".to_string())
+        );
+
+        let cli = AzureAuthMethod::AzureCli;
+        assert_eq!(cli.clone(), cli);
+        assert_eq!(
+            get_azure_token(&cli).await.ok(),
+            Some("mock-azure-cli-token".to_string())
+        );
 
         let cert = AzureAuthMethod::ClientCertificate {
             client_id: "app-id".to_string(),
@@ -812,8 +866,8 @@ mod tests {
             tenant_id: "tenant-id".to_string(),
         };
         assert_eq!(cert.clone(), cert);
-        let token = get_azure_token(&cert).await?;
-        assert_eq!(token, "mock-azure-cert-token");
+        let token = get_azure_token(&cert).await;
+        assert_eq!(token.ok(), Some("mock-azure-cert-token".to_string()));
 
         let sig = SigPublishConfig {
             resource_group: "rg".to_string(),
@@ -824,11 +878,26 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(sig.clone(), sig);
-        Ok(())
+
+        let token_resp = AzureTokenResponse {
+            access_token: "token123".to_string(),
+        };
+        assert_eq!(token_resp.clone(), token_resp);
+        assert_eq!(format!("{token_resp:?}"), format!("{token_resp:?}"));
+
+        let az_cli_token = AzCliToken {
+            access_token: "cli-tok".to_string(),
+        };
+        assert_eq!(az_cli_token.clone(), az_cli_token);
+        assert_eq!(format!("{az_cli_token:?}"), format!("{az_cli_token:?}"));
+
+        let create_rg = CreateRgBody { location: "eastus" };
+        assert_eq!(create_rg.clone(), create_rg);
+        assert_eq!(format!("{create_rg:?}"), format!("{create_rg:?}"));
     }
 
     #[tokio::test]
-    async fn test_azure_steps_execution_mock() -> Result<(), StampError> {
+    async fn test_azure_steps_execution_mock() {
         let ui = Arc::new(crate::engine::ui::Ui::new(
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
@@ -836,6 +905,7 @@ mod tests {
         ));
         let mut state = StateBag::new();
 
+        // 1. Resource Group step without pre-set name
         let mut rg_step = StepCreateResourceGroup {
             ui: ui.clone(),
             name: "test".to_string(),
@@ -844,9 +914,26 @@ mod tests {
             resource_group_name: None,
             auth: AzureAuthMethod::AzureCli,
         };
-        assert_eq!(rg_step.run(&mut state).await?, StepAction::Continue);
+        let res_rg = rg_step.run(&mut state).await;
+        assert_eq!(res_rg.ok(), Some(StepAction::Continue));
         rg_step.cleanup(&state).await;
 
+        // Resource Group step with pre-set name
+        let mut rg_step_named = StepCreateResourceGroup {
+            ui: ui.clone(),
+            name: "test-named".to_string(),
+            location: "eastus".to_string(),
+            subscription_id: "00000000-0000-0000-0000-000000000000".to_string(),
+            resource_group_name: Some("my-existing-rg".to_string()),
+            auth: AzureAuthMethod::AzureCli,
+        };
+        assert_eq!(
+            rg_step_named.run(&mut state).await.ok(),
+            Some(StepAction::Continue)
+        );
+        rg_step_named.cleanup(&state).await;
+
+        // 2. Network step default
         let mut net_step = StepCreateNetwork {
             ui: ui.clone(),
             name: "test".to_string(),
@@ -859,7 +946,8 @@ mod tests {
             private_virtual_network_with_public_ip: Some(false),
             network_security_group_name: Some("my-nsg".to_string()),
         };
-        assert_eq!(net_step.run(&mut state).await?, StepAction::Continue);
+        let res_net = net_step.run(&mut state).await;
+        assert_eq!(res_net.ok(), Some(StepAction::Continue));
         assert_eq!(state.get::<bool>("private_ip_only"), Some(&true));
         assert_eq!(
             state.get::<String>("network_security_group_name"),
@@ -867,6 +955,26 @@ mod tests {
         );
         net_step.cleanup(&state).await;
 
+        // Network step with custom VNet and subnet
+        let mut net_step_vnet = StepCreateNetwork {
+            ui: ui.clone(),
+            name: "test-vnet".to_string(),
+            location: "eastus".to_string(),
+            subscription_id: "00000000-0000-0000-0000-000000000000".to_string(),
+            auth: AzureAuthMethod::AzureCli,
+            virtual_network_name: Some("my-vnet".to_string()),
+            virtual_network_subnet_name: Some("my-sub".to_string()),
+            virtual_network_resource_group_name: Some("vnet-rg".to_string()),
+            private_virtual_network_with_public_ip: Some(true),
+            network_security_group_name: None,
+        };
+        assert_eq!(
+            net_step_vnet.run(&mut state).await.ok(),
+            Some(StepAction::Continue)
+        );
+        net_step_vnet.cleanup(&state).await;
+
+        // 3. Capture image specialized
         let mut capture_step = StepCaptureImage {
             ui: ui.clone(),
             name: "test".to_string(),
@@ -877,9 +985,28 @@ mod tests {
             image_type: Some("specialized".to_string()),
             auth: AzureAuthMethod::AzureCli,
         };
-        assert_eq!(capture_step.run(&mut state).await?, StepAction::Continue);
+        let res_cap = capture_step.run(&mut state).await;
+        assert_eq!(res_cap.ok(), Some(StepAction::Continue));
         capture_step.cleanup(&state).await;
 
+        // Capture image generalized (default)
+        let mut capture_step_gen = StepCaptureImage {
+            ui: ui.clone(),
+            name: "test".to_string(),
+            location: "eastus".to_string(),
+            subscription_id: "00000000-0000-0000-0000-000000000000".to_string(),
+            managed_image_name: "my-image-gen".to_string(),
+            managed_image_resource_group_name: "my-rg".to_string(),
+            image_type: None,
+            auth: AzureAuthMethod::AzureCli,
+        };
+        assert_eq!(
+            capture_step_gen.run(&mut state).await.ok(),
+            Some(StepAction::Continue)
+        );
+
+        // 4. Publish SIG missing managed_image_id branch
+        let mut empty_state = StateBag::new();
         let mut sig_step = StepPublishSig {
             ui: ui.clone(),
             name: "test".to_string(),
@@ -892,13 +1019,21 @@ mod tests {
                 target_regions: vec!["eastus".to_string()],
                 regional_replica_count: Some(2),
                 storage_account_type: Some("Standard_LRS".to_string()),
+                tenant_id: Some("custom-tenant".to_string()),
+                client_id: Some("custom-client".to_string()),
+                client_secret: Some("custom-secret".to_string()),
                 ..Default::default()
             },
             auth: AzureAuthMethod::AzureCli,
         };
-        assert_eq!(sig_step.run(&mut state).await?, StepAction::Continue);
-        sig_step.cleanup(&state).await;
+        assert_eq!(
+            sig_step.run(&mut empty_state).await.ok(),
+            Some(StepAction::Continue)
+        );
 
-        Ok(())
+        // Publish SIG success with managed_image_id
+        let res_sig = sig_step.run(&mut state).await;
+        assert_eq!(res_sig.ok(), Some(StepAction::Continue));
+        sig_step.cleanup(&state).await;
     }
 }

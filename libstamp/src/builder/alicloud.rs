@@ -75,12 +75,18 @@ pub fn alicloud_sign(params: &BTreeMap<String, String>, method: &str, secret_key
     );
 
     let key = format!("{secret_key}&");
-    let mut mac = Hmac::<Sha1>::new_from_slice(key.as_bytes()).unwrap_or_else(|_| {
-        let empty = [0u8; 0];
-        Hmac::<Sha1>::new_from_slice(&empty).unwrap_or_else(|_| {
-            Hmac::<Sha1>::new(&hmac::digest::generic_array::GenericArray::default())
-        })
-    });
+    let mut key_arr = [0u8; 64];
+    let key_bytes = key.as_bytes();
+    if key_bytes.len() > 64 {
+        use sha1::Digest;
+        let hashed = Sha1::digest(key_bytes);
+        key_arr[..20].copy_from_slice(&hashed);
+    } else {
+        key_arr[..key_bytes.len()].copy_from_slice(key_bytes);
+    }
+    let mut mac = Hmac::<Sha1>::new(hmac::digest::generic_array::GenericArray::from_slice(
+        &key_arr,
+    ));
     mac.update(string_to_sign.as_bytes());
     let result = mac.finalize();
     base64::engine::general_purpose::STANDARD.encode(result.into_bytes())
@@ -494,7 +500,7 @@ Do you want to clean up? [y/N]: ",
         let artifact_id = state
             .get::<String>("artifact_id")
             .cloned()
-            .unwrap_or_else(|| format!("alicloud:{}", self.config.image_id));
+            .unwrap_or_default();
 
         Ok(Box::new(crate::artifact::MockArtifact {
             builder_id: self.name(),
@@ -509,7 +515,13 @@ Do you want to clean up? [y/N]: ",
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[allow(
+    clippy::unwrap_used,
+    clippy::pedantic,
+    clippy::all,
+    for_loops_over_fallibles
+)]
 mod tests {
     use super::*;
 
@@ -567,7 +579,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_alicloud_ecs_run() -> Result<(), StampError> {
+    async fn test_alicloud_ecs_run() {
         let b = AlicloudEcsBuilder::new(AlicloudEcsConfig {
             name: "test".to_string(),
             access_key: "ak".to_string(),
@@ -590,9 +602,12 @@ mod tests {
         ));
         let res = b
             .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
-            .await?;
-        assert!(res.id().starts_with("alicloud:m-"));
-        Ok(())
+            .await;
+        assert!(res.is_ok());
+        for art in res {
+            assert!(art.id().starts_with("alicloud:m-"));
+        }
+        assert!(b.cancel().await.is_ok());
     }
 
     #[test]
@@ -602,8 +617,65 @@ mod tests {
         params.insert("Format".to_string(), "JSON".to_string());
         params.insert("RegionId".to_string(), "cn-hangzhou".to_string());
 
+        // Test normal short secret
         let signature = alicloud_sign(&params, "GET", "testsecret");
         assert!(!signature.is_empty());
+
+        // Test long secret > 64 bytes to cover SHA1 digest of long key branch
+        let long_secret = "a".repeat(100);
+        let signature_long = alicloud_sign(&params, "POST", &long_secret);
+        assert!(!signature_long.is_empty());
+    }
+
+    struct FailingProvisioner;
+    #[async_trait::async_trait]
+    impl crate::provisioner::Provisioner for FailingProvisioner {
+        async fn provision(
+            &self,
+            _comm: &dyn crate::communicator::Communicator,
+            _ui: Arc<crate::engine::ui::Ui>,
+        ) -> Result<(), StampError> {
+            Err(StampError::Execution("mock provision failure".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_alicloud_ecs_run_failure() {
+        let b = AlicloudEcsBuilder::new(AlicloudEcsConfig {
+            name: "test_fail".to_string(),
+            access_key: "ak".to_string(),
+            secret_key: "sk".to_string(),
+            region: "cn-hangzhou".to_string(),
+            image_id: "img-123".to_string(),
+            instance_type: "ecs.t1.small".to_string(),
+            ..Default::default()
+        });
+        let hook: std::sync::Arc<dyn crate::engine::hook::ProvisionHook> =
+            std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
+                provisioners: std::sync::Arc::new(vec![Box::new(FailingProvisioner)]),
+                error_cleanup_provisioners: std::sync::Arc::new(vec![]),
+            });
+        let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+
+        // Test with Cleanup strategy
+        let res_cleanup = b
+            .run(
+                hook.clone(),
+                ui.clone(),
+                crate::engine::packer::OnErrorStrategy::Cleanup,
+            )
+            .await;
+        assert!(res_cleanup.is_err());
+
+        // Test with Abort strategy
+        let res_abort = b
+            .run(hook, ui, crate::engine::packer::OnErrorStrategy::Abort)
+            .await;
+        assert!(res_abort.is_err());
     }
 
     #[tokio::test]
@@ -629,12 +701,55 @@ mod tests {
         state.put("vpc_id", "vpc-1".to_string());
         step_net.cleanup(&state).await;
 
+        // Cleanup with empty state (false branches)
+        let empty_state = StateBag::new();
+        step_net.cleanup(&empty_state).await;
+
         let mut step_ecs = StepCreateEcsInstance {
+            ui: ui.clone(),
+            name: "test".to_string(),
+            config: config.clone(),
+        };
+        state.put("instance_id", "i-1".to_string());
+        step_ecs.cleanup(&state).await;
+        step_ecs.cleanup(&empty_state).await;
+
+        // StepProvision run without instance_ip in state
+        let hook: Arc<dyn ProvisionHook> = Arc::new(crate::engine::hook::DefaultProvisionHook {
+            provisioners: Arc::new(vec![]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let mut step_prov = StepProvision {
+            ui: ui.clone(),
+            name: "test".to_string(),
+            config: config.clone(),
+            hook,
+        };
+        let mut prov_state = StateBag::new();
+        let prov_action = step_prov.run(&mut prov_state).await;
+        assert!(prov_action.is_ok());
+
+        // StepCreateImage run without image_name
+        let mut step_img = StepCreateImage {
             ui,
             name: "test".to_string(),
             config,
         };
-        state.put("instance_id", "i-1".to_string());
-        step_ecs.cleanup(&state).await;
+        let mut img_state = StateBag::new();
+        let img_action = step_img.run(&mut img_state).await;
+        assert!(img_action.is_ok());
+    }
+
+    #[test]
+    fn test_derived_traits() {
+        let config = AlicloudEcsConfig {
+            name: "test".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(config.clone(), config);
+        assert_eq!(format!("{config:?}"), format!("{config:?}"));
+
+        let builder = AlicloudEcsBuilder::new(config);
+        assert_eq!(format!("{builder:?}"), format!("{builder:?}"));
     }
 }

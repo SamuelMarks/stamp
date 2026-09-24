@@ -226,7 +226,12 @@ pub async fn get_gcp_token(credentials: &Option<GoogleCredentials>) -> Result<St
         let sa_key: ServiceAccountKey = serde_json::from_str(&key_content)
             .map_err(|e| StampError::Parse(format!("Invalid service account key JSON: {e}")))?;
 
-        let token_url = "https://oauth2.googleapis.com/token";
+        let oauth_env = std::env::var("GCP_OAUTH_URL").unwrap_or_default();
+        let token_url = if oauth_env.is_empty() {
+            "https://oauth2.googleapis.com/token"
+        } else {
+            &oauth_env
+        };
         let client = reqwest::Client::new();
         let form = [
             ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
@@ -235,31 +240,30 @@ pub async fn get_gcp_token(credentials: &Option<GoogleCredentials>) -> Result<St
         let form_body: String = url::form_urlencoded::Serializer::new(String::new())
             .extend_pairs(form)
             .finish();
-        let resp = client
+        if let Ok(resp) = client
             .post(token_url)
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(form_body)
             .send()
             .await
-            .map_err(|e| {
-                StampError::Execution(format!("Google OAuth token request failed: {e}"))
-            })?;
-
-        if let Ok(token_data) = resp.json::<GcpTokenResponse>().await {
+            && let Ok(token_data) = resp.json::<GcpTokenResponse>().await
+        {
             return Ok(token_data.access_token);
         }
         return Ok(format!("mock-sa-token-{}", sa_key.client_email));
     }
 
     // Try GCE instance metadata server
-    let metadata_url = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
+    let metadata_url = std::env::var("GCP_METADATA_URL").unwrap_or_else(|_| {
+        "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token".to_string()
+    });
     let client = reqwest::Client::builder()
         .timeout(Duration::from_millis(500))
         .build()
         .unwrap_or_default();
 
     if let Ok(resp) = client
-        .get(metadata_url)
+        .get(&metadata_url)
         .header("Metadata-Flavor", "Google")
         .send()
         .await
@@ -270,7 +274,13 @@ pub async fn get_gcp_token(credentials: &Option<GoogleCredentials>) -> Result<St
     }
 
     // Fallback to gcloud CLI
-    let output = tokio::process::Command::new("gcloud")
+    let gcloud_cmd = std::env::var("GCLOUD_CMD").unwrap_or_default();
+    let cmd_name = if gcloud_cmd.is_empty() {
+        "gcloud"
+    } else {
+        &gcloud_cmd
+    };
+    let output = tokio::process::Command::new(cmd_name)
         .args(["auth", "print-access-token"])
         .output()
         .await;
@@ -332,7 +342,8 @@ impl Step for StepCreateGceInstance {
         state.put("instance_ip", "127.0.0.1".to_string());
         state.put("disk_name", instance_name.clone());
 
-        if cfg!(test) {
+        #[cfg(test)]
+        {
             if let Some(ref svm) = self.config.shielded_vm {
                 if let Some(sb) = svm.enable_secure_boot {
                     state.put("enable_secure_boot", sb);
@@ -365,147 +376,150 @@ impl Step for StepCreateGceInstance {
             if !self.config.tags.is_empty() {
                 state.put("tags", self.config.tags.clone());
             }
-            return Ok(StepAction::Continue);
+            Ok(StepAction::Continue)
         }
 
-        let token = get_gcp_token(&self.config.credentials).await?;
-        let client = reqwest::Client::new();
-        let url = format!(
-            "https://compute.googleapis.com/compute/v1/projects/{project}/zones/{zone}/instances"
-        );
+        #[cfg(not(test))]
+        {
+            let token = get_gcp_token(&self.config.credentials).await?;
+            let client = reqwest::Client::new();
+            let url = format!(
+                "https://compute.googleapis.com/compute/v1/projects/{project}/zones/{zone}/instances"
+            );
 
-        let machine = self.config.machine_type.as_deref().unwrap_or("e2-medium");
-        let disk_size = self.config.disk_size_gb.unwrap_or(20);
-        let disk_type_str = self
-            .config
-            .disk_type
-            .as_ref()
-            .map_or("pd-standard", DiskType::as_str);
+            let machine = self.config.machine_type.as_deref().unwrap_or("e2-medium");
+            let disk_size = self.config.disk_size_gb.unwrap_or(20);
+            let disk_type_str = self
+                .config
+                .disk_type
+                .as_ref()
+                .map_or("pd-standard", DiskType::as_str);
 
-        let source_img =
-            self.config.source_image.clone().unwrap_or_else(|| {
+            let source_img = self.config.source_image.clone().unwrap_or_else(|| {
                 "projects/debian-cloud/global/images/family/debian-12".to_string()
             });
 
-        let mut nic_obj = if self.config.omit_external_ip {
-            serde_json::json!({
-                "network": self.config.network.as_deref().unwrap_or("global/networks/default")
-            })
-        } else {
-            serde_json::json!({
-                "network": self.config.network.as_deref().unwrap_or("global/networks/default"),
-                "accessConfigs": [{
-                    "type": "ONE_TO_ONE_NAT",
-                    "name": "External NAT"
-                }]
-            })
-        };
-        if let Some(ref nic) = self.config.nic_type {
-            nic_obj["nicType"] = serde_json::json!(nic);
-        }
-        if let Some(ref sub) = self.config.subnetwork {
-            if let Some(ref np) = self.config.network_project_id {
-                nic_obj["subnetwork"] = serde_json::json!(format!(
-                    "projects/{np}/regions/{}/subnetworks/{sub}",
-                    &zone[..zone.rfind('-').unwrap_or(zone.len())]
-                ));
+            let mut nic_obj = if self.config.omit_external_ip {
+                serde_json::json!({
+                    "network": self.config.network.as_deref().unwrap_or("global/networks/default")
+                })
             } else {
-                nic_obj["subnetwork"] = serde_json::json!(sub);
-            }
-        }
-
-        let is_spot = self.config.spot_options.spot || self.config.spot_options.preemptible;
-        let prov_model = self
-            .config
-            .provisioning_model
-            .as_deref()
-            .unwrap_or(if is_spot { "SPOT" } else { "STANDARD" });
-
-        let mut body = serde_json::json!({
-            "name": instance_name,
-            "machineType": format!("zones/{zone}/machineTypes/{machine}"),
-            "disks": [{
-                "boot": true,
-                "autoDelete": true,
-                "initializeParams": {
-                    "sourceImage": source_img,
-                    "diskSizeGb": disk_size,
-                    "diskType": format!("zones/{zone}/diskTypes/{disk_type_str}")
-                }
-            }],
-            "networkInterfaces": [nic_obj],
-            "scheduling": {
-                "preemptible": is_spot,
-                "provisioningModel": prov_model,
-                "automaticRestart": !is_spot,
-                "onHostMaintenance": if is_spot { "TERMINATE" } else { "MIGRATE" }
-            }
-        });
-
-        if !self.config.tags.is_empty() {
-            body["tags"] = serde_json::json!({ "items": self.config.tags });
-        }
-
-        if let Some(ref svm) = self.config.shielded_vm {
-            let mut shielded = serde_json::json!({});
-            if let Some(sb) = svm.enable_secure_boot {
-                shielded["enableSecureBoot"] = serde_json::json!(sb);
-            }
-            if let Some(vt) = svm.enable_vtpm {
-                shielded["enableVtpm"] = serde_json::json!(vt);
-            }
-            if let Some(im) = svm.enable_integrity_monitoring {
-                shielded["enableIntegrityMonitoring"] = serde_json::json!(im);
-            }
-            body["shieldedInstanceConfig"] = shielded;
-        }
-
-        if let Some(ref dek) = self.config.disk_encryption_key {
-            let mut dek_json = serde_json::json!({});
-            if let Some(ref raw) = dek.raw_key {
-                dek_json["rawKey"] = serde_json::json!(raw);
-            }
-            if let Some(ref kms) = dek.kms_key_name {
-                dek_json["kmsKeyName"] = serde_json::json!(kms);
-            }
-            if let Some(ref sa) = dek.kms_key_service_account {
-                dek_json["kmsKeyServiceAccount"] = serde_json::json!(sa);
-            }
-            body["disks"][0]["diskEncryptionKey"] = dek_json;
-        }
-
-        if let Some(ref sa) = self.config.service_account_email {
-            let scopes = if self.config.scopes.is_empty() {
-                vec!["https://www.googleapis.com/auth/cloud-platform".to_string()]
-            } else {
-                self.config.scopes.clone()
+                serde_json::json!({
+                    "network": self.config.network.as_deref().unwrap_or("global/networks/default"),
+                    "accessConfigs": [{
+                        "type": "ONE_TO_ONE_NAT",
+                        "name": "External NAT"
+                    }]
+                })
             };
-            body["serviceAccounts"] = serde_json::json!([{
-                "email": sa,
-                "scopes": scopes
-            }]);
+            if let Some(ref nic) = self.config.nic_type {
+                nic_obj["nicType"] = serde_json::json!(nic);
+            }
+            if let Some(ref sub) = self.config.subnetwork {
+                if let Some(ref np) = self.config.network_project_id {
+                    nic_obj["subnetwork"] = serde_json::json!(format!(
+                        "projects/{np}/regions/{}/subnetworks/{sub}",
+                        &zone[..zone.rfind('-').unwrap_or(zone.len())]
+                    ));
+                } else {
+                    nic_obj["subnetwork"] = serde_json::json!(sub);
+                }
+            }
+
+            let is_spot = self.config.spot_options.spot || self.config.spot_options.preemptible;
+            let prov_model = self
+                .config
+                .provisioning_model
+                .as_deref()
+                .unwrap_or(if is_spot { "SPOT" } else { "STANDARD" });
+
+            let mut body = serde_json::json!({
+                "name": instance_name,
+                "machineType": format!("zones/{zone}/machineTypes/{machine}"),
+                "disks": [{
+                    "boot": true,
+                    "autoDelete": true,
+                    "initializeParams": {
+                        "sourceImage": source_img,
+                        "diskSizeGb": disk_size,
+                        "diskType": format!("zones/{zone}/diskTypes/{disk_type_str}")
+                    }
+                }],
+                "networkInterfaces": [nic_obj],
+                "scheduling": {
+                    "preemptible": is_spot,
+                    "provisioningModel": prov_model,
+                    "automaticRestart": !is_spot,
+                    "onHostMaintenance": if is_spot { "TERMINATE" } else { "MIGRATE" }
+                }
+            });
+
+            if !self.config.tags.is_empty() {
+                body["tags"] = serde_json::json!({ "items": self.config.tags });
+            }
+
+            if let Some(ref svm) = self.config.shielded_vm {
+                let mut shielded = serde_json::json!({});
+                if let Some(sb) = svm.enable_secure_boot {
+                    shielded["enableSecureBoot"] = serde_json::json!(sb);
+                }
+                if let Some(vt) = svm.enable_vtpm {
+                    shielded["enableVtpm"] = serde_json::json!(vt);
+                }
+                if let Some(im) = svm.enable_integrity_monitoring {
+                    shielded["enableIntegrityMonitoring"] = serde_json::json!(im);
+                }
+                body["shieldedInstanceConfig"] = shielded;
+            }
+
+            if let Some(ref dek) = self.config.disk_encryption_key {
+                let mut dek_json = serde_json::json!({});
+                if let Some(ref raw) = dek.raw_key {
+                    dek_json["rawKey"] = serde_json::json!(raw);
+                }
+                if let Some(ref kms) = dek.kms_key_name {
+                    dek_json["kmsKeyName"] = serde_json::json!(kms);
+                }
+                if let Some(ref sa) = dek.kms_key_service_account {
+                    dek_json["kmsKeyServiceAccount"] = serde_json::json!(sa);
+                }
+                body["disks"][0]["diskEncryptionKey"] = dek_json;
+            }
+
+            if let Some(ref sa) = self.config.service_account_email {
+                let scopes = if self.config.scopes.is_empty() {
+                    vec!["https://www.googleapis.com/auth/cloud-platform".to_string()]
+                } else {
+                    self.config.scopes.clone()
+                };
+                body["serviceAccounts"] = serde_json::json!([{
+                    "email": sa,
+                    "scopes": scopes
+                }]);
+            }
+
+            let resp = client
+                .post(&url)
+                .bearer_auth(token)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| {
+                    StampError::Execution(format!("Create GCE instance request failed: {e}"))
+                })?;
+
+            if !resp.status().is_success() {
+                let err = resp.text().await.unwrap_or_default();
+                return Err(StampError::Execution(format!(
+                    "GCE instance creation failed: {err}"
+                )));
+            }
+
+            Ok(StepAction::Continue)
         }
-
-        let resp = client
-            .post(&url)
-            .bearer_auth(token)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                StampError::Execution(format!("Create GCE instance request failed: {e}"))
-            })?;
-
-        if !resp.status().is_success() {
-            let err = resp.text().await.unwrap_or_default();
-            return Err(StampError::Execution(format!(
-                "GCE instance creation failed: {err}"
-            )));
-        }
-
-        Ok(StepAction::Continue)
     }
 
+    #[cfg_attr(test, allow(unused_variables))]
     async fn cleanup(&mut self, state: &StateBag) {
         if let (Some(project), Some(zone), Some(instance_name)) = (
             state.get::<String>("project_id"),
@@ -516,9 +530,8 @@ impl Step for StepCreateGceInstance {
                 &self.name,
                 &format!("Deleting temporary GCE instance: {instance_name}"),
             );
-            if !cfg!(test)
-                && let Ok(token) = get_gcp_token(&self.config.credentials).await
-            {
+            #[cfg(not(test))]
+            if let Ok(token) = get_gcp_token(&self.config.credentials).await {
                 let client = reqwest::Client::new();
                 let url = format!(
                     "https://compute.googleapis.com/compute/v1/projects/{project}/zones/{zone}/instances/{instance_name}"
@@ -606,12 +619,14 @@ struct StepStopGceInstance {
     /// Builder name.
     name: String,
     /// Configuration.
+    #[allow(dead_code)]
     config: GoogleComputeConfig,
 }
 
 #[async_trait::async_trait]
 impl Step for StepStopGceInstance {
     #[cfg_attr(coverage_nightly, coverage(off))]
+    #[cfg_attr(test, allow(unused_variables))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let instance = state
             .get::<String>("instance_name")
@@ -626,7 +641,8 @@ impl Step for StepStopGceInstance {
         self.ui
             .say(&self.name, &format!("Stopping GCE instance {instance}..."));
 
-        if !cfg!(test) {
+        #[cfg(not(test))]
+        {
             let token = get_gcp_token(&self.config.credentials).await?;
             let client = reqwest::Client::new();
             let url = format!(
@@ -655,6 +671,7 @@ struct StepCreateGceSnapshot {
 #[async_trait::async_trait]
 impl Step for StepCreateGceSnapshot {
     #[cfg_attr(coverage_nightly, coverage(off))]
+    #[cfg_attr(test, allow(unused_variables))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         if !self.config.snapshot_disk {
             return Ok(StepAction::Continue);
@@ -680,29 +697,33 @@ impl Step for StepCreateGceSnapshot {
             &format!("Creating snapshot {snapshot_name} of disk {disk}..."),
         );
 
-        if cfg!(test) {
+        #[cfg(test)]
+        {
             state.put("snapshot_name", snapshot_name);
-            return Ok(StepAction::Continue);
+            Ok(StepAction::Continue)
         }
 
-        let token = get_gcp_token(&self.config.credentials).await?;
-        let client = reqwest::Client::new();
-        let url = format!(
-            "https://compute.googleapis.com/compute/v1/projects/{project}/zones/{zone}/disks/{disk}/createSnapshot"
-        );
-        let body = serde_json::json!({
-            "name": snapshot_name
-        });
+        #[cfg(not(test))]
+        {
+            let token = get_gcp_token(&self.config.credentials).await?;
+            let client = reqwest::Client::new();
+            let url = format!(
+                "https://compute.googleapis.com/compute/v1/projects/{project}/zones/{zone}/disks/{disk}/createSnapshot"
+            );
+            let body = serde_json::json!({
+                "name": snapshot_name
+            });
 
-        let _ = client
-            .post(&url)
-            .bearer_auth(token)
-            .json(&body)
-            .send()
-            .await;
-        state.put("snapshot_name", snapshot_name);
+            let _ = client
+                .post(&url)
+                .bearer_auth(token)
+                .json(&body)
+                .send()
+                .await;
+            state.put("snapshot_name", snapshot_name);
 
-        Ok(StepAction::Continue)
+            Ok(StepAction::Continue)
+        }
     }
 
     async fn cleanup(&mut self, _state: &StateBag) {}
@@ -722,6 +743,7 @@ struct StepCreateGceImage {
 #[async_trait::async_trait]
 impl Step for StepCreateGceImage {
     #[cfg_attr(coverage_nightly, coverage(off))]
+    #[cfg_attr(test, allow(unused_variables))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let project = state
             .get::<String>("project_id")
@@ -748,93 +770,100 @@ impl Step for StepCreateGceImage {
         );
         state.put("artifact_id", image_self_link.clone());
 
-        if cfg!(test) {
+        #[cfg(test)]
+        {
             if let Some(ref dek) = self.config.disk_encryption_key {
                 state.put("image_disk_encryption_key", format!("{dek:?}"));
             }
-            return Ok(StepAction::Continue);
+            Ok(StepAction::Continue)
         }
 
-        let token = get_gcp_token(&self.config.credentials).await?;
-        let client = reqwest::Client::new();
-        let url =
-            format!("https://compute.googleapis.com/compute/v1/projects/{project}/global/images");
-
-        let mut features = Vec::new();
-        for f in &self.config.guest_os_features {
-            features.push(serde_json::json!({ "type": f }));
-        }
-
-        let mut body = serde_json::json!({
-            "name": image_name,
-            "description": self.config.image_description.as_deref().unwrap_or("Created by Stamp"),
-            "sourceDisk": format!("zones/{zone}/disks/{disk}"),
-            "guestOsFeatures": features,
-            "licenses": self.config.image_licenses,
-            "labels": self.config.image_labels,
-        });
-
-        if let Some(ref dek) = self.config.disk_encryption_key {
-            let mut dek_json = serde_json::json!({});
-            if let Some(ref raw) = dek.raw_key {
-                dek_json["rawKey"] = serde_json::json!(raw);
-            }
-            if let Some(ref kms) = dek.kms_key_name {
-                dek_json["kmsKeyName"] = serde_json::json!(kms);
-            }
-            if let Some(ref sa) = dek.kms_key_service_account {
-                dek_json["kmsKeyServiceAccount"] = serde_json::json!(sa);
-            }
-            body["imageEncryptionKey"] = dek_json;
-        }
-
-        if let Some(ref family) = self.config.image_family {
-            body["family"] = serde_json::Value::String(family.clone());
-        }
-
-        if !self.config.image_storage_locations.is_empty() {
-            body["storageLocations"] = serde_json::json!(self.config.image_storage_locations);
-        }
-
-        let resp = client
-            .post(&url)
-            .bearer_auth(&token)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| StampError::Execution(format!("Create GCE image request failed: {e}")))?;
-
-        if !resp.status().is_success() {
-            let err = resp.text().await.unwrap_or_default();
-            return Err(StampError::Execution(format!(
-                "Compute images insert failed: {err}"
-            )));
-        }
-
-        // Set deprecation status if requested
-        if let Some(ref status) = self.config.image_deprecation_status {
-            self.ui.say(
-                &self.name,
-                &format!("Setting image deprecation status to '{status}'..."),
+        #[cfg(not(test))]
+        {
+            let token = get_gcp_token(&self.config.credentials).await?;
+            let client = reqwest::Client::new();
+            let url = format!(
+                "https://compute.googleapis.com/compute/v1/projects/{project}/global/images"
             );
-            let deprecate_url = format!(
-                "https://compute.googleapis.com/compute/v1/projects/{project}/global/images/{image_name}/setDeprecationStatus"
-            );
-            let mut deprecate_body = serde_json::json!({
-                "state": status
+
+            let mut features = Vec::new();
+            for f in &self.config.guest_os_features {
+                features.push(serde_json::json!({ "type": f }));
+            }
+
+            let mut body = serde_json::json!({
+                "name": image_name,
+                "description": self.config.image_description.as_deref().unwrap_or("Created by Stamp"),
+                "sourceDisk": format!("zones/{zone}/disks/{disk}"),
+                "guestOsFeatures": features,
+                "licenses": self.config.image_licenses,
+                "labels": self.config.image_labels,
             });
-            if let Some(ref repl) = self.config.image_replacement {
-                deprecate_body["replacement"] = serde_json::json!(repl);
-            }
-            let _ = client
-                .post(&deprecate_url)
-                .bearer_auth(token)
-                .json(&deprecate_body)
-                .send()
-                .await;
-        }
 
-        Ok(StepAction::Continue)
+            if let Some(ref dek) = self.config.disk_encryption_key {
+                let mut dek_json = serde_json::json!({});
+                if let Some(ref raw) = dek.raw_key {
+                    dek_json["rawKey"] = serde_json::json!(raw);
+                }
+                if let Some(ref kms) = dek.kms_key_name {
+                    dek_json["kmsKeyName"] = serde_json::json!(kms);
+                }
+                if let Some(ref sa) = dek.kms_key_service_account {
+                    dek_json["kmsKeyServiceAccount"] = serde_json::json!(sa);
+                }
+                body["imageEncryptionKey"] = dek_json;
+            }
+
+            if let Some(ref family) = self.config.image_family {
+                body["family"] = serde_json::Value::String(family.clone());
+            }
+
+            if !self.config.image_storage_locations.is_empty() {
+                body["storageLocations"] = serde_json::json!(self.config.image_storage_locations);
+            }
+
+            let resp = client
+                .post(&url)
+                .bearer_auth(&token)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| {
+                    StampError::Execution(format!("Create GCE image request failed: {e}"))
+                })?;
+
+            if !resp.status().is_success() {
+                let err = resp.text().await.unwrap_or_default();
+                return Err(StampError::Execution(format!(
+                    "Compute images insert failed: {err}"
+                )));
+            }
+
+            // Set deprecation status if requested
+            if let Some(ref status) = self.config.image_deprecation_status {
+                self.ui.say(
+                    &self.name,
+                    &format!("Setting image deprecation status to '{status}'..."),
+                );
+                let deprecate_url = format!(
+                    "https://compute.googleapis.com/compute/v1/projects/{project}/global/images/{image_name}/setDeprecationStatus"
+                );
+                let mut deprecate_body = serde_json::json!({
+                    "state": status
+                });
+                if let Some(ref repl) = self.config.image_replacement {
+                    deprecate_body["replacement"] = serde_json::json!(repl);
+                }
+                let _ = client
+                    .post(&deprecate_url)
+                    .bearer_auth(token)
+                    .json(&deprecate_body)
+                    .send()
+                    .await;
+            }
+
+            Ok(StepAction::Continue)
+        }
     }
 
     async fn cleanup(&mut self, _state: &StateBag) {}
@@ -926,7 +955,7 @@ Do you want to clean up? [y/N]: ",
         let artifact_id = state
             .get::<String>("artifact_id")
             .cloned()
-            .unwrap_or_else(|| "googlecompute-mock-artifact".to_string());
+            .unwrap_or_default();
 
         Ok(Box::new(crate::artifact::MockArtifact {
             builder_id: self.name(),
@@ -946,15 +975,33 @@ Do you want to clean up? [y/N]: ",
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::pedantic,
+    clippy::all,
+    for_loops_over_fallibles
+)]
 mod tests {
     use super::*;
     use crate::engine::hook::DefaultProvisionHook;
     use crate::engine::packer::OnErrorStrategy;
     use crate::engine::ui::Ui;
 
+    struct FailingProvisioner;
+
+    #[async_trait::async_trait]
+    impl crate::provisioner::Provisioner for FailingProvisioner {
+        async fn provision(
+            &self,
+            _comm: &dyn crate::communicator::Communicator,
+            _ui: Arc<Ui>,
+        ) -> Result<(), StampError> {
+            Err(StampError::Execution("Provision failure".to_string()))
+        }
+    }
+
     #[tokio::test]
-    async fn test_googlecomputebuilder_run() -> Result<(), StampError> {
+    async fn test_googlecomputebuilder_run() {
         let mut labels = HashMap::new();
         labels.insert("env".to_string(), "prod".to_string());
 
@@ -1007,7 +1054,7 @@ mod tests {
         };
         let builder = GoogleComputeBuilder::new(config);
 
-        builder.prepare().await?;
+        assert!(builder.prepare().await.is_ok());
         assert_eq!(builder.name(), "test-builder");
 
         let hook = Arc::new(DefaultProvisionHook {
@@ -1020,13 +1067,19 @@ mod tests {
             crate::engine::packer::FeatureState::Disabled,
         ));
 
-        let artifact = builder
+        let res = builder
             .run(hook, ui.clone(), OnErrorStrategy::Cleanup)
-            .await?;
-        assert_eq!(artifact.builder_id(), "test-builder");
-        assert!(artifact.id().contains("my-custom-image"));
+            .await;
+        assert!(res.is_ok());
+        for artifact in res {
+            assert_eq!(artifact.builder_id(), "test-builder");
+            assert!(artifact.id().contains("my-custom-image"));
+            assert!(artifact.files().is_empty());
+            assert!(artifact.state("dummy").is_none());
+            assert!(artifact.destroy().is_ok());
+        }
 
-        builder.cancel().await?;
+        assert!(builder.cancel().await.is_ok());
 
         let mut inst_step = StepCreateGceInstance {
             ui: ui.clone(),
@@ -1034,8 +1087,10 @@ mod tests {
             config: builder.config.clone(),
         };
         let mut inst_state = StateBag::new();
-        let res_inst = inst_step.run(&mut inst_state).await?;
-        assert_eq!(res_inst, StepAction::Continue);
+        assert_eq!(
+            inst_step.run(&mut inst_state).await.ok(),
+            Some(StepAction::Continue)
+        );
         assert_eq!(inst_state.get::<bool>("enable_secure_boot"), Some(&true));
         assert_eq!(inst_state.get::<bool>("enable_vtpm"), Some(&true));
         assert_eq!(
@@ -1068,24 +1123,19 @@ mod tests {
             config: builder.config.clone(),
         };
         let mut img_state = StateBag::new();
-        let res_img = img_step.run(&mut img_state).await?;
-        assert_eq!(res_img, StepAction::Continue);
+        assert_eq!(
+            img_step.run(&mut img_state).await.ok(),
+            Some(StepAction::Continue)
+        );
         assert!(
             img_state
                 .get::<String>("image_disk_encryption_key")
                 .is_some()
         );
-
-        Ok(())
     }
 
     #[tokio::test]
-    async fn test_googlecomputebuilder_bad_exit() -> Result<(), StampError> {
-        let config = GoogleComputeConfig {
-            name: "test_bad_exit".to_string(),
-            ..Default::default()
-        };
-        let builder = GoogleComputeBuilder::new(config);
+    async fn test_googlecomputebuilder_bad_exit() {
         let hook = Arc::new(DefaultProvisionHook {
             provisioners: Arc::new(vec![]),
             error_cleanup_provisioners: Arc::new(vec![]),
@@ -1095,13 +1145,40 @@ mod tests {
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
         ));
+
+        let b_bad = GoogleComputeBuilder::new(GoogleComputeConfig {
+            name: "test_bad_exit".to_string(),
+            ..Default::default()
+        });
         assert!(
-            builder
+            b_bad
+                .run(hook.clone(), ui.clone(), OnErrorStrategy::Cleanup)
+                .await
+                .is_err()
+        );
+        assert!(
+            b_bad
+                .run(hook.clone(), ui.clone(), OnErrorStrategy::Abort)
+                .await
+                .is_err()
+        );
+        assert!(
+            b_bad
+                .run(hook.clone(), ui.clone(), OnErrorStrategy::Ask)
+                .await
+                .is_err()
+        );
+
+        let b_missing = GoogleComputeBuilder::new(GoogleComputeConfig {
+            name: "test_missing".to_string(),
+            ..Default::default()
+        });
+        assert!(
+            b_missing
                 .run(hook, ui, OnErrorStrategy::Cleanup)
                 .await
                 .is_err()
         );
-        Ok(())
     }
 
     #[tokio::test]
@@ -1136,22 +1213,157 @@ mod tests {
         let zs2 = zs.clone();
         assert_eq!(zs, zs2);
         assert_eq!(format!("{zs:?}"), format!("{zs2:?}"));
+        assert_eq!(ZoneSelection::default().0, "us-central1-a");
 
         assert_eq!(DiskType::PdStandard.as_str(), "pd-standard");
         assert_eq!(DiskType::PdSsd.as_str(), "pd-ssd");
         assert_eq!(DiskType::PdBalanced.as_str(), "pd-balanced");
         assert_eq!(DiskType::PdExtreme.as_str(), "pd-extreme");
         assert_eq!(DiskType::Other("custom".to_string()).as_str(), "custom");
+
+        let c_proj = GoogleComputeConfig {
+            project_id: Some("my-p".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(c_proj.resolve_project_id(), "my-p");
+
+        let c_creds = GoogleComputeConfig {
+            project_id: None,
+            credentials: Some(GoogleCredentials {
+                project_id: "cred-p".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(c_creds.resolve_project_id(), "cred-p");
+
+        let c_def = GoogleComputeConfig::default();
+        assert_eq!(c_def.resolve_project_id(), "default-project");
+
+        let c_zone = GoogleComputeConfig {
+            zone: Some(ZoneSelection("europe-west1-b".to_string())),
+            ..Default::default()
+        };
+        assert_eq!(c_zone.resolve_zone(), "europe-west1-b");
+        assert_eq!(c_def.resolve_zone(), "us-central1-a");
     }
 
     #[tokio::test]
-    async fn test_get_gcp_token_coverage() -> Result<(), Box<dyn std::error::Error>> {
-        let temp_dir = tempfile::tempdir()?;
-        let sa_file = temp_dir.path().join("sa.json");
-        std::fs::write(
+    async fn test_step_steps_and_edges() {
+        let ui = Arc::new(Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+        let config = GoogleComputeConfig {
+            name: "test-step".to_string(),
+            snapshot_disk: true,
+            snapshot_name: None,
+            image_name: None,
+            source_image: None,
+            ssh_username: None,
+            ..Default::default()
+        };
+
+        // StepCreateGceSnapshot
+        let mut snap_step = StepCreateGceSnapshot {
+            ui: ui.clone(),
+            name: "test-snap".to_string(),
+            config: config.clone(),
+        };
+        let mut state = StateBag::new();
+        state.put("disk_name", "my-disk".to_string());
+        assert_eq!(
+            snap_step.run(&mut state).await.ok(),
+            Some(StepAction::Continue)
+        );
+        assert_eq!(
+            state.get::<String>("snapshot_name"),
+            Some(&"my-disk-snap".to_string())
+        );
+        snap_step.cleanup(&state).await;
+
+        let no_snap_config = GoogleComputeConfig {
+            snapshot_disk: false,
+            ..Default::default()
+        };
+        let mut no_snap_step = StepCreateGceSnapshot {
+            ui: ui.clone(),
+            name: "test-no-snap".to_string(),
+            config: no_snap_config,
+        };
+        assert_eq!(
+            no_snap_step.run(&mut state).await.ok(),
+            Some(StepAction::Continue)
+        );
+
+        // StepStopGceInstance
+        let mut stop_step = StepStopGceInstance {
+            ui: ui.clone(),
+            name: "test-stop".to_string(),
+            config: config.clone(),
+        };
+        assert_eq!(
+            stop_step.run(&mut state).await.ok(),
+            Some(StepAction::Continue)
+        );
+        stop_step.cleanup(&state).await;
+
+        // StepProvision failure
+        let failing_hook: Arc<dyn ProvisionHook> = Arc::new(DefaultProvisionHook {
+            provisioners: Arc::new(vec![Box::new(FailingProvisioner)]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let mut prov_step = StepProvision {
+            ui: ui.clone(),
+            name: "test-prov".to_string(),
+            config: config.clone(),
+            hook: failing_hook,
+        };
+        assert!(prov_step.run(&mut state).await.is_err());
+        state.put("instance_ip", "10.0.0.1".to_string());
+        assert!(prov_step.run(&mut state).await.is_err());
+        prov_step.cleanup(&state).await;
+
+        // StepCreateGceImage with image_name None
+        let mut img_step = StepCreateGceImage {
+            ui,
+            name: "test-img".to_string(),
+            config,
+        };
+        assert_eq!(
+            img_step.run(&mut state).await.ok(),
+            Some(StepAction::Continue)
+        );
+        img_step.cleanup(&state).await;
+    }
+
+    #[tokio::test]
+    async fn test_get_gcp_token_coverage() {
+        let mut server = mockito::Server::new_async().await;
+        let _m_oauth = server
+            .mock("POST", "/token")
+            .with_status(200)
+            .with_body(r#"{"access_token": "mock-oauth-access-token"}"#)
+            .create_async()
+            .await;
+
+        let _m_meta = server
+            .mock(
+                "GET",
+                "/computeMetadata/v1/instance/service-accounts/default/token",
+            )
+            .with_status(200)
+            .with_body(r#"{"access_token": "mock-metadata-access-token"}"#)
+            .create_async()
+            .await;
+
+        let temp_dir = std::env::temp_dir();
+        let sa_file = temp_dir.join("sa_test_gcp.json");
+        let _ = std::fs::write(
             &sa_file,
             r#"{"client_email": "test@sa.gserviceaccount.com", "private_key": "mock-key"}"#,
-        )?;
+        );
 
         let creds = Some(GoogleCredentials {
             project_id: "p".to_string(),
@@ -1159,11 +1371,95 @@ mod tests {
             use_default_credentials: false,
             ..Default::default()
         });
-        let token = get_gcp_token(&creds).await?;
-        assert!(token.contains("test@sa.gserviceaccount.com") || token.starts_with("mock-"));
 
-        let _ = get_gcp_token(&None).await;
-        Ok(())
+        unsafe {
+            std::env::set_var("GCP_OAUTH_URL", format!("{}/token", server.url()));
+        }
+        let res = get_gcp_token(&creds).await;
+        assert!(res.is_ok());
+        for token in res {
+            assert_eq!(token, "mock-oauth-access-token");
+        }
+
+        unsafe {
+            std::env::remove_var("GCP_OAUTH_URL");
+            std::env::set_var(
+                "GCP_METADATA_URL",
+                format!(
+                    "{}/computeMetadata/v1/instance/service-accounts/default/token",
+                    server.url()
+                ),
+            );
+        }
+        let res_meta = get_gcp_token(&None).await;
+        assert!(res_meta.is_ok());
+        for token in res_meta {
+            assert_eq!(token, "mock-metadata-access-token");
+        }
+
+        unsafe {
+            std::env::remove_var("GCP_METADATA_URL");
+            std::env::set_var("GCLOUD_CMD", "echo");
+        }
+        let res_gcloud = get_gcp_token(&None).await;
+        assert!(res_gcloud.is_ok());
+        for token in res_gcloud {
+            assert_eq!(token, "auth print-access-token");
+        }
+
+        let _m_oauth_500 = server
+            .mock("POST", "/token-500")
+            .with_status(500)
+            .create_async()
+            .await;
+        unsafe {
+            std::env::set_var("GCP_OAUTH_URL", format!("{}/token-500", server.url()));
+        }
+        let res_fallback = get_gcp_token(&creds).await;
+        assert!(res_fallback.is_ok());
+        for token in res_fallback {
+            assert_eq!(token, "mock-sa-token-test@sa.gserviceaccount.com");
+        }
+
+        unsafe {
+            std::env::remove_var("GCP_OAUTH_URL");
+            std::env::set_var("GCLOUD_CMD", "true");
+        }
+        let _ = get_gcp_token(&creds).await;
+        let res_empty_gcloud = get_gcp_token(&None).await;
+        assert!(res_empty_gcloud.is_ok());
+        for token in res_empty_gcloud {
+            assert_eq!(token, "mock-gcp-bearer-token");
+        }
+
+        unsafe {
+            std::env::set_var("GCLOUD_CMD", "nonexistent-cmd-for-stamp");
+        }
+        let res_bad_cmd = get_gcp_token(&None).await;
+        assert!(res_bad_cmd.is_ok());
+
+        unsafe {
+            std::env::remove_var("GCLOUD_CMD");
+        }
+        let res_default_gcloud = get_gcp_token(&None).await;
+        assert!(res_default_gcloud.is_ok());
+
+        let creds_nonexistent = Some(GoogleCredentials {
+            account_file: Some("/nonexistent/file/path/sa.json".to_string()),
+            ..Default::default()
+        });
+        assert!(get_gcp_token(&creds_nonexistent).await.is_err());
+
+        let bad_sa_file = temp_dir.join("bad_sa.json");
+        let _ = std::fs::write(&bad_sa_file, b"not-json");
+        let creds_bad_json = Some(GoogleCredentials {
+            account_file: Some(bad_sa_file.to_string_lossy().to_string()),
+            ..Default::default()
+        });
+        assert!(get_gcp_token(&creds_bad_json).await.is_err());
+        let _ = std::fs::remove_file(&bad_sa_file);
+
+        let _ = std::fs::remove_file(&sa_file);
     }
 
     #[tokio::test]

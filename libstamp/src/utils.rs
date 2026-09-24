@@ -367,7 +367,6 @@ pub fn init_packer_logging() -> Result<Option<String>, crate::error::StampError>
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -397,24 +396,23 @@ mod tests {
     }
 
     #[test]
-    fn test_load_variables_with_precedence() {
+    fn test_load_variables_with_precedence() -> Result<(), Box<dyn std::error::Error>> {
         let _guard = ENV_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let temp_dir =
             std::env::temp_dir().join(format!("stamp_test_vars_{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::create_dir_all(&temp_dir)?;
 
         // 1. Auto-loaded file
         let auto_file = temp_dir.join("test.auto.pkrvars.json");
         std::fs::write(
             &auto_file,
             r#"{"foo": "from_auto", "bar": "from_auto", "auto_num": 99}"#,
-        )
-        .unwrap();
+        )?;
         let ignore_file = temp_dir.join("ignore.txt");
-        std::fs::write(&ignore_file, b"ignore").unwrap();
+        std::fs::write(&ignore_file, b"ignore")?;
 
         // 2. Env var
         unsafe {
@@ -427,8 +425,7 @@ mod tests {
         std::fs::write(
             &var_file,
             r#"{"baz": "from_var_file", "qux": "from_var_file"}"#,
-        )
-        .unwrap();
+        )?;
         let var_files = vec![var_file.to_string_lossy().to_string()];
 
         // 4. CLI var
@@ -453,10 +450,11 @@ mod tests {
             std::env::remove_var("PKR_VAR_baz");
         }
         let _ = std::fs::remove_dir_all(temp_dir);
+        Ok(())
     }
 
     #[test]
-    fn test_load_variables_edge_cases() {
+    fn test_load_variables_edge_cases() -> Result<(), Box<dyn std::error::Error>> {
         let _guard = ENV_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -475,13 +473,13 @@ mod tests {
         // 2. Non-string JSON values in var file
         let temp_dir =
             std::env::temp_dir().join(format!("stamp_test_vars_edge_{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::create_dir_all(&temp_dir)?;
 
         let num_file = temp_dir.join("num.pkrvars.json");
-        std::fs::write(&num_file, r#"{"count": 42, "enabled": true}"#).unwrap();
+        std::fs::write(&num_file, r#"{"count": 42, "enabled": true}"#)?;
 
         let broken_auto = temp_dir.join("broken.auto.pkrvars.json");
-        std::fs::write(&broken_auto, b"not json").unwrap();
+        std::fs::write(&broken_auto, b"not json")?;
 
         let cli_malformed = vec!["bad_format".to_string(), "valid=yes".to_string()];
         let var_files = vec![
@@ -497,13 +495,16 @@ mod tests {
         assert!(!result.contains_key("bad_format"));
 
         let _ = std::fs::remove_dir_all(temp_dir);
+        Ok(())
     }
 
     #[test]
-    fn test_packer_config_path() {
+    fn test_packer_config_path() -> Result<(), Box<dyn std::error::Error>> {
         let _guard = ENV_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        // 1. PACKER_CONFIG set
         unsafe {
             std::env::set_var("PACKER_CONFIG", "/custom/path/config.json");
         }
@@ -514,11 +515,39 @@ mod tests {
         unsafe {
             std::env::remove_var("PACKER_CONFIG");
         }
-        let fallback = packer_config_path();
-        assert!(
-            fallback.to_str().unwrap().contains(".packerconfig")
-                || fallback.to_str().unwrap().contains("packer.json")
+
+        // 2. HOME with legacy file exists
+        let temp_dir = tempfile::tempdir()?;
+        let legacy_file = temp_dir.path().join(".packerconfig");
+        std::fs::write(&legacy_file, b"legacy")?;
+        unsafe {
+            std::env::set_var("HOME", temp_dir.path());
+        }
+        assert_eq!(packer_config_path(), legacy_file);
+
+        // 3. HOME with XDG file exists
+        let _ = std::fs::remove_file(&legacy_file);
+        let xdg_dir = temp_dir.path().join(".config").join("packer");
+        std::fs::create_dir_all(&xdg_dir)?;
+        let xdg_file = xdg_dir.join("packer.json");
+        std::fs::write(&xdg_file, b"xdg")?;
+        assert_eq!(packer_config_path(), xdg_file);
+
+        // 4. HOME with neither file existing (returns legacy path)
+        let _ = std::fs::remove_file(&xdg_file);
+        assert_eq!(packer_config_path(), legacy_file);
+
+        // 5. Neither HOME nor USERPROFILE set
+        unsafe {
+            std::env::remove_var("HOME");
+            std::env::remove_var("USERPROFILE");
+        }
+        assert_eq!(
+            packer_config_path(),
+            std::path::PathBuf::from(".packerconfig")
         );
+
+        Ok(())
     }
 
     #[test]
@@ -540,7 +569,7 @@ mod tests {
     }
 
     #[test]
-    fn test_packer_config_dir() {
+    fn test_packer_config_dir() -> Result<(), Box<dyn std::error::Error>> {
         let _guard = ENV_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -551,54 +580,149 @@ mod tests {
             packer_config_dir(),
             std::path::PathBuf::from("/custom/config/dir")
         );
+
+        // Empty PACKER_CONFIG_DIR
+        unsafe {
+            std::env::set_var("PACKER_CONFIG_DIR", "   ");
+        }
+        let temp_dir = tempfile::tempdir()?;
+        unsafe {
+            std::env::set_var("HOME", temp_dir.path());
+        }
+        assert_eq!(packer_config_dir(), temp_dir.path().join(".packer.d"));
+
+        // Fallback when neither HOME nor USERPROFILE is set
         unsafe {
             std::env::remove_var("PACKER_CONFIG_DIR");
+            std::env::remove_var("HOME");
+            std::env::remove_var("USERPROFILE");
         }
-        let dir = packer_config_dir();
-        assert!(dir.to_string_lossy().contains(".packer.d"));
+        assert_eq!(packer_config_dir(), std::path::PathBuf::from(".packer.d"));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_get_or_download_cached_and_clean() {
+    async fn test_get_or_download_cached_and_clean() -> Result<(), Box<dyn std::error::Error>> {
         use sha2::Digest as _;
         let _guard = ENV_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        let temp_dir = tempfile::tempdir().unwrap();
+        let temp_dir = tempfile::tempdir()?;
         unsafe {
             std::env::set_var("PACKER_CACHE_DIR", temp_dir.path());
         }
 
+        // 1. Local file with checksum
         let source_file = temp_dir.path().join("source.iso");
-        std::fs::write(&source_file, b"ISO_CONTENT_12345").unwrap();
+        std::fs::write(&source_file, b"ISO_CONTENT_12345")?;
         let expected_sha256 = hex::encode(sha2::Sha256::digest(b"ISO_CONTENT_12345"));
 
-        let cached = get_or_download_cached(source_file.to_str().unwrap(), Some(&expected_sha256))
-            .await
-            .unwrap();
+        let source_path_str = match source_file.to_str() {
+            Some(s) => s,
+            None => return Err("Invalid path string".into()),
+        };
+
+        let cached = get_or_download_cached(source_path_str, Some(&expected_sha256)).await?;
         assert!(cached.exists());
 
-        // Re-read from cache
-        let cached2 = get_or_download_cached(source_file.to_str().unwrap(), Some(&expected_sha256))
-            .await
-            .unwrap();
+        // 2. Re-read from cache with checksum
+        let cached2 = get_or_download_cached(source_path_str, Some(&expected_sha256)).await?;
         assert_eq!(cached, cached2);
 
-        // Checksum mismatch
-        assert!(
-            get_or_download_cached(source_file.to_str().unwrap(), Some("invalid_checksum"),)
-                .await
-                .is_err()
-        );
+        // 3. Re-read from cache without checksum
+        let cached3 = get_or_download_cached(source_path_str, None).await?;
+        assert_eq!(cached, cached3);
 
-        // Clean cache
-        let cleaned = clean_cache(temp_dir.path(), 0).unwrap();
+        // 4. Local file without checksum
+        let other_file = temp_dir.path().join("other.bin");
+        std::fs::write(&other_file, b"OTHER_DATA")?;
+        let other_path_str = match other_file.to_str() {
+            Some(s) => s,
+            None => return Err("Invalid path string".into()),
+        };
+        let other_cached = get_or_download_cached(other_path_str, None).await?;
+        assert!(other_cached.exists());
+
+        // 5. Checksum mismatch on local file
+        let bad_checksum = get_or_download_cached(source_path_str, Some("bad_hash")).await;
+        assert!(bad_checksum.is_err());
+
+        // 6. Cache file corrupted (mismatch causes removal and re-fetching)
+        std::fs::write(&cached, b"CORRUPTED_CACHE")?;
+        let re_cached = get_or_download_cached(source_path_str, Some(&expected_sha256)).await?;
+        assert_eq!(re_cached, cached);
+
+        // 7. Clean cache
+        let cleaned = clean_cache(temp_dir.path(), 0)?;
         assert!(cleaned >= 1);
+
+        // 7b. Clean cache with recent files (max_age_days = 100, none removed)
+        let fresh_file = temp_dir.path().join("fresh.bin");
+        std::fs::write(&fresh_file, b"fresh")?;
+        let cleaned_fresh = clean_cache(temp_dir.path(), 100)?;
+        assert_eq!(cleaned_fresh, 0);
+
+        // 8. Clean cache on nonexistent directory
+        let nonexistent = temp_dir.path().join("nonexistent_sub");
+        assert_eq!(clean_cache(&nonexistent, 0)?, 0);
 
         unsafe {
             std::env::remove_var("PACKER_CACHE_DIR");
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_or_download_cached_http() -> Result<(), Box<dyn std::error::Error>> {
+        use sha2::Digest as _;
+        let _guard = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let temp_dir = tempfile::tempdir()?;
+        unsafe {
+            std::env::set_var("PACKER_CACHE_DIR", temp_dir.path());
+        }
+
+        let mut server = mockito::Server::new_async().await;
+        let body = b"HTTP_DOWNLOADED_PAYLOAD";
+        let expected_sha256 = hex::encode(sha2::Sha256::digest(body));
+
+        let _mock = server
+            .mock("GET", "/file.tar.gz")
+            .with_status(200)
+            .with_body(body)
+            .expect(3)
+            .create_async()
+            .await;
+
+        let url = format!("{}/file.tar.gz", server.url());
+
+        // 1. Download with valid checksum
+        let cached = get_or_download_cached(&url, Some(&expected_sha256)).await?;
+        assert!(cached.exists());
+        assert_eq!(std::fs::read(&cached)?, body);
+
+        // Clean cache to test download without checksum
+        let _ = clean_cache(temp_dir.path(), 0);
+
+        // 2. Download without checksum (None)
+        let cached_no_cs = get_or_download_cached(&url, None).await?;
+        assert!(cached_no_cs.exists());
+        assert_eq!(std::fs::read(&cached_no_cs)?, body);
+
+        // Clean cache to test checksum mismatch
+        let _ = clean_cache(temp_dir.path(), 0);
+
+        // 3. Download with checksum mismatch
+        let mismatch_res = get_or_download_cached(&url, Some("bad_checksum_hash")).await;
+        assert!(mismatch_res.is_err());
+
+        unsafe {
+            std::env::remove_var("PACKER_CACHE_DIR");
+        }
+        Ok(())
     }
 
     #[test]
@@ -607,38 +731,82 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         unsafe {
-            std::env::set_var("PACKER_PLUGIN_PATH", "/custom/plugins:/other/plugins");
+            std::env::set_var("PACKER_PLUGIN_PATH", "/custom/plugins::/other/plugins:");
         }
         let paths = resolve_plugin_search_paths();
         assert!(paths.contains(&std::path::PathBuf::from("/custom/plugins")));
         assert!(paths.contains(&std::path::PathBuf::from("/other/plugins")));
         assert!(paths.contains(&std::path::PathBuf::from("./plugins")));
+
+        // Test with PACKER_PLUGIN_PATH unset and HOME/USERPROFILE unset
         unsafe {
             std::env::remove_var("PACKER_PLUGIN_PATH");
+            std::env::remove_var("HOME");
+            std::env::remove_var("USERPROFILE");
         }
+        let paths_no_env = resolve_plugin_search_paths();
+        assert!(paths_no_env.contains(&std::path::PathBuf::from("./plugins")));
     }
 
     #[test]
-    fn test_init_packer_logging() {
+    fn test_init_packer_logging() -> Result<(), Box<dyn std::error::Error>> {
         let _guard = ENV_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        let temp_log =
-            std::env::temp_dir().join(format!("test_packer_log_{}.log", uuid::Uuid::new_v4()));
+        let temp_dir = tempfile::tempdir()?;
+        let temp_log = temp_dir.path().join("test_packer_log.log");
+        let temp_log_str = match temp_log.to_str() {
+            Some(s) => s,
+            None => return Err("Invalid path string".into()),
+        };
+
+        // 1. "1" level
         unsafe {
             std::env::set_var("PACKER_LOG", "1");
-            std::env::set_var("PACKER_LOG_PATH", temp_log.to_str().unwrap());
+            std::env::set_var("PACKER_LOG_PATH", temp_log_str);
         }
-
-        let lvl = init_packer_logging().unwrap();
+        let lvl = init_packer_logging()?;
         assert_eq!(lvl.as_deref(), Some("DEBUG"));
         assert!(temp_log.exists());
 
+        // 2. TRACE level
         unsafe {
-            std::env::remove_var("PACKER_LOG");
+            std::env::set_var("PACKER_LOG", "TRACE");
+        }
+        assert_eq!(init_packer_logging()?.as_deref(), Some("TRACE"));
+
+        // 3. INFO level without PACKER_LOG_PATH
+        unsafe {
+            std::env::set_var("PACKER_LOG", "INFO");
             std::env::remove_var("PACKER_LOG_PATH");
         }
-        let _ = std::fs::remove_file(&temp_log);
+        assert_eq!(init_packer_logging()?.as_deref(), Some("INFO"));
+
+        // 4. WARN level
+        unsafe {
+            std::env::set_var("PACKER_LOG", "warn");
+        }
+        assert_eq!(init_packer_logging()?.as_deref(), Some("WARN"));
+
+        // 5. ERROR level
+        unsafe {
+            std::env::set_var("PACKER_LOG", "error");
+        }
+        assert_eq!(init_packer_logging()?.as_deref(), Some("ERROR"));
+
+        // 6. Unknown level
+        unsafe {
+            std::env::set_var("PACKER_LOG", "unknown_level");
+        }
+        assert_eq!(init_packer_logging()?, None);
+
+        // 7. Unset PACKER_LOG
+        unsafe {
+            std::env::remove_var("PACKER_LOG");
+        }
+        assert_eq!(init_packer_logging()?, None);
+
+        Ok(())
     }
 }

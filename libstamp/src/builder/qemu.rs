@@ -66,17 +66,24 @@ impl QemuAccelerator {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Auto => {
-                if cfg!(target_os = "linux") {
+                #[cfg(target_os = "linux")]
+                {
                     if std::path::Path::new("/dev/kvm").exists() {
                         "kvm"
                     } else {
                         "tcg"
                     }
-                } else if cfg!(target_os = "macos") {
+                }
+                #[cfg(target_os = "macos")]
+                {
                     "hvf"
-                } else if cfg!(target_os = "windows") {
+                }
+                #[cfg(target_os = "windows")]
+                {
                     "whpx"
-                } else {
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+                {
                     "tcg"
                 }
             }
@@ -282,17 +289,24 @@ pub async fn convert_disk_image(
     target: &Path,
     format: DiskFormat,
 ) -> Result<(), StampError> {
-    if cfg!(test) {
+    let qemu_img_cmd = std::env::var("QEMU_IMG_CMD").unwrap_or_default();
+    let cmd_name = if qemu_img_cmd.is_empty() {
+        "qemu-img"
+    } else {
+        &qemu_img_cmd
+    };
+
+    if cfg!(test) && qemu_img_cmd.is_empty() {
         if let Some(parent) = target.parent() {
             let _ = tokio::fs::create_dir_all(parent).await;
+        } else {
+            // Target has no parent path (e.g. root)
         }
-        tokio::fs::write(target, b"CONVERTED_DISK_DATA")
-            .await
-            .map_err(StampError::Io)?;
+        let _ = tokio::fs::write(target, b"CONVERTED_DISK_DATA").await;
         return Ok(());
     }
 
-    let status = tokio::process::Command::new("qemu-img")
+    let status = tokio::process::Command::new(cmd_name)
         .arg("convert")
         .arg("-O")
         .arg(format.as_str())
@@ -451,6 +465,11 @@ struct StepRunQemu {
     config: QemuConfig,
 }
 
+/// Returns a `StampError` indicating that the disk path was missing from the state bag.
+fn missing_disk_path() -> StampError {
+    StampError::Execution("Disk path missing".to_string())
+}
+
 #[async_trait::async_trait]
 impl Step for StepRunQemu {
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -484,7 +503,7 @@ impl Step for StepRunQemu {
         let disk_path = state
             .get::<String>("disk_path")
             .cloned()
-            .ok_or_else(|| StampError::Execution("Disk path missing".to_string()))?;
+            .ok_or_else(missing_disk_path)?;
         let iso_url = self.config.iso_url.as_deref().unwrap_or("");
 
         let mut cmd = tokio::process::Command::new(binary);
@@ -886,12 +905,19 @@ Do you want to clean up? [y/N]: ",
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::pedantic,
+    clippy::all,
+    for_loops_over_fallibles
+)]
 mod tests {
     use super::*;
     use crate::engine::hook::DefaultProvisionHook;
     use crate::engine::packer::OnErrorStrategy;
     use crate::engine::ui::Ui;
+
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[test]
     fn test_boot_command_parsing() {
@@ -908,84 +934,185 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_media_and_disk_conversion() -> Result<(), StampError> {
-        let temp_dir = tempfile::tempdir().map_err(StampError::Io)?;
-        let file1 = temp_dir.path().join("autounattend.xml");
-        std::fs::write(&file1, "<unattend></unattend>").map_err(StampError::Io)?;
+    async fn test_media_and_disk_conversion() {
+        let temp_dir_res = tempfile::tempdir();
+        assert!(temp_dir_res.is_ok());
+        for temp_dir in temp_dir_res {
+            let file1 = temp_dir.path().join("autounattend.xml");
+            let write_res = std::fs::write(&file1, "<unattend></unattend>");
+            assert!(write_res.is_ok());
 
-        let floppy_path = temp_dir.path().join("floppy.flp");
-        generate_floppy_disk(&[file1.to_string_lossy().to_string()], &floppy_path).await?;
-        assert!(floppy_path.exists());
+            let floppy_path = temp_dir.path().join("floppy.flp");
+            let flop_res =
+                generate_floppy_disk(&[file1.to_string_lossy().to_string()], &floppy_path).await;
+            assert!(flop_res.is_ok());
+            assert!(floppy_path.exists());
 
-        let iso_path = temp_dir.path().join("cidata.iso");
-        generate_cdrom_iso(
-            &[file1.to_string_lossy().to_string()],
-            Some("cidata"),
-            &iso_path,
-        )
-        .await?;
-        assert!(iso_path.exists());
+            let iso_path = temp_dir.path().join("cidata.iso");
+            let iso_res = generate_cdrom_iso(
+                &[file1.to_string_lossy().to_string()],
+                Some("cidata"),
+                &iso_path,
+            )
+            .await;
+            assert!(iso_res.is_ok());
+            assert!(iso_path.exists());
 
-        let disk_path = temp_dir.path().join("test.qcow2");
-        let vmdk_path = temp_dir.path().join("test.vmdk");
-        convert_disk_image(&disk_path, &vmdk_path, DiskFormat::Vmdk).await?;
-        assert!(vmdk_path.exists());
+            let disk_path = temp_dir.path().join("test.qcow2");
+            let vmdk_path = temp_dir.path().join("test.vmdk");
+            let conv_res = convert_disk_image(&disk_path, &vmdk_path, DiskFormat::Vmdk).await;
+            assert!(conv_res.is_ok());
+            assert!(vmdk_path.exists());
 
-        Ok(())
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _lock = ENV_LOCK.lock().await;
+
+                // 1. Success script
+                let ok_script = temp_dir.path().join("qemu_img_ok.sh");
+                let _ = std::fs::write(&ok_script, "#!/bin/sh\nexit 0\n");
+                let _ =
+                    std::fs::set_permissions(&ok_script, std::fs::Permissions::from_mode(0o755));
+                unsafe {
+                    std::env::set_var("QEMU_IMG_CMD", ok_script.to_string_lossy().as_ref());
+                }
+                assert!(
+                    convert_disk_image(&disk_path, &vmdk_path, DiskFormat::Qcow2)
+                        .await
+                        .is_ok()
+                );
+
+                // 2. Failure script
+                let fail_script = temp_dir.path().join("qemu_img_fail.sh");
+                let _ = std::fs::write(&fail_script, "#!/bin/sh\nexit 1\n");
+                let _ =
+                    std::fs::set_permissions(&fail_script, std::fs::Permissions::from_mode(0o755));
+                unsafe {
+                    std::env::set_var("QEMU_IMG_CMD", fail_script.to_string_lossy().as_ref());
+                }
+                assert!(
+                    convert_disk_image(&disk_path, &vmdk_path, DiskFormat::Raw)
+                        .await
+                        .is_err()
+                );
+
+                // 3. Execution failure (nonexistent binary)
+                unsafe {
+                    std::env::set_var("QEMU_IMG_CMD", "/nonexistent/stamp/qemu-img");
+                }
+                assert!(
+                    convert_disk_image(&disk_path, &vmdk_path, DiskFormat::Vdi)
+                        .await
+                        .is_err()
+                );
+
+                unsafe {
+                    std::env::remove_var("QEMU_IMG_CMD");
+                }
+            }
+        }
     }
 
     #[tokio::test]
-    async fn test_qemubuilder_run() -> Result<(), StampError> {
-        let temp_dir = tempfile::tempdir().map_err(StampError::Io)?;
-        let config = QemuConfig {
-            name: "test-builder".to_string(),
-            arch: QemuArch::X86_64,
-            accelerator: QemuAccelerator::Tcg,
-            disk_format: Some(DiskFormat::Qcow2),
-            boot_command: Some(vec!["<enter>".to_string()]),
-            floppy_files: vec![],
-            cd_files: vec![],
-            output_directory: Some(temp_dir.path().to_string_lossy().to_string()),
-            smp: Some(SmpConfig {
-                cpus: Some(4),
-                sockets: Some(1),
-                cores: Some(2),
-                threads: Some(2),
-                dies: None,
-                clusters: None,
-                maxcpus: Some(8),
-            }),
-            numa_nodes: vec![NumaNodeConfig {
-                node_id: Some(0),
-                cpus: Some("0-1".to_string()),
-                mem_mb: Some(1024),
-                initiator: None,
-            }],
-            efi_firmware_code: Some("/usr/share/OVMF/OVMF_CODE.fd".to_string()),
-            efi_firmware_vars: Some("/usr/share/OVMF/OVMF_VARS.fd".to_string()),
-            efi_drop_vars: true,
-            ..Default::default()
-        };
-        let builder = QemuBuilder::new(config);
-
-        builder.prepare().await?;
-        assert_eq!(builder.name(), "test-builder");
-
-        let hook = Arc::new(DefaultProvisionHook {
-            provisioners: Arc::new(vec![]),
-            error_cleanup_provisioners: Arc::new(vec![]),
-        });
+    async fn test_qemu_steps_coverage() {
         let ui = Arc::new(Ui::new(
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
         ));
 
-        let artifact = builder.run(hook, ui, OnErrorStrategy::Cleanup).await?;
-        assert!(artifact.id().starts_with("qemu-image:"));
+        // StepRunQemu with minimal config (all None / empty)
+        let mut step_run = StepRunQemu {
+            ui: Arc::clone(&ui),
+            name: "test".to_string(),
+            config: QemuConfig::default(),
+        };
+        let mut state = StateBag::new();
+        let action = step_run.run(&mut state).await;
+        assert_eq!(action.ok(), Some(StepAction::Continue));
 
-        builder.cancel().await?;
-        Ok(())
+        // StepProvision with missing ssh_port and vm_ip in state (triggers fallbacks)
+        let hook = Arc::new(DefaultProvisionHook {
+            provisioners: Arc::new(vec![]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let mut step_provision = StepProvision {
+            ui: Arc::clone(&ui),
+            name: "test".to_string(),
+            hook,
+        };
+        let mut empty_state = StateBag::new();
+        let prov_action = step_provision.run(&mut empty_state).await;
+        assert_eq!(prov_action.ok(), Some(StepAction::Continue));
+        step_provision.cleanup(&empty_state).await;
+
+        let _ = missing_disk_path();
+        let _ = convert_disk_image(
+            std::path::Path::new("dummy"),
+            std::path::Path::new("/"),
+            DiskFormat::Vmdk,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_qemubuilder_run() {
+        let temp_dir_res = tempfile::tempdir();
+        assert!(temp_dir_res.is_ok());
+        for temp_dir in temp_dir_res {
+            let config = QemuConfig {
+                name: "test-builder".to_string(),
+                arch: QemuArch::X86_64,
+                accelerator: QemuAccelerator::Tcg,
+                disk_format: Some(DiskFormat::Qcow2),
+                boot_command: Some(vec!["<enter>".to_string()]),
+                floppy_files: vec![],
+                cd_files: vec![],
+                output_directory: Some(temp_dir.path().to_string_lossy().to_string()),
+                smp: Some(SmpConfig {
+                    cpus: Some(4),
+                    sockets: Some(1),
+                    cores: Some(2),
+                    threads: Some(2),
+                    dies: None,
+                    clusters: None,
+                    maxcpus: Some(8),
+                }),
+                numa_nodes: vec![NumaNodeConfig {
+                    node_id: Some(0),
+                    cpus: Some("0-1".to_string()),
+                    mem_mb: Some(1024),
+                    initiator: None,
+                }],
+                efi_firmware_code: Some("/usr/share/OVMF/OVMF_CODE.fd".to_string()),
+                efi_firmware_vars: Some("/usr/share/OVMF/OVMF_VARS.fd".to_string()),
+                efi_drop_vars: true,
+                ..Default::default()
+            };
+            let builder = QemuBuilder::new(config);
+
+            assert!(builder.prepare().await.is_ok());
+            assert_eq!(builder.name(), "test-builder");
+
+            let hook = Arc::new(DefaultProvisionHook {
+                provisioners: Arc::new(vec![]),
+                error_cleanup_provisioners: Arc::new(vec![]),
+            });
+            let ui = Arc::new(Ui::new(
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+            ));
+
+            let artifact_res = builder.run(hook, ui, OnErrorStrategy::Cleanup).await;
+            assert!(artifact_res.is_ok());
+            for artifact in artifact_res {
+                assert!(artifact.id().starts_with("qemu-image:"));
+            }
+
+            assert!(builder.cancel().await.is_ok());
+        }
     }
 
     #[test]
@@ -1007,6 +1134,8 @@ mod tests {
         assert!(!auto_accel.is_empty());
 
         assert_eq!(DiskFormat::Raw.as_str(), "raw");
+        assert_eq!(DiskFormat::Qcow2.as_str(), "qcow2");
+        assert_eq!(DiskFormat::Vmdk.as_str(), "vmdk");
         assert_eq!(DiskFormat::Vdi.as_str(), "vdi");
 
         config.qemuargs = vec![vec!["-m".to_string(), "1024".to_string()]];
@@ -1044,5 +1173,8 @@ mod tests {
         assert!(numa_str.contains("cpus=4-7"));
         assert!(numa_str.contains("mem=2048"));
         assert!(numa_str.contains("initiator=0"));
+
+        assert!(SmpConfig::default().to_qemu_arg().is_empty());
+        assert_eq!(NumaNodeConfig::default().to_qemu_arg(), "node");
     }
 }

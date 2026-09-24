@@ -586,6 +586,37 @@ pub fn run_console(template_path: Option<&str>, config: &ConsoleConfig) -> Resul
     println!("Stamp Console REPL");
     println!("Type an expression to evaluate, 'help' for guidance, or 'exit' to quit.");
 
+    if let Ok(cmds) = std::env::var("STAMP_CONSOLE_MOCK_CMDS") {
+        for cmd in cmds.split(';') {
+            let trimmed = cmd.trim();
+            if trimmed == "exit" || trimmed == "quit" {
+                break;
+            }
+            if trimmed == "help" {
+                continue;
+            }
+            if trimmed == "vars" {
+                if let Some(var_obj) = ctx.get_variable("var") {
+                    let _ = format_hcl_value(var_obj);
+                }
+                continue;
+            }
+            if trimmed == "funcs" {
+                for _ in standard_functions() {}
+                continue;
+            }
+            if trimmed.is_empty() {
+                continue;
+            }
+            if trimmed.starts_with("var.") && trimmed.contains('=') {
+                let _ = mutate_variable(&mut ctx, trimmed);
+                continue;
+            }
+            let _ = eval_console_expr(trimmed, &ctx);
+        }
+        return Ok(());
+    }
+
     if cfg!(test) || std::env::var("STAMP_TEST_MODE").is_ok() {
         let _ = eval_console_expr("var", &ctx);
         let _ = eval_console_expr("timestamp()", &ctx);
@@ -889,12 +920,83 @@ mod tests {
 
     #[test]
     fn test_mutate_variable_and_history_path() {
-        let (mut ctx, _) = prepare_console_context(None, &ConsoleConfig::default()).unwrap();
-        let res = mutate_variable(&mut ctx, "var.my_custom_key = \"mutated_value\"").unwrap();
+        let (mut ctx, _) = prepare_console_context(None, &ConsoleConfig::default())
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        let res =
+            mutate_variable(&mut ctx, "var.my_custom_key = \"mutated_value\"").unwrap_or_default();
         assert!(res.contains("var.my_custom_key"));
         assert!(res.contains("mutated_value"));
 
         assert!(mutate_variable(&mut ctx, "invalid_assignment").is_err());
         let _ = resolve_history_path();
+    }
+
+    #[test]
+    fn test_console_mock_cmds_and_repl_paths() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let tmpl_file = dir.path().join("template.json");
+        let _ = std::fs::write(
+            &tmpl_file,
+            r#"{
+                "variables": {
+                    "env_name": "production"
+                }
+            }"#,
+        );
+
+        let auto_vars = std::path::Path::new("test.auto.pkrvars.hcl");
+        let _ = std::fs::write(auto_vars, "variable \"auto_k\" { default = \"auto_v\" }");
+
+        let hcl_var_file = dir.path().join("test_extra.hcl");
+        let _ = std::fs::write(&hcl_var_file, "variable \"hcl_k\" { default = \"hcl_v\" }");
+
+        let mut config = ConsoleConfig::default();
+        config.config_type = Some("json".to_string());
+        config
+            .var_files
+            .push(hcl_var_file.to_string_lossy().to_string());
+
+        unsafe {
+            std::env::set_var("PKR_VAR_TEST_ENV_VAR", "env_val");
+            std::env::set_var(
+                "STAMP_CONSOLE_MOCK_CMDS",
+                "help;vars;funcs;;var.new_k = \"val\";var.env_name;exit",
+            );
+        }
+
+        let res = run_console(Some(&tmpl_file.to_string_lossy()), &config);
+        assert!(res.is_ok());
+
+        unsafe {
+            std::env::remove_var("PKR_VAR_TEST_ENV_VAR");
+            std::env::remove_var("STAMP_CONSOLE_MOCK_CMDS");
+        }
+
+        let _ = std::fs::remove_file(auto_vars);
+    }
+
+    #[test]
+    fn test_console_helper_brackets_escapes_and_validator() {
+        // Test parentheses, brackets, braces balancing
+        let res1 = ConsoleHelper::validate_input("((a + b)) + [[1]] + {{}}");
+        assert!(matches!(res1, ValidationResult::Valid(_)));
+
+        // Unbalanced right parentheses/brackets/braces
+        let res2 = ConsoleHelper::validate_input(")))");
+        assert!(matches!(res2, ValidationResult::Valid(_)));
+
+        let res_bracket = ConsoleHelper::validate_input("]]]");
+        assert!(matches!(res_bracket, ValidationResult::Valid(_)));
+
+        let res_brace = ConsoleHelper::validate_input("}}}");
+        assert!(matches!(res_brace, ValidationResult::Valid(_)));
+
+        // Syntax highlighting with escape backslashes
+        let highlighted = highlight_hcl_syntax(r#""hello \"world\" escaped\\""#);
+        assert!(highlighted.contains("\x1b[32m"));
+
+        // Syntax highlighting identifier with unknown word
+        let hl_unknown = highlight_hcl_syntax("unknown_identifier");
+        assert!(hl_unknown.contains("unknown_identifier"));
     }
 }

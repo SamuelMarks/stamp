@@ -47,48 +47,53 @@ pub struct HypervIsoConfig {
 ///
 /// Returns `StampError::Execution` if execution fails or PowerShell returns non-zero.
 pub async fn run_hyperv_ps(cmd: &str) -> Result<String, StampError> {
-    if cfg!(test) {
+    #[cfg(test)]
+    {
         if cmd.contains("TEST_FAIL") {
             return Err(StampError::Execution("PowerShell mock failure".to_string()));
         }
-        if cmd.contains(".IPAddresses") {
-            return Ok("127.0.0.1
-"
-            .to_string());
+        if cmd.contains("EMPTY_IP") {
+            return Ok(String::new());
         }
-        return Ok("mock-output".to_string());
+        if cmd.contains(".IPAddresses") {
+            return Ok("127.0.0.1\n".to_string());
+        }
+        Ok("mock-output".to_string())
     }
 
-    let shell = if tokio::process::Command::new("pwsh")
-        .arg("-v")
-        .status()
-        .await
-        .is_ok()
+    #[cfg(not(test))]
     {
-        "pwsh"
-    } else {
-        "powershell"
-    };
+        let shell = if tokio::process::Command::new("pwsh")
+            .arg("-v")
+            .status()
+            .await
+            .is_ok()
+        {
+            "pwsh"
+        } else {
+            "powershell"
+        };
 
-    let mut command = tokio::process::Command::new(shell);
-    command
-        .arg("-NoProfile")
-        .arg("-NonInteractive")
-        .arg("-Command")
-        .arg(cmd);
+        let mut command = tokio::process::Command::new(shell);
+        command
+            .arg("-NoProfile")
+            .arg("-NonInteractive")
+            .arg("-Command")
+            .arg(cmd);
 
-    let output = command
-        .output()
-        .await
-        .map_err(|e| StampError::Execution(format!("Failed to execute powershell: {e}")))?;
+        let output = command
+            .output()
+            .await
+            .map_err(|e| StampError::Execution(format!("Failed to execute powershell: {e}")))?;
 
-    if !output.status.success() {
-        return Err(StampError::Execution(format!(
-            "powershell failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
+        if !output.status.success() {
+            return Err(StampError::Execution(format!(
+                "powershell failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 /// Extract guest IP address from Hyper-V network adapter integration services.
@@ -163,10 +168,9 @@ impl Step for StepCreateVM {
 
         state.put("vm_name", vm_name.to_string());
 
-        if !cfg!(test) {
-            std::fs::create_dir_all(output_dir)
-                .map_err(|e| StampError::Execution(format!("Failed to create output dir: {e}")))?;
-        }
+        #[cfg(not(test))]
+        std::fs::create_dir_all(output_dir)
+            .map_err(|e| StampError::Execution(format!("Failed to create output dir: {e}")))?;
 
         // 1. Create VM with Generation
         let vhd_path = format!("{output_dir}/{vm_name}.vhdx");
@@ -442,15 +446,34 @@ Do you want to clean up? [y/N]: ",
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[allow(
+    clippy::unwrap_used,
+    clippy::pedantic,
+    clippy::all,
+    for_loops_over_fallibles
+)]
 mod tests {
     use super::*;
     use crate::engine::hook::DefaultProvisionHook;
     use crate::engine::packer::OnErrorStrategy;
     use crate::engine::ui::Ui;
 
+    struct FailingProvisioner;
+
+    #[async_trait::async_trait]
+    impl crate::provisioner::Provisioner for FailingProvisioner {
+        async fn provision(
+            &self,
+            _comm: &dyn crate::communicator::Communicator,
+            _ui: Arc<Ui>,
+        ) -> Result<(), StampError> {
+            Err(StampError::Execution("Provision failure".to_string()))
+        }
+    }
+
     #[tokio::test]
-    async fn test_hypervisobuilder_run_gen1_and_gen2() -> Result<(), StampError> {
+    async fn test_hypervisobuilder_run_gen1_and_gen2() {
         for gen_val in [1, 2] {
             let config = HypervIsoConfig {
                 name: format!("test-builder-gen{gen_val}"),
@@ -464,7 +487,7 @@ mod tests {
             };
             let builder = HypervIsoBuilder::new(config);
 
-            builder.prepare().await?;
+            assert!(builder.prepare().await.is_ok());
             assert_eq!(builder.name(), format!("test-builder-gen{gen_val}"));
 
             let hook = Arc::new(DefaultProvisionHook {
@@ -477,19 +500,151 @@ mod tests {
                 crate::engine::packer::FeatureState::Disabled,
             ));
 
-            let artifact = builder.run(hook, ui, OnErrorStrategy::Cleanup).await?;
-            assert!(artifact.id().contains(&format!("test-vm-gen{gen_val}")));
+            let res = builder.run(hook, ui, OnErrorStrategy::Cleanup).await;
+            assert!(res.is_ok());
+            for artifact in res {
+                assert!(artifact.id().contains(&format!("test-vm-gen{gen_val}")));
+                assert_eq!(artifact.builder_id(), format!("test-builder-gen{gen_val}"));
+                assert!(artifact.files().is_empty());
+                assert!(artifact.state("key").is_none());
+                assert!(artifact.destroy().is_ok());
+            }
 
-            builder.cancel().await?;
+            assert!(builder.cancel().await.is_ok());
         }
-        Ok(())
+
+        // Test without ISO and without VLAN
+        let config_minimal = HypervIsoConfig {
+            name: "minimal".to_string(),
+            generation: 1,
+            iso_url: None,
+            vlan_id: None,
+            ..Default::default()
+        };
+        let b_minimal = HypervIsoBuilder::new(config_minimal);
+        let hook = Arc::new(DefaultProvisionHook {
+            provisioners: Arc::new(vec![]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let ui = Arc::new(Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+        assert!(
+            b_minimal
+                .run(hook, ui, OnErrorStrategy::Cleanup)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
-    async fn test_extract_hyperv_ip() -> Result<(), StampError> {
-        let ip = extract_hyperv_ip("test-vm").await?;
-        assert_eq!(ip, "127.0.0.1");
-        Ok(())
+    async fn test_extract_hyperv_ip() {
+        let ip = extract_hyperv_ip("test-vm").await;
+        assert_eq!(ip.as_deref().ok(), Some("127.0.0.1"));
+
+        let ip_empty = extract_hyperv_ip("EMPTY_IP").await;
+        assert_eq!(ip_empty.as_deref().ok(), Some("127.0.0.1"));
+
+        assert!(extract_hyperv_ip("TEST_FAIL").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_run_hyperv_ps_fail() {
+        assert!(run_hyperv_ps("TEST_FAIL").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_prepare_failure() {
+        let config = HypervIsoConfig {
+            name: String::new(),
+            ..Default::default()
+        };
+        let b = HypervIsoBuilder::new(config);
+        assert!(b.prepare().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_hypervisobuilder_error_strategies() {
+        let config = HypervIsoConfig {
+            name: "test_runner_error".to_string(),
+            ..Default::default()
+        };
+        let b = HypervIsoBuilder::new(config);
+        let failing_hook: Arc<dyn ProvisionHook> = Arc::new(DefaultProvisionHook {
+            provisioners: Arc::new(vec![Box::new(FailingProvisioner)]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let ui = Arc::new(Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+
+        assert!(
+            b.run(failing_hook.clone(), ui.clone(), OnErrorStrategy::Cleanup)
+                .await
+                .is_err()
+        );
+        assert!(
+            b.run(failing_hook.clone(), ui.clone(), OnErrorStrategy::Abort)
+                .await
+                .is_err()
+        );
+        assert!(
+            b.run(failing_hook, ui.clone(), OnErrorStrategy::Ask)
+                .await
+                .is_err()
+        );
+
+        let hook_empty = Arc::new(DefaultProvisionHook {
+            provisioners: Arc::new(vec![]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let b_bad = HypervIsoBuilder::new(HypervIsoConfig {
+            name: "test_bad_exit".to_string(),
+            ..Default::default()
+        });
+        assert!(
+            b_bad
+                .run(hook_empty.clone(), ui.clone(), OnErrorStrategy::Cleanup)
+                .await
+                .is_err()
+        );
+
+        let b_missing = HypervIsoBuilder::new(HypervIsoConfig {
+            name: "test_missing".to_string(),
+            ..Default::default()
+        });
+        assert!(
+            b_missing
+                .run(hook_empty, ui, OnErrorStrategy::Cleanup)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_step_provision() {
+        let ui = Arc::new(Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+        let failing_hook: Arc<dyn ProvisionHook> = Arc::new(DefaultProvisionHook {
+            provisioners: Arc::new(vec![Box::new(FailingProvisioner)]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let mut prov_step = StepProvision {
+            ui,
+            name: "test-prov".to_string(),
+            hook: failing_hook,
+        };
+        let mut state = StateBag::new();
+        // vm_ip is None, hits unwrap_or_else fallback to 127.0.0.1
+        assert!(prov_step.run(&mut state).await.is_err());
+        prov_step.cleanup(&state).await;
     }
 
     #[test]

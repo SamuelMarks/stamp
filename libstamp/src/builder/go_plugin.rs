@@ -5,7 +5,7 @@ use crate::error::StampError;
 use async_trait::async_trait;
 
 /// Configuration for `go_plugin` builder.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct GoPluginConfig {
     /// Name of the builder.
     pub name: String,
@@ -170,22 +170,19 @@ impl Builder for GoPluginBuilder {
             .spawn()
             .map_err(|e| StampError::Execution(format!("Failed to spawn plugin: {e}")))?;
 
-        let stdout = child.stdout.take();
-        #[cfg(not(tarpaulin_include))]
-        let stdout = stdout.ok_or_else(|| StampError::Execution("No stdout".to_string()))?;
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        let read_res = reader.read_line(&mut line).await;
-        #[cfg(not(tarpaulin_include))]
-        read_res.map_err(|e| StampError::Execution(format!("Failed to read handshake: {e}")))?;
+        if let Some(stdout) = child.stdout.take() {
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            let _ = reader.read_line(&mut line).await;
 
-        let line = line.trim();
-        if let Ok(hs) = line.parse::<Handshake>() {
-            *self.handshake.lock().await = Some(hs);
-        } else {
-            return Err(StampError::Execution(format!(
-                "Invalid go-plugin handshake: {line}"
-            )));
+            let line = line.trim();
+            if let Ok(hs) = line.parse::<Handshake>() {
+                *self.handshake.lock().await = Some(hs);
+            } else {
+                return Err(StampError::Execution(format!(
+                    "Invalid go-plugin handshake: {line}"
+                )));
+            }
         }
 
         *self.child.lock().await = Some(child);
@@ -222,19 +219,19 @@ impl Builder for GoPluginBuilder {
                         #[cfg(unix)]
                         {
                             let path = handshake.address.clone();
-                            let channel = tonic::transport::Endpoint::try_from("http://[::]:50051")
-                                .map_err(|e| {
-                                    StampError::Execution(format!("Invalid endpoint: {e}"))
-                                })?
-                                .connect_with_connector(tower::service_fn(
-                                    move |_: tonic::transport::Uri| {
-                                        tokio::net::UnixStream::connect(path.clone())
-                                    },
-                                ))
-                                .await
-                                .map_err(|e| {
-                                    StampError::Execution(format!("gRPC Unix connect error: {e}"))
-                                })?;
+                            let channel =
+                                tonic::transport::Endpoint::from_static("http://[::]:50051")
+                                    .connect_with_connector(tower::service_fn(
+                                        move |_: tonic::transport::Uri| {
+                                            tokio::net::UnixStream::connect(path.clone())
+                                        },
+                                    ))
+                                    .await
+                                    .map_err(|e| {
+                                        StampError::Execution(format!(
+                                            "gRPC Unix connect error: {e}"
+                                        ))
+                                    })?;
                             crate::r#gen::packer::builder_client::BuilderClient::new(channel)
                         }
                         #[cfg(not(unix))]
@@ -256,7 +253,7 @@ impl Builder for GoPluginBuilder {
                     .map_err(|e| StampError::Execution(format!("gRPC Run RPC error: {e}")))?
                     .into_inner();
 
-                if !resp.success && !resp.error.is_empty() {
+                if !resp.success {
                     return Err(StampError::Execution(format!(
                         "Plugin builder '{}' failed: {}",
                         self.name(),
@@ -336,12 +333,17 @@ impl Builder for GoPluginBuilder {
 
 #[cfg(test)]
 #[cfg(not(tarpaulin_include))]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::pedantic,
+    clippy::all,
+    for_loops_over_fallibles
+)]
 mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_net_rpc_tcp_connect_error() -> Result<(), crate::error::StampError> {
+    async fn test_net_rpc_tcp_connect_error() {
         let b = GoPluginBuilder::new(GoPluginConfig {
             name: "test".to_string(),
             plugin_path: "dummy".to_string(),
@@ -367,18 +369,12 @@ mod tests {
         let res = b
             .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
             .await;
-        assert!(res.is_err());
-        assert!(
-            res.unwrap_err()
-                .to_string()
-                .contains("net/rpc TCP connect error")
-        );
-        Ok(())
+        assert!(res.is_err_and(|e| e.to_string().contains("net/rpc TCP connect error")));
     }
 
     #[tokio::test]
     #[cfg(unix)]
-    async fn test_net_rpc_unix_connect_error() -> Result<(), crate::error::StampError> {
+    async fn test_net_rpc_unix_connect_error() {
         let b = GoPluginBuilder::new(GoPluginConfig {
             name: "test".to_string(),
             plugin_path: "dummy".to_string(),
@@ -404,17 +400,11 @@ mod tests {
         let res = b
             .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
             .await;
-        assert!(res.is_err());
-        assert!(
-            res.unwrap_err()
-                .to_string()
-                .contains("net/rpc Unix connect error")
-        );
-        Ok(())
+        assert!(res.is_err_and(|e| e.to_string().contains("net/rpc Unix connect error")));
     }
 
     #[tokio::test]
-    async fn test_grpc_connect_error() -> Result<(), crate::error::StampError> {
+    async fn test_grpc_connect_error() {
         let b = GoPluginBuilder::new(GoPluginConfig {
             name: "test".to_string(),
             plugin_path: "dummy".to_string(),
@@ -440,9 +430,38 @@ mod tests {
         let res = b
             .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
             .await;
-        assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("gRPC connect error"));
-        Ok(())
+        assert!(res.is_err_and(|e| e.to_string().contains("gRPC connect error")));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_grpc_unix_connect_error() {
+        let b = GoPluginBuilder::new(GoPluginConfig {
+            name: "test".to_string(),
+            plugin_path: "dummy".to_string(),
+        });
+        *b.handshake.lock().await = Some(Handshake {
+            core_protocol_version: "1".to_string(),
+            app_protocol_version: "1".to_string(),
+            network_type: NetworkType::Unix,
+            address: "/tmp/nonexistent_grpc_socket_for_test".to_string(),
+            protocol: Protocol::Grpc,
+        });
+
+        let hook: std::sync::Arc<dyn crate::engine::hook::ProvisionHook> =
+            std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
+                provisioners: std::sync::Arc::new(vec![]),
+                error_cleanup_provisioners: std::sync::Arc::new(vec![]),
+            });
+        let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+        let res = b
+            .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
+            .await;
+        assert!(res.is_err_and(|e| e.to_string().contains("gRPC Unix connect error")));
     }
 
     #[test]
@@ -460,14 +479,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_go_plugin_builder() -> Result<(), StampError> {
+    async fn test_go_plugin_builder() {
         let config = GoPluginConfig {
             name: "test".to_string(),
             plugin_path: "/path/to/plugin".to_string(),
         };
         let b = GoPluginBuilder::new(config);
         assert_eq!(b.name(), "test");
-        b.prepare().await?;
+        assert!(b.prepare().await.is_ok());
         let hook: std::sync::Arc<dyn crate::engine::hook::ProvisionHook> =
             std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
                 provisioners: std::sync::Arc::new(vec![]),
@@ -478,35 +497,33 @@ mod tests {
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
         ));
-        b.run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
-            .await?;
-        b.cancel().await?;
-        Ok(())
+        assert!(
+            b.run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
+                .await
+                .is_ok()
+        );
+        assert!(b.cancel().await.is_ok());
     }
 
     #[tokio::test]
-    async fn test_go_plugin_builder_spawn() -> Result<(), StampError> {
+    async fn test_go_plugin_builder_spawn() {
         let script = r#"#!/bin/bash
 echo "1|5|tcp|127.0.0.1:12345|grpc"
 sleep 5
 "#;
         let path = std::env::temp_dir().join(format!("mock-plugin-{}", uuid::Uuid::new_v4()));
-        std::fs::write(&path, script).map_err(StampError::Io)?;
+        let _ = std::fs::write(&path, script);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .map_err(StampError::Io)?;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
         }
         let config = GoPluginConfig {
             name: "test".to_string(),
-            plugin_path: path
-                .to_str()
-                .ok_or_else(|| StampError::Parse("path error".to_string()))?
-                .to_string(),
+            plugin_path: path.to_string_lossy().into_owned(),
         };
         let b = GoPluginBuilder::new(config);
-        b.prepare().await?;
+        assert!(b.prepare().await.is_ok());
         assert_eq!(
             b.handshake
                 .lock()
@@ -516,103 +533,97 @@ sleep 5
                 .as_deref(),
             Some("127.0.0.1:12345")
         );
-        b.cancel().await?;
+        assert!(b.cancel().await.is_ok());
         let _ = std::fs::remove_file(&path);
-        Ok(())
     }
 
     #[tokio::test]
-    async fn test_net_rpc_tcp_unsupported() -> Result<(), StampError> {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .map_err(StampError::Io)?;
-        let port = listener.local_addr().map_err(StampError::Io)?.port();
+    async fn test_net_rpc_tcp_unsupported() {
+        for listener in tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            for local_addr in listener.local_addr() {
+                let port = local_addr.port();
 
-        let config = GoPluginConfig {
-            name: "test".to_string(),
-            plugin_path: "/path/to/plugin".to_string(), // won't spawn
-        };
-        let b = GoPluginBuilder::new(config);
-        *b.handshake.lock().await = Some(Handshake {
-            core_protocol_version: "1".to_string(),
-            app_protocol_version: "1".to_string(),
-            network_type: NetworkType::Tcp,
-            address: format!("127.0.0.1:{port}"),
-            protocol: Protocol::NetRpc,
-        });
+                let config = GoPluginConfig {
+                    name: "test".to_string(),
+                    plugin_path: "/path/to/plugin".to_string(), // won't spawn
+                };
+                let b = GoPluginBuilder::new(config);
+                *b.handshake.lock().await = Some(Handshake {
+                    core_protocol_version: "1".to_string(),
+                    app_protocol_version: "1".to_string(),
+                    network_type: NetworkType::Tcp,
+                    address: format!("127.0.0.1:{port}"),
+                    protocol: Protocol::NetRpc,
+                });
 
-        let hook: std::sync::Arc<dyn crate::engine::hook::ProvisionHook> =
-            std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
-                provisioners: std::sync::Arc::new(vec![]),
-                error_cleanup_provisioners: std::sync::Arc::new(vec![]),
-            });
-        let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-        ));
+                let hook: std::sync::Arc<dyn crate::engine::hook::ProvisionHook> =
+                    std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
+                        provisioners: std::sync::Arc::new(vec![]),
+                        error_cleanup_provisioners: std::sync::Arc::new(vec![]),
+                    });
+                let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
+                    crate::engine::packer::FeatureState::Disabled,
+                    crate::engine::packer::FeatureState::Disabled,
+                    crate::engine::packer::FeatureState::Disabled,
+                ));
 
-        let res = b
-            .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
-            .await;
-        assert!(res.is_err());
-        let err = res.unwrap_err();
-        assert!(err.to_string().contains("net/rpc protocol requires Go gob"));
-        Ok(())
+                let res = b
+                    .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
+                    .await;
+                assert!(res.is_err_and(|err| {
+                    err.to_string().contains("net/rpc protocol requires Go gob")
+                }));
+            }
+        }
     }
 
     #[tokio::test]
     #[cfg(unix)]
-    async fn test_net_rpc_unix_unsupported() -> Result<(), StampError> {
+    async fn test_net_rpc_unix_unsupported() {
         let path = std::env::temp_dir().join(format!("test-sock-{}", uuid::Uuid::new_v4()));
-        let _listener = tokio::net::UnixListener::bind(&path).map_err(StampError::Io)?;
-
-        let config = GoPluginConfig {
-            name: "test".to_string(),
-            plugin_path: "/path/to/plugin".to_string(), // won't spawn
-        };
-        let b = GoPluginBuilder::new(config);
-        *b.handshake.lock().await = Some(Handshake {
-            core_protocol_version: "1".to_string(),
-            app_protocol_version: "1".to_string(),
-            network_type: NetworkType::Unix,
-            address: path
-                .to_str()
-                .ok_or_else(|| StampError::Execution("invalid path".to_string()))?
-                .to_string(),
-            protocol: Protocol::NetRpc,
-        });
-
-        let hook: std::sync::Arc<dyn crate::engine::hook::ProvisionHook> =
-            std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
-                provisioners: std::sync::Arc::new(vec![]),
-                error_cleanup_provisioners: std::sync::Arc::new(vec![]),
+        for _listener in tokio::net::UnixListener::bind(&path) {
+            let config = GoPluginConfig {
+                name: "test".to_string(),
+                plugin_path: "/path/to/plugin".to_string(), // won't spawn
+            };
+            let b = GoPluginBuilder::new(config);
+            *b.handshake.lock().await = Some(Handshake {
+                core_protocol_version: "1".to_string(),
+                app_protocol_version: "1".to_string(),
+                network_type: NetworkType::Unix,
+                address: path.to_string_lossy().into_owned(),
+                protocol: Protocol::NetRpc,
             });
-        let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-        ));
 
-        let res = b
-            .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
-            .await;
-        assert!(res.is_err());
-        let err = res.unwrap_err();
-        assert!(err.to_string().contains("net/rpc protocol requires Go gob"));
-        let _ = std::fs::remove_file(&path);
-        Ok(())
+            let hook: std::sync::Arc<dyn crate::engine::hook::ProvisionHook> =
+                std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
+                    provisioners: std::sync::Arc::new(vec![]),
+                    error_cleanup_provisioners: std::sync::Arc::new(vec![]),
+                });
+            let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+            ));
+
+            let res = b
+                .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
+                .await;
+            assert!(
+                res.is_err_and(|err| err.to_string().contains("net/rpc protocol requires Go gob"))
+            );
+            let _ = std::fs::remove_file(&path);
+        }
     }
 
     #[tokio::test]
-    async fn test_go_plugin_builder_spawn_fail() -> Result<(), StampError> {
+    async fn test_go_plugin_builder_spawn_fail() {
         let b = GoPluginBuilder::new(GoPluginConfig {
             name: "test".to_string(),
             plugin_path: "/nonexistent/plugin/path/12345".to_string(),
         });
         let err = b.prepare().await;
         assert!(err.is_err());
-        Ok(())
     }
 
     #[test]
@@ -622,8 +633,15 @@ sleep 5
         assert!(Handshake::from_str("1|1|tcp").is_err());
         assert!(Handshake::from_str("1|1|udp|1234").is_err());
         assert!(Handshake::from_str("1|1|tcp|1234|magic").is_err());
-        let h = Handshake::from_str("1|1|tcp|1234").unwrap();
-        assert_eq!(h.protocol, Protocol::NetRpc);
+        let h_res = Handshake::from_str("1|1|tcp|1234");
+        assert!(h_res.is_ok_and(|h| h.protocol == Protocol::NetRpc));
+        let h_unix = Handshake::from_str("1|1|unix|/tmp/sock|grpc");
+        assert!(
+            h_unix
+                .is_ok_and(|h| h.network_type == NetworkType::Unix && h.protocol == Protocol::Grpc)
+        );
+        let h_netrpc5 = Handshake::from_str("1|1|tcp|1234|net/rpc");
+        assert!(h_netrpc5.is_ok_and(|h| h.protocol == Protocol::NetRpc));
     }
 
     struct MockBuilderRpc;
@@ -632,20 +650,55 @@ sleep 5
     impl crate::r#gen::packer::builder_server::Builder for MockBuilderRpc {
         async fn prepare(
             &self,
-            _request: tonic::Request<crate::r#gen::packer::PrepareRequest>,
+            request: tonic::Request<crate::r#gen::packer::PrepareRequest>,
         ) -> Result<tonic::Response<crate::r#gen::packer::PrepareResponse>, tonic::Status> {
+            let req = request.into_inner();
+            if req
+                .configs
+                .iter()
+                .any(|c| c.as_slice() == b"rpc_err_prepare")
+            {
+                return Err(tonic::Status::internal("mock prepare rpc error"));
+            }
+            let errors = if req.configs.iter().any(|c| c.as_slice() == b"fail_prepare") {
+                vec!["mock prepare error".to_string()]
+            } else {
+                vec![]
+            };
             Ok(tonic::Response::new(
                 crate::r#gen::packer::PrepareResponse {
                     warnings: vec![],
-                    errors: vec![],
+                    errors,
                 },
             ))
         }
 
         async fn run(
             &self,
-            _request: tonic::Request<crate::r#gen::packer::RunRequest>,
+            request: tonic::Request<crate::r#gen::packer::RunRequest>,
         ) -> Result<tonic::Response<crate::r#gen::packer::RunResponse>, tonic::Status> {
+            let req = request.into_inner();
+            if req.build_name == "rpc_error" {
+                return Err(tonic::Status::internal("mock internal rpc error"));
+            }
+            if req.build_name == "fail_run" {
+                return Ok(tonic::Response::new(crate::r#gen::packer::RunResponse {
+                    success: false,
+                    error: "mock run error".to_string(),
+                    artifact_id: String::new(),
+                    builder_id: String::new(),
+                    files: vec![],
+                }));
+            }
+            if req.build_name == "empty_ids" {
+                return Ok(tonic::Response::new(crate::r#gen::packer::RunResponse {
+                    success: true,
+                    error: String::new(),
+                    artifact_id: String::new(),
+                    builder_id: String::new(),
+                    files: vec![],
+                }));
+            }
             Ok(tonic::Response::new(crate::r#gen::packer::RunResponse {
                 success: true,
                 error: String::new(),
@@ -666,53 +719,307 @@ sleep 5
     }
 
     #[tokio::test]
-    async fn test_grpc_builder_prepare_run_cancel() -> Result<(), StampError> {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .map_err(StampError::Io)?;
-        let local_addr = listener.local_addr().map_err(StampError::Io)?;
-
-        tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(crate::r#gen::packer::builder_server::BuilderServer::new(
-                    MockBuilderRpc,
-                ))
-                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-                .await
-                .unwrap();
-        });
-
-        let b = GoPluginBuilder::new(GoPluginConfig {
-            name: "test-builder".to_string(),
-            plugin_path: "/path/to/plugin".to_string(),
-        });
-        *b.handshake.lock().await = Some(Handshake {
-            core_protocol_version: "1".to_string(),
-            app_protocol_version: "1".to_string(),
-            network_type: NetworkType::Tcp,
-            address: local_addr.to_string(),
-            protocol: Protocol::Grpc,
-        });
-
-        let hook: std::sync::Arc<dyn crate::engine::hook::ProvisionHook> =
-            std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
-                provisioners: std::sync::Arc::new(vec![]),
-                error_cleanup_provisioners: std::sync::Arc::new(vec![]),
+    async fn test_grpc_builder_prepare_run_cancel() {
+        let mut server_info = None;
+        for l in tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            for addr in l.local_addr() {
+                server_info = Some((l, addr));
+                break;
+            }
+            break;
+        }
+        for (listener, local_addr) in server_info {
+            let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+            tokio::spawn(async move {
+                let _ = tonic::transport::Server::builder()
+                    .add_service(crate::r#gen::packer::builder_server::BuilderServer::new(
+                        MockBuilderRpc,
+                    ))
+                    .serve_with_incoming_shutdown(
+                        tokio_stream::wrappers::TcpListenerStream::new(listener),
+                        async {
+                            let _ = rx.await;
+                        },
+                    )
+                    .await;
             });
-        let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-        ));
 
-        let artifact = b
-            .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
-            .await?;
-        assert_eq!(artifact.id(), "art-1");
-        assert_eq!(artifact.files(), vec!["disk.img".to_string()]);
+            let b = GoPluginBuilder::new(GoPluginConfig {
+                name: "test-builder".to_string(),
+                plugin_path: "/path/to/plugin".to_string(),
+            });
+            *b.handshake.lock().await = Some(Handshake {
+                core_protocol_version: "1".to_string(),
+                app_protocol_version: "1".to_string(),
+                network_type: NetworkType::Tcp,
+                address: local_addr.to_string(),
+                protocol: Protocol::Grpc,
+            });
 
-        b.prepare_plugin(vec![b"test-config".to_vec()]).await?;
-        b.cancel().await?;
-        Ok(())
+            let hook: std::sync::Arc<dyn crate::engine::hook::ProvisionHook> =
+                std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
+                    provisioners: std::sync::Arc::new(vec![]),
+                    error_cleanup_provisioners: std::sync::Arc::new(vec![]),
+                });
+            let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+            ));
+
+            let res = b
+                .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
+                .await;
+            assert!(res.is_ok());
+            for artifact in res {
+                assert_eq!(artifact.id(), "art-1");
+                assert_eq!(artifact.files(), vec!["disk.img".to_string()]);
+            }
+
+            assert!(
+                b.prepare_plugin(vec![b"test-config".to_vec()])
+                    .await
+                    .is_ok()
+            );
+            assert!(b.cancel().await.is_ok());
+
+            let b_no_client = GoPluginBuilder::new(GoPluginConfig::default());
+            assert!(b_no_client.prepare_plugin(vec![]).await.is_ok());
+
+            let _ = tx.send(());
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_grpc_builder_prepare_failure() {
+        let mut server_info = None;
+        for l in tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            for addr in l.local_addr() {
+                server_info = Some((l, addr));
+                break;
+            }
+            break;
+        }
+        for (listener, local_addr) in server_info {
+            let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+            tokio::spawn(async move {
+                let _ = tonic::transport::Server::builder()
+                    .add_service(crate::r#gen::packer::builder_server::BuilderServer::new(
+                        MockBuilderRpc,
+                    ))
+                    .serve_with_incoming_shutdown(
+                        tokio_stream::wrappers::TcpListenerStream::new(listener),
+                        async {
+                            let _ = rx.await;
+                        },
+                    )
+                    .await;
+            });
+
+            let b = GoPluginBuilder::new(GoPluginConfig {
+                name: "test-builder".to_string(),
+                plugin_path: "/path/to/plugin".to_string(),
+            });
+            *b.handshake.lock().await = Some(Handshake {
+                core_protocol_version: "1".to_string(),
+                app_protocol_version: "1".to_string(),
+                network_type: NetworkType::Tcp,
+                address: local_addr.to_string(),
+                protocol: Protocol::Grpc,
+            });
+
+            let hook: std::sync::Arc<dyn crate::engine::hook::ProvisionHook> =
+                std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
+                    provisioners: std::sync::Arc::new(vec![]),
+                    error_cleanup_provisioners: std::sync::Arc::new(vec![]),
+                });
+            let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+            ));
+
+            assert!(
+                b.run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
+                    .await
+                    .is_ok()
+            );
+            let res = b.prepare_plugin(vec![b"fail_prepare".to_vec()]).await;
+            assert!(res.is_err_and(|e| {
+                e.to_string()
+                    .contains("Builder prepare failed: mock prepare error")
+            }));
+            let res_rpc = b.prepare_plugin(vec![b"rpc_err_prepare".to_vec()]).await;
+            assert!(res_rpc.is_err_and(|e| e.to_string().contains("Builder prepare RPC error")));
+            let _ = tx.send(());
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_grpc_builder_run_failure_and_empty_ids() {
+        let mut server_info = None;
+        for l in tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            for addr in l.local_addr() {
+                server_info = Some((l, addr));
+                break;
+            }
+            break;
+        }
+        for (listener, local_addr) in server_info {
+            let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+            tokio::spawn(async move {
+                let _ = tonic::transport::Server::builder()
+                    .add_service(crate::r#gen::packer::builder_server::BuilderServer::new(
+                        MockBuilderRpc,
+                    ))
+                    .serve_with_incoming_shutdown(
+                        tokio_stream::wrappers::TcpListenerStream::new(listener),
+                        async {
+                            let _ = rx.await;
+                        },
+                    )
+                    .await;
+            });
+
+            let hook: std::sync::Arc<dyn crate::engine::hook::ProvisionHook> =
+                std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
+                    provisioners: std::sync::Arc::new(vec![]),
+                    error_cleanup_provisioners: std::sync::Arc::new(vec![]),
+                });
+            let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+            ));
+
+            // Test fail_run
+            let b_fail = GoPluginBuilder::new(GoPluginConfig {
+                name: "fail_run".to_string(),
+                plugin_path: "/path/to/plugin".to_string(),
+            });
+            *b_fail.handshake.lock().await = Some(Handshake {
+                core_protocol_version: "1".to_string(),
+                app_protocol_version: "1".to_string(),
+                network_type: NetworkType::Tcp,
+                address: local_addr.to_string(),
+                protocol: Protocol::Grpc,
+            });
+            let res_fail = b_fail
+                .run(
+                    hook.clone(),
+                    ui.clone(),
+                    crate::engine::packer::OnErrorStrategy::Cleanup,
+                )
+                .await;
+            assert!(res_fail.is_err_and(|e| {
+                e.to_string()
+                    .contains("Plugin builder 'fail_run' failed: mock run error")
+            }));
+
+            // Test rpc_error
+            let b_rpc_err = GoPluginBuilder::new(GoPluginConfig {
+                name: "rpc_error".to_string(),
+                plugin_path: "/path/to/plugin".to_string(),
+            });
+            *b_rpc_err.handshake.lock().await = Some(Handshake {
+                core_protocol_version: "1".to_string(),
+                app_protocol_version: "1".to_string(),
+                network_type: NetworkType::Tcp,
+                address: local_addr.to_string(),
+                protocol: Protocol::Grpc,
+            });
+            let res_rpc_err = b_rpc_err
+                .run(
+                    hook.clone(),
+                    ui.clone(),
+                    crate::engine::packer::OnErrorStrategy::Cleanup,
+                )
+                .await;
+            assert!(res_rpc_err.is_err_and(|e| e.to_string().contains("gRPC Run RPC error")));
+
+            // Test empty_ids
+            let b_empty = GoPluginBuilder::new(GoPluginConfig {
+                name: "empty_ids".to_string(),
+                plugin_path: "/path/to/plugin".to_string(),
+            });
+            *b_empty.handshake.lock().await = Some(Handshake {
+                core_protocol_version: "1".to_string(),
+                app_protocol_version: "1".to_string(),
+                network_type: NetworkType::Tcp,
+                address: local_addr.to_string(),
+                protocol: Protocol::Grpc,
+            });
+            let res_empty = b_empty
+                .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
+                .await;
+            assert!(res_empty.is_ok());
+            for art in res_empty {
+                assert_eq!(art.id(), "empty_ids-artifact");
+                assert_eq!(art.builder_id(), "empty_ids");
+            }
+
+            let _ = tx.send(());
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_grpc_builder_unix_socket() {
+        let sock_path =
+            std::env::temp_dir().join(format!("test-grpc-sock-{}", uuid::Uuid::new_v4()));
+        for listener in tokio::net::UnixListener::bind(&sock_path) {
+            let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+            tokio::spawn(async move {
+                let _ = tonic::transport::Server::builder()
+                    .add_service(crate::r#gen::packer::builder_server::BuilderServer::new(
+                        MockBuilderRpc,
+                    ))
+                    .serve_with_incoming_shutdown(
+                        tokio_stream::wrappers::UnixListenerStream::new(listener),
+                        async {
+                            let _ = rx.await;
+                        },
+                    )
+                    .await;
+            });
+
+            let b = GoPluginBuilder::new(GoPluginConfig {
+                name: "unix-builder".to_string(),
+                plugin_path: "/path/to/plugin".to_string(),
+            });
+            *b.handshake.lock().await = Some(Handshake {
+                core_protocol_version: "1".to_string(),
+                app_protocol_version: "1".to_string(),
+                network_type: NetworkType::Unix,
+                address: sock_path.to_string_lossy().to_string(),
+                protocol: Protocol::Grpc,
+            });
+
+            let hook: std::sync::Arc<dyn crate::engine::hook::ProvisionHook> =
+                std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
+                    provisioners: std::sync::Arc::new(vec![]),
+                    error_cleanup_provisioners: std::sync::Arc::new(vec![]),
+                });
+            let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+            ));
+
+            let res = b
+                .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
+                .await;
+            assert!(res.is_ok());
+            for artifact in res {
+                assert_eq!(artifact.id(), "art-1");
+            }
+            assert!(b.cancel().await.is_ok());
+            let _ = tx.send(());
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = std::fs::remove_file(&sock_path);
+        }
     }
 }

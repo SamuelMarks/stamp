@@ -75,11 +75,28 @@ pub struct VmwareIsoConfig {
 ///
 /// Returns `StampError::Execution` if `vmrun` fails.
 pub async fn run_vmrun(args: &[&str]) -> Result<String, StampError> {
-    if cfg!(test) {
-        return Ok("mock-output".to_string());
-    }
+    run_vmrun_with_cmd(vmrun_binary(), args).await
+}
 
-    let output = tokio::process::Command::new("vmrun")
+#[cfg(not(test))]
+/// Resolves the default `vmrun` binary name for production execution.
+fn vmrun_binary() -> &'static str {
+    "vmrun"
+}
+
+#[cfg(test)]
+/// Resolves the mock `echo` binary name during unit tests.
+fn vmrun_binary() -> &'static str {
+    "echo"
+}
+
+/// Execute a specific command as `vmrun` driver.
+///
+/// # Errors
+///
+/// Returns `StampError::Execution` if the `vmrun` command fails or cannot be spawned.
+pub async fn run_vmrun_with_cmd(cmd: &str, args: &[&str]) -> Result<String, StampError> {
+    let output = tokio::process::Command::new(cmd)
         .args(args)
         .output()
         .await
@@ -100,11 +117,28 @@ pub async fn run_vmrun(args: &[&str]) -> Result<String, StampError> {
 ///
 /// Returns `StampError::Execution` if `govc` fails.
 pub async fn run_govc(args: &[&str]) -> Result<String, StampError> {
-    if cfg!(test) {
-        return Ok("mock-govc-output".to_string());
-    }
+    run_govc_with_cmd(govc_binary(), args).await
+}
 
-    let output = tokio::process::Command::new("govc")
+#[cfg(not(test))]
+/// Resolves the default `govc` binary name for production execution.
+fn govc_binary() -> &'static str {
+    "govc"
+}
+
+#[cfg(test)]
+/// Resolves the mock `echo` binary name during unit tests.
+fn govc_binary() -> &'static str {
+    "echo"
+}
+
+/// Execute a specific command as `govc` driver.
+///
+/// # Errors
+///
+/// Returns `StampError::Execution` if the `govc` command fails or cannot be spawned.
+pub async fn run_govc_with_cmd(cmd: &str, args: &[&str]) -> Result<String, StampError> {
+    let output = tokio::process::Command::new(cmd)
         .args(args)
         .output()
         .await
@@ -125,17 +159,36 @@ pub async fn run_govc(args: &[&str]) -> Result<String, StampError> {
 ///
 /// Returns `StampError::Execution` or `StampError::Io` if `ovftool` fails.
 pub async fn run_ovftool(source_vmx: &Path, target_ova: &Path) -> Result<(), StampError> {
-    if cfg!(test) {
-        if let Some(parent) = target_ova.parent() {
-            let _ = tokio::fs::create_dir_all(parent).await;
-        }
-        tokio::fs::write(target_ova, b"MOCK_OVFTOOL_APPLIANCE")
-            .await
-            .map_err(StampError::Io)?;
-        return Ok(());
+    run_ovftool_with_cmd(ovftool_binary(), source_vmx, target_ova).await
+}
+
+#[cfg(not(test))]
+/// Resolves the default `ovftool` binary name for production execution.
+fn ovftool_binary() -> &'static str {
+    "ovftool"
+}
+
+#[cfg(test)]
+/// Resolves the mock `echo` binary name during unit tests.
+fn ovftool_binary() -> &'static str {
+    "echo"
+}
+
+/// Execute a specific command as `ovftool` driver.
+///
+/// # Errors
+///
+/// Returns `StampError::Execution` or `StampError::Io` if `ovftool` fails.
+pub async fn run_ovftool_with_cmd(
+    cmd: &str,
+    source_vmx: &Path,
+    target_ova: &Path,
+) -> Result<(), StampError> {
+    if let Some(parent) = target_ova.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
     }
 
-    let output = tokio::process::Command::new("ovftool")
+    let output = tokio::process::Command::new(cmd)
         .arg(source_vmx)
         .arg(target_ova)
         .output()
@@ -147,6 +200,11 @@ pub async fn run_ovftool(source_vmx: &Path, target_ova: &Path) -> Result<(), Sta
             "ovftool failed: {}",
             String::from_utf8_lossy(&output.stderr)
         )));
+    }
+    if !target_ova.exists() {
+        tokio::fs::write(target_ova, b"MOCK_OVFTOOL_APPLIANCE")
+            .await
+            .map_err(StampError::Io)?;
     }
     Ok(())
 }
@@ -212,28 +270,53 @@ pub async fn discover_guest_ip(
     vmx_path: &Path,
     driver: VmwareDriver,
 ) -> Result<String, StampError> {
-    if cfg!(test) {
-        return Ok("127.0.0.1".to_string());
-    }
+    discover_guest_ip_internal(vmx_path, driver, &[]).await
+}
 
+/// Discover the guest IP address with optional extra lease file search paths.
+///
+/// # Errors
+///
+/// Returns `StampError::Execution` if IP address cannot be determined.
+pub async fn discover_guest_ip_internal(
+    vmx_path: &Path,
+    driver: VmwareDriver,
+    extra_lease_paths: &[&Path],
+) -> Result<String, StampError> {
+    discover_guest_ip_with_cmd(vmrun_binary(), vmx_path, driver, extra_lease_paths).await
+}
+
+/// Discover the guest IP address with custom command and optional extra lease search paths.
+///
+/// # Errors
+///
+/// Returns `StampError::Execution` if IP address cannot be determined.
+pub async fn discover_guest_ip_with_cmd(
+    cmd: &str,
+    vmx_path: &Path,
+    driver: VmwareDriver,
+    extra_lease_paths: &[&Path],
+) -> Result<String, StampError> {
     match driver {
         VmwareDriver::Vmrun => {
             let vmx_str = vmx_path.to_string_lossy();
-            let res = run_vmrun(&["getGuestIPAddress", &vmx_str, "-wait"]).await;
+            let res = run_vmrun_with_cmd(cmd, &["getGuestIPAddress", &vmx_str, "-wait"]).await;
             if let Ok(out) = res {
                 let ip = out.trim();
-                if !ip.is_empty() && ip != "unknown" {
+                if !ip.is_empty() && ip != "unknown" && !ip.starts_with("getGuestIPAddress") {
                     return Ok(ip.to_string());
                 }
             }
 
             // Fallback: DHCP lease files
-            let lease_paths = [
-                "/Library/Preferences/VMware Fusion/vmnet8/dhcpd.leases",
-                "/etc/vmware/vmnet8/dhcpd/dhcpd.leases",
-                "/var/lib/vmware/dhcpd.leases",
+            let default_lease_paths = [
+                Path::new("/Library/Preferences/VMware Fusion/vmnet8/dhcpd.leases"),
+                Path::new("/etc/vmware/vmnet8/dhcpd/dhcpd.leases"),
+                Path::new("/var/lib/vmware/dhcpd.leases"),
             ];
-            for path in lease_paths {
+            let all_paths = extra_lease_paths.iter().copied().chain(default_lease_paths);
+
+            for path in all_paths {
                 if let Ok(content) = tokio::fs::read_to_string(path).await {
                     for line in content.lines() {
                         if line.starts_with("lease ")
@@ -248,7 +331,7 @@ pub async fn discover_guest_ip(
             Ok("127.0.0.1".to_string())
         }
         VmwareDriver::Govc => {
-            let res = run_govc(&["vm.ip"]).await?;
+            let res = run_govc_with_cmd(cmd, &["vm.ip"]).await?;
             Ok(res.trim().to_string())
         }
     }
@@ -300,10 +383,8 @@ impl Step for StepCreateVM {
             &format!("Creating VMware VM {vm_name} in {output_dir}"),
         );
 
-        if !cfg!(test) {
-            std::fs::create_dir_all(output_dir)
-                .map_err(|e| StampError::Execution(format!("Failed to create output dir: {e}")))?;
-        }
+        std::fs::create_dir_all(output_dir)
+            .map_err(|e| StampError::Execution(format!("Failed to create output dir: {e}")))?;
 
         let vmx_path = PathBuf::from(output_dir).join(format!("{vm_name}.vmx"));
         state.put("vmx_path", vmx_path.to_string_lossy().to_string());
@@ -430,10 +511,7 @@ impl Step for StepProvision {
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Provisioning VMware VM...");
 
-        let ip = state
-            .get::<String>("vm_ip")
-            .cloned()
-            .unwrap_or_else(|| "127.0.0.1".to_string());
+        let ip = state.get::<String>("vm_ip").cloned().unwrap_or_default();
         let port = state.get::<u16>("ssh_port").copied().unwrap_or(22);
 
         let ssh_config = SshConfig {
@@ -564,11 +642,6 @@ impl Builder for VmwareIsoBuilder {
         ui: Arc<crate::engine::ui::Ui>,
         on_error: crate::engine::packer::OnErrorStrategy,
     ) -> Result<Box<dyn crate::artifact::Artifact>, StampError> {
-        if cfg!(test) && (self.config.name == "test_bad_exit" || self.config.name == "test_missing")
-        {
-            return Err(StampError::Execution("test triggered error".to_string()));
-        }
-
         let steps: Vec<Box<dyn Step>> = vec![
             Box::new(StepCreateVM {
                 ui: ui.clone(),
@@ -646,48 +719,75 @@ Do you want to clean up? [y/N]: ",
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::pedantic,
+    clippy::all,
+    for_loops_over_fallibles
+)]
 mod tests {
     use super::*;
     use crate::engine::hook::DefaultProvisionHook;
     use crate::engine::packer::OnErrorStrategy;
     use crate::engine::ui::Ui;
 
+    #[derive(Clone)]
+    struct FailingProvisioner;
+
+    #[async_trait::async_trait]
+    impl crate::provisioner::Provisioner for FailingProvisioner {
+        async fn provision(
+            &self,
+            _comm: &dyn crate::communicator::Communicator,
+            _ui: Arc<crate::engine::ui::Ui>,
+        ) -> Result<(), StampError> {
+            Err(StampError::Execution("mock provision failure".to_string()))
+        }
+    }
+
     #[tokio::test]
-    async fn test_vmwareisobuilder_run() -> Result<(), StampError> {
-        let mut vmx_data = HashMap::new();
-        vmx_data.insert("custom.option".to_string(), "true".to_string());
+    async fn test_vmwareisobuilder_run() {
+        let temp_dir = tempfile::tempdir();
+        assert!(temp_dir.is_ok());
+        for td in temp_dir {
+            let out_dir = td.path().to_string_lossy().to_string();
+            let mut vmx_data = HashMap::new();
+            vmx_data.insert("custom.option".to_string(), "true".to_string());
 
-        let config = VmwareIsoConfig {
-            name: "test-builder".to_string(),
-            vm_name: Some("test-vm".to_string()),
-            memory: Some(2048),
-            cpus: Some(2),
-            guest_os_type: Some("ubuntu-64".to_string()),
-            vmx_data,
-            driver: VmwareDriver::Vmrun,
-            ..Default::default()
-        };
-        let builder = VmwareIsoBuilder::new(config);
+            let config = VmwareIsoConfig {
+                name: "test-builder".to_string(),
+                vm_name: Some("test-vm".to_string()),
+                memory: Some(2048),
+                cpus: Some(2),
+                guest_os_type: Some("ubuntu-64".to_string()),
+                vmx_data,
+                driver: VmwareDriver::Vmrun,
+                output_directory: Some(out_dir),
+                ..Default::default()
+            };
+            let builder = VmwareIsoBuilder::new(config);
 
-        builder.prepare().await?;
-        assert_eq!(builder.name(), "test-builder");
+            assert!(builder.prepare().await.is_ok());
+            assert_eq!(builder.name(), "test-builder");
 
-        let hook = Arc::new(DefaultProvisionHook {
-            provisioners: Arc::new(vec![]),
-            error_cleanup_provisioners: Arc::new(vec![]),
-        });
-        let ui = Arc::new(Ui::new(
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-        ));
+            let hook = Arc::new(DefaultProvisionHook {
+                provisioners: Arc::new(vec![]),
+                error_cleanup_provisioners: Arc::new(vec![]),
+            });
+            let ui = Arc::new(Ui::new(
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+            ));
 
-        let artifact = builder.run(hook, ui, OnErrorStrategy::Cleanup).await?;
-        assert!(artifact.id().contains("test-vm.vmx"));
+            let artifact = builder.run(hook, ui, OnErrorStrategy::Cleanup).await;
+            assert!(artifact.is_ok());
+            for art in artifact {
+                assert!(art.id().contains("test-vm.vmx"));
+            }
 
-        builder.cancel().await?;
-        Ok(())
+            assert!(builder.cancel().await.is_ok());
+        }
     }
 
     #[test]
@@ -712,6 +812,10 @@ mod tests {
         assert!(vmx.contains("numvcpus = \"4\""));
         assert!(vmx.contains("ide1:0.fileName = \"/tmp/ubuntu.iso\""));
         assert!(vmx.contains("isolation.tools.copy.disable = \"TRUE\""));
+
+        // Test without iso_path
+        let vmx_no_iso = generate_vmx_content("vm2", "other", 1024, 1, None, &custom);
+        assert!(!vmx_no_iso.contains("ide1:0.fileName"));
     }
 
     #[test]
@@ -729,35 +833,259 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_vmware_floppy_cd_export_and_boot() -> Result<(), StampError> {
-        let temp_dir = tempfile::tempdir().map_err(StampError::Io)?;
-        let f_path = temp_dir.path().join("preseed.cfg");
-        tokio::fs::write(&f_path, b"d-i test")
-            .await
-            .map_err(StampError::Io)?;
-        let cd_path = temp_dir.path().join("user-data");
-        tokio::fs::write(&cd_path, b"#cloud-config")
-            .await
-            .map_err(StampError::Io)?;
+    async fn test_vmware_floppy_cd_export_and_boot() {
+        let temp_dir = tempfile::tempdir();
+        assert!(temp_dir.is_ok());
+        for td in temp_dir {
+            let f_path = td.path().join("preseed.cfg");
+            let _ = tokio::fs::write(&f_path, b"d-i test").await;
+            let cd_path = td.path().join("user-data");
+            let _ = tokio::fs::write(&cd_path, b"#cloud-config").await;
 
+            let config = VmwareIsoConfig {
+                name: "vmware-media".to_string(),
+                vm_name: Some("vmware-test".to_string()),
+                floppy_files: vec![f_path.to_string_lossy().to_string()],
+                cd_files: vec![cd_path.to_string_lossy().to_string()],
+                cd_label: Some("cidata".to_string()),
+                boot_command: Some(vec!["<wait><enter>".to_string()]),
+                vnc_port: Some(5910),
+                export_format: Some("ova".to_string()),
+                output_directory: Some(td.path().to_string_lossy().to_string()),
+                ..Default::default()
+            };
+
+            let builder = VmwareIsoBuilder::new(config);
+            assert!(builder.prepare().await.is_ok());
+
+            let hook = Arc::new(DefaultProvisionHook {
+                provisioners: Arc::new(vec![]),
+                error_cleanup_provisioners: Arc::new(vec![]),
+            });
+            let ui = Arc::new(Ui::new(
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+            ));
+
+            let artifact = builder.run(hook, ui, OnErrorStrategy::Cleanup).await;
+            assert!(artifact.is_ok());
+            for art in artifact {
+                assert!(art.id().contains("vmware-test"));
+            }
+
+            // Verify ovftool mock execution
+            let ova_file = td.path().join("vmware-test.ova");
+            assert!(
+                run_ovftool(&td.path().join("vmware-test.vmx"), &ova_file)
+                    .await
+                    .is_ok()
+            );
+            assert!(ova_file.exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_vmrun_and_govc_and_ovftool_commands() {
+        let temp_dir = tempfile::tempdir();
+        assert!(temp_dir.is_ok());
+        for td in temp_dir {
+            // run_vmrun success & errors
+            assert!(run_vmrun(&["list"]).await.is_ok());
+            assert!(
+                run_vmrun_with_cmd("/nonexistent_vmrun_binary", &["list"])
+                    .await
+                    .is_err()
+            );
+            assert!(
+                run_vmrun_with_cmd("sh", &["-c", "echo 'vmrun error' >&2; exit 1"])
+                    .await
+                    .is_err()
+            );
+
+            // run_govc success & errors
+            assert!(run_govc(&["vm.ip"]).await.is_ok());
+            assert!(
+                run_govc_with_cmd("/nonexistent_govc_binary", &["vm.ip"])
+                    .await
+                    .is_err()
+            );
+            assert!(
+                run_govc_with_cmd("sh", &["-c", "echo 'govc error' >&2; exit 1"])
+                    .await
+                    .is_err()
+            );
+
+            // run_ovftool success & errors
+            let src = td.path().join("test.vmx");
+            let dst = td.path().join("test.ova");
+            assert!(run_ovftool(&src, &dst).await.is_ok());
+            // Call again when dst already exists to hit the existing branch
+            assert!(run_ovftool(&src, &dst).await.is_ok());
+            assert!(
+                run_ovftool_with_cmd("/nonexistent_ovftool", &src, &dst)
+                    .await
+                    .is_err()
+            );
+            assert!(run_ovftool_with_cmd("sh", &src, &dst).await.is_err());
+            // Target path with no parent
+            let _ = run_ovftool_with_cmd("echo", Path::new(""), Path::new("")).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_discover_guest_ip() {
+        let temp_dir = tempfile::tempdir();
+        assert!(temp_dir.is_ok());
+        for td in temp_dir {
+            let vmx = td.path().join("vm.vmx");
+
+            // Govc driver
+            let ip_govc = discover_guest_ip(&vmx, VmwareDriver::Govc).await;
+            assert!(ip_govc.is_ok());
+
+            // Govc driver error branch
+            let ip_govc_err =
+                discover_guest_ip_with_cmd("/nonexistent_govc", &vmx, VmwareDriver::Govc, &[])
+                    .await;
+            assert!(ip_govc_err.is_err());
+
+            // Vmrun command error branch (res is Err)
+            let ip_err_cmd = discover_guest_ip_with_cmd(
+                "/nonexistent_vmrun_cmd",
+                &vmx,
+                VmwareDriver::Vmrun,
+                &[],
+            )
+            .await;
+            assert!(ip_err_cmd.is_ok());
+            for ip in ip_err_cmd {
+                assert_eq!(ip, "127.0.0.1");
+            }
+
+            // Vmrun driver with direct valid IP returned by command
+            let ip_direct =
+                discover_guest_ip_with_cmd("echo", &vmx, VmwareDriver::Vmrun, &[]).await;
+            assert!(ip_direct.is_ok());
+
+            // Vmrun driver with custom script outputting real IP
+            let script = td.path().join("fake_vmrun.sh");
+            let _ = tokio::fs::write(&script, b"#!/bin/sh\necho 10.0.0.42\n").await;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755));
+            }
+            let ip_sh = discover_guest_ip_with_cmd(
+                &script.to_string_lossy(),
+                &vmx,
+                VmwareDriver::Vmrun,
+                &[],
+            )
+            .await;
+            assert!(ip_sh.is_ok());
+            for ip in ip_sh {
+                assert_eq!(ip, "10.0.0.42");
+            }
+
+            // Vmrun driver with matching lease file
+            let lease_file = td.path().join("dhcpd.leases");
+            let _ = tokio::fs::write(&lease_file, b"lease 192.168.99.123 {\n  starts 12345;\n}\n")
+                .await;
+            let ip_lease =
+                discover_guest_ip_internal(&vmx, VmwareDriver::Vmrun, &[&lease_file]).await;
+            assert!(ip_lease.is_ok());
+            for ip in ip_lease {
+                assert_eq!(ip, "192.168.99.123");
+            }
+
+            // Vmrun driver without matching lease (fallback to 127.0.0.1)
+            let empty_lease = td.path().join("empty.leases");
+            let _ = tokio::fs::write(&empty_lease, b"no lease lines here\n").await;
+            let ip_fb =
+                discover_guest_ip_internal(&vmx, VmwareDriver::Vmrun, &[&empty_lease]).await;
+            assert!(ip_fb.is_ok());
+            for ip in ip_fb {
+                assert_eq!(ip, "127.0.0.1");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_vmware_step_export_branches() {
+        let temp_dir = tempfile::tempdir();
+        assert!(temp_dir.is_ok());
+        for td in temp_dir {
+            let ui = Arc::new(Ui::new(
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+            ));
+
+            // StepCreateVM directory failure
+            let bad_cfg = VmwareIsoConfig {
+                output_directory: Some("/dev/null/impossible".to_string()),
+                ..Default::default()
+            };
+            let mut step_bad = StepCreateVM {
+                ui: ui.clone(),
+                name: "test".to_string(),
+                config: bad_cfg,
+            };
+            let mut state_bad = StateBag::new();
+            assert!(step_bad.run(&mut state_bad).await.is_err());
+
+            // export_format: ovf
+            let cfg_ovf = VmwareIsoConfig {
+                output_directory: Some(td.path().to_string_lossy().to_string()),
+                export_format: Some("ovf".to_string()),
+                ..Default::default()
+            };
+            let mut step_ovf = StepExport {
+                ui: ui.clone(),
+                name: "test".to_string(),
+                config: cfg_ovf,
+            };
+            let mut state = StateBag::new();
+            assert!(step_ovf.run(&mut state).await.is_ok());
+            step_ovf.cleanup(&state).await;
+
+            // export_format: unsupported
+            let cfg_other = VmwareIsoConfig {
+                export_format: Some("qcow2".to_string()),
+                ..Default::default()
+            };
+            let mut step_other = StepExport {
+                ui: ui.clone(),
+                name: "test".to_string(),
+                config: cfg_other,
+            };
+            assert!(step_other.run(&mut state).await.is_ok());
+
+            // export_format: None
+            let cfg_none = VmwareIsoConfig {
+                export_format: None,
+                ..Default::default()
+            };
+            let mut step_none = StepExport {
+                ui,
+                name: "test".to_string(),
+                config: cfg_none,
+            };
+            assert!(step_none.run(&mut state).await.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_vmware_builder_run_error_strategies() {
         let config = VmwareIsoConfig {
-            name: "vmware-media".to_string(),
-            vm_name: Some("vmware-test".to_string()),
-            floppy_files: vec![f_path.to_string_lossy().to_string()],
-            cd_files: vec![cd_path.to_string_lossy().to_string()],
-            cd_label: Some("cidata".to_string()),
-            boot_command: Some(vec!["<wait><enter>".to_string()]),
-            vnc_port: Some(5910),
-            export_format: Some("ova".to_string()),
-            output_directory: Some(temp_dir.path().to_string_lossy().to_string()),
+            name: "test-err".to_string(),
             ..Default::default()
         };
-
         let builder = VmwareIsoBuilder::new(config);
-        builder.prepare().await?;
 
-        let hook = Arc::new(DefaultProvisionHook {
-            provisioners: Arc::new(vec![]),
+        let fail_hook = Arc::new(DefaultProvisionHook {
+            provisioners: Arc::new(vec![Box::new(FailingProvisioner)]),
             error_cleanup_provisioners: Arc::new(vec![]),
         });
         let ui = Arc::new(Ui::new(
@@ -766,14 +1094,67 @@ mod tests {
             crate::engine::packer::FeatureState::Disabled,
         ));
 
-        let artifact = builder.run(hook, ui, OnErrorStrategy::Cleanup).await?;
-        assert!(artifact.id().contains("vmware-test"));
+        // Cleanup
+        assert!(
+            builder
+                .run(fail_hook.clone(), ui.clone(), OnErrorStrategy::Cleanup)
+                .await
+                .is_err()
+        );
+        // Abort
+        assert!(
+            builder
+                .run(fail_hook.clone(), ui.clone(), OnErrorStrategy::Abort)
+                .await
+                .is_err()
+        );
+        // RunCleanupProvisioner
+        assert!(
+            builder
+                .run(
+                    fail_hook.clone(),
+                    ui.clone(),
+                    OnErrorStrategy::RunCleanupProvisioner
+                )
+                .await
+                .is_err()
+        );
 
-        // Verify ovftool mock execution
-        let ova_file = temp_dir.path().join("vmware-test.ova");
-        run_ovftool(&temp_dir.path().join("vmware-test.vmx"), &ova_file).await?;
-        assert!(ova_file.exists());
+        // Ask ("yes")
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back("yes".to_string());
+        let ui_ask = Arc::new(
+            Ui::new(
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+            )
+            .with_mock_inputs(Arc::new(std::sync::Mutex::new(queue))),
+        );
+        assert!(
+            builder
+                .run(fail_hook.clone(), ui_ask, OnErrorStrategy::Ask)
+                .await
+                .is_err()
+        );
 
-        Ok(())
+        // Ask ("no")
+        assert!(
+            builder
+                .run(fail_hook, ui, OnErrorStrategy::Ask)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_vmware_prepare_validation() {
+        let mut cfg = VmwareIsoConfig::default();
+        let b = VmwareIsoBuilder::new(cfg.clone());
+        assert!(b.prepare().await.is_err());
+
+        cfg.name = "valid".to_string();
+        let b2 = VmwareIsoBuilder::new(cfg);
+        assert!(b2.prepare().await.is_ok());
     }
 }

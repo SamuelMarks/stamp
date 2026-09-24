@@ -22,6 +22,8 @@ use std::time::Duration;
 pub struct IonosConfig {
     /// Name of the builder instance.
     pub name: String,
+    /// Custom API endpoint for mock testing or private clouds.
+    pub api_endpoint: Option<String>,
     /// Bearer token or API token for IONOS Cloud.
     pub token: Option<String>,
     /// Username for HTTP basic authentication.
@@ -53,6 +55,8 @@ pub struct IonosConfig {
 /// IONOS Cloud API v6 REST client.
 #[derive(Debug, Clone)]
 pub struct IonosClient {
+    /// Custom endpoint URL.
+    pub endpoint: Option<String>,
     /// API token.
     pub token: Option<String>,
     /// Username.
@@ -131,10 +135,36 @@ impl IonosClient {
         password: Option<String>,
     ) -> Self {
         Self {
+            endpoint: None,
             token,
             username,
             password,
         }
+    }
+
+    /// Create a new `IonosClient` with a custom endpoint.
+    #[must_use]
+    pub const fn with_endpoint(
+        endpoint: Option<String>,
+        token: Option<String>,
+        username: Option<String>,
+        password: Option<String>,
+    ) -> Self {
+        Self {
+            endpoint,
+            token,
+            username,
+            password,
+        }
+    }
+
+    /// Returns the resolved base API URL for IONOS Cloud.
+    fn base_url(&self) -> String {
+        self.endpoint
+            .as_deref()
+            .unwrap_or("https://api.ionos.com/cloudapi/v6")
+            .trim_end_matches('/')
+            .to_string()
     }
 
     /// Create a temporary virtual datacenter.
@@ -147,10 +177,6 @@ impl IonosClient {
         name: &str,
         location: &str,
     ) -> Result<String, StampError> {
-        if cfg!(test) {
-            return Ok(format!("dc-{}", uuid::Uuid::new_v4().simple()));
-        }
-
         let client = reqwest::Client::new();
         let payload = serde_json::json!({
             "properties": {
@@ -160,9 +186,8 @@ impl IonosClient {
             }
         });
 
-        let mut req = client
-            .post("https://api.ionos.com/cloudapi/v6/datacenters")
-            .json(&payload);
+        let url = format!("{}/datacenters", self.base_url());
+        let mut req = client.post(&url).json(&payload);
 
         if let Some(ref t) = self.token {
             req = req.bearer_auth(t);
@@ -192,13 +217,6 @@ impl IonosClient {
         datacenter_id: &str,
         spec: &IonosServerSpec<'_>,
     ) -> Result<(String, String), StampError> {
-        if cfg!(test) {
-            return Ok((
-                format!("srv-{}", uuid::Uuid::new_v4().simple()),
-                format!("vol-{}", uuid::Uuid::new_v4().simple()),
-            ));
-        }
-
         let client = reqwest::Client::new();
         let mut vol_props = serde_json::json!({
             "name": format!("{}-boot", spec.name),
@@ -225,7 +243,7 @@ impl IonosClient {
             }
         });
 
-        let url = format!("https://api.ionos.com/cloudapi/v6/datacenters/{datacenter_id}/servers");
+        let url = format!("{}/datacenters/{datacenter_id}/servers", self.base_url());
         let mut req = client.post(&url).json(&payload);
         if let Some(ref t) = self.token {
             req = req.bearer_auth(t);
@@ -264,13 +282,10 @@ impl IonosClient {
         name: &str,
         description: Option<&str>,
     ) -> Result<String, StampError> {
-        if cfg!(test) {
-            return Ok(format!("snap-{}", uuid::Uuid::new_v4().simple()));
-        }
-
         let client = reqwest::Client::new();
         let url = format!(
-            "https://api.ionos.com/cloudapi/v6/datacenters/{datacenter_id}/volumes/{volume_id}/create-snapshot"
+            "{}/datacenters/{datacenter_id}/volumes/{volume_id}/create-snapshot",
+            self.base_url()
         );
 
         let mut form_str = format!("name={name}");
@@ -306,12 +321,8 @@ impl IonosClient {
     ///
     /// Returns `StampError::Execution` if deletion fails.
     pub async fn delete_datacenter(&self, datacenter_id: &str) -> Result<(), StampError> {
-        if cfg!(test) {
-            return Ok(());
-        }
-
         let client = reqwest::Client::new();
-        let url = format!("https://api.ionos.com/cloudapi/v6/datacenters/{datacenter_id}");
+        let url = format!("{}/datacenters/{datacenter_id}", self.base_url());
         let mut req = client.delete(&url);
         if let Some(ref t) = self.token {
             req = req.bearer_auth(t);
@@ -557,7 +568,8 @@ impl Builder for IonosBuilder {
         ui: Arc<crate::engine::ui::Ui>,
         on_error: crate::engine::packer::OnErrorStrategy,
     ) -> Result<Box<dyn crate::artifact::Artifact>, StampError> {
-        let client = IonosClient::new(
+        let client = IonosClient::with_endpoint(
+            self.config.api_endpoint.clone(),
             self.config.token.clone(),
             self.config.username.clone(),
             self.config.password.clone(),
@@ -602,7 +614,7 @@ impl Builder for IonosBuilder {
         let artifact_id = state
             .get::<String>("artifact_id")
             .cloned()
-            .unwrap_or_else(|| format!("ionos:{}", self.name()));
+            .unwrap_or_default();
 
         Ok(Box::new(crate::artifact::MockArtifact {
             builder_id: self.name(),
@@ -617,9 +629,23 @@ impl Builder for IonosBuilder {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[allow(clippy::pedantic, clippy::all, for_loops_over_fallibles)]
 mod tests {
     use super::*;
+
+    struct FailingProvisioner;
+
+    #[async_trait]
+    impl crate::provisioner::Provisioner for FailingProvisioner {
+        async fn provision(
+            &self,
+            _comm: &dyn crate::communicator::Communicator,
+            _ui: Arc<crate::engine::ui::Ui>,
+        ) -> Result<(), StampError> {
+            Err(StampError::Execution("mock provision failure".to_string()))
+        }
+    }
 
     #[test]
     fn test_ionos_name() {
@@ -652,10 +678,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ionos_client_mocked() -> Result<(), StampError> {
-        let client = IonosClient::new(Some("token123".to_string()), None, None);
-        let dc_id = client.create_datacenter("test-dc", "de/fra").await?;
-        assert!(dc_id.starts_with("dc-"));
+    async fn test_ionos_client_mocked() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _m_dc = server
+            .mock("POST", "/datacenters")
+            .with_status(200)
+            .with_body(r#"{"id": "dc-1"}"#)
+            .create_async()
+            .await;
+
+        let _m_srv = server
+            .mock("POST", "/datacenters/dc-1/servers")
+            .with_status(200)
+            .with_body(r#"{"id": "srv-1", "entities": {"volumes": {"items": [{"id": "vol-1"}]}}}"#)
+            .create_async()
+            .await;
+
+        let _m_snap = server
+            .mock("POST", "/datacenters/dc-1/volumes/vol-1/create-snapshot")
+            .with_status(200)
+            .with_body(r#"{"id": "snap-1"}"#)
+            .create_async()
+            .await;
+
+        let _m_del = server
+            .mock("DELETE", "/datacenters/dc-1")
+            .with_status(200)
+            .create_async()
+            .await;
+
+        let client = IonosClient::with_endpoint(
+            Some(server.url()),
+            Some("token123".to_string()),
+            None,
+            None,
+        );
+
+        let mut dc_id = String::new();
+        for id in client.create_datacenter("test-dc", "de/fra").await {
+            dc_id = id;
+        }
+        assert_eq!(dc_id, "dc-1");
 
         let spec = IonosServerSpec {
             name: "srv1",
@@ -665,27 +729,245 @@ mod tests {
             image_alias: "ubuntu:latest",
             image_password: Some("pass"),
         };
-        let (srv_id, vol_id) = client.create_server_and_volume(&dc_id, &spec).await?;
-        assert!(srv_id.starts_with("srv-"));
-        assert!(vol_id.starts_with("vol-"));
 
-        let snap_id = client
+        let mut srv_id = String::new();
+        let mut vol_id = String::new();
+        for (s, v) in client.create_server_and_volume(&dc_id, &spec).await {
+            srv_id = s;
+            vol_id = v;
+        }
+        assert_eq!(srv_id, "srv-1");
+        assert_eq!(vol_id, "vol-1");
+
+        let mut snap_id = String::new();
+        for id in client
             .create_snapshot(&dc_id, &vol_id, "test-snap", Some("desc"))
-            .await?;
-        assert!(snap_id.starts_with("snap-"));
+            .await
+        {
+            snap_id = id;
+        }
+        assert_eq!(snap_id, "snap-1");
 
-        client.delete_datacenter(&dc_id).await?;
-        Ok(())
+        assert!(client.delete_datacenter(&dc_id).await.is_ok());
     }
 
     #[tokio::test]
-    async fn test_ionos_builder_run() -> Result<(), StampError> {
+    async fn test_ionos_client_basic_auth_and_fallback_volume() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _m_dc = server
+            .mock("POST", "/datacenters")
+            .with_status(200)
+            .with_body(r#"{"id": "dc-2"}"#)
+            .create_async()
+            .await;
+
+        let _m_srv = server
+            .mock("POST", "/datacenters/dc-2/servers")
+            .with_status(200)
+            .with_body(r#"{"id": "srv-2", "entities": {"volumes": {"items": []}}}"#)
+            .create_async()
+            .await;
+
+        let _m_snap = server
+            .mock("POST", "/datacenters/dc-2/volumes/vol-mock/create-snapshot")
+            .with_status(200)
+            .with_body(r#"{"id": "snap-2"}"#)
+            .create_async()
+            .await;
+
+        let _m_del = server
+            .mock("DELETE", "/datacenters/dc-2")
+            .with_status(200)
+            .create_async()
+            .await;
+
+        let client = IonosClient::with_endpoint(
+            Some(server.url()),
+            None,
+            Some("user".to_string()),
+            Some("pass".to_string()),
+        );
+
+        let mut dc_id = String::new();
+        for id in client.create_datacenter("test-dc2", "de/txl").await {
+            dc_id = id;
+        }
+        assert_eq!(dc_id, "dc-2");
+
+        let spec = IonosServerSpec {
+            name: "srv2",
+            cores: 4,
+            ram_mb: 4096,
+            disk_size_gb: 40,
+            image_alias: "debian:latest",
+            image_password: None,
+        };
+
+        let mut srv_id = String::new();
+        let mut vol_id = String::new();
+        for (s, v) in client.create_server_and_volume(&dc_id, &spec).await {
+            srv_id = s;
+            vol_id = v;
+        }
+        assert_eq!(srv_id, "srv-2");
+        assert_eq!(vol_id, "vol-mock");
+
+        let mut snap_id = String::new();
+        for id in client
+            .create_snapshot(&dc_id, &vol_id, "test-snap2", None)
+            .await
+        {
+            snap_id = id;
+        }
+        assert_eq!(snap_id, "snap-2");
+
+        assert!(client.delete_datacenter(&dc_id).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_ionos_client_errors() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _m_dc_500 = server
+            .mock("POST", "/datacenters")
+            .with_status(500)
+            .create_async()
+            .await;
+
+        let _m_dc_bad = server
+            .mock("POST", "/datacenters")
+            .with_status(200)
+            .with_body("invalid-json")
+            .create_async()
+            .await;
+
+        let client = IonosClient::with_endpoint(Some(server.url()), None, None, None);
+        assert!(client.create_datacenter("d", "l").await.is_err());
+        assert!(client.create_datacenter("d", "l").await.is_err());
+
+        let mut server2 = mockito::Server::new_async().await;
+        let _m_srv_500 = server2
+            .mock("POST", "/datacenters/dc-1/servers")
+            .with_status(500)
+            .create_async()
+            .await;
+        let _m_srv_bad = server2
+            .mock("POST", "/datacenters/dc-1/servers")
+            .with_status(200)
+            .with_body("not-json")
+            .create_async()
+            .await;
+
+        let client2 = IonosClient::with_endpoint(Some(server2.url()), None, None, None);
+        let spec = IonosServerSpec::default();
+        assert!(
+            client2
+                .create_server_and_volume("dc-1", &spec)
+                .await
+                .is_err()
+        );
+        assert!(
+            client2
+                .create_server_and_volume("dc-1", &spec)
+                .await
+                .is_err()
+        );
+
+        let mut server3 = mockito::Server::new_async().await;
+        let _m_snap_500 = server3
+            .mock("POST", "/datacenters/dc-1/volumes/v-1/create-snapshot")
+            .with_status(500)
+            .create_async()
+            .await;
+        let _m_snap_bad = server3
+            .mock("POST", "/datacenters/dc-1/volumes/v-1/create-snapshot")
+            .with_status(200)
+            .with_body("not-json")
+            .create_async()
+            .await;
+
+        let client3 = IonosClient::with_endpoint(Some(server3.url()), None, None, None);
+        assert!(
+            client3
+                .create_snapshot("dc-1", "v-1", "s", None)
+                .await
+                .is_err()
+        );
+        assert!(
+            client3
+                .create_snapshot("dc-1", "v-1", "s", None)
+                .await
+                .is_err()
+        );
+
+        // Invalid network URL
+        let client_invalid =
+            IonosClient::with_endpoint(Some("http://127.0.0.1:1".to_string()), None, None, None);
+        assert!(client_invalid.create_datacenter("d", "l").await.is_err());
+        assert!(
+            client_invalid
+                .create_server_and_volume("d", &spec)
+                .await
+                .is_err()
+        );
+        assert!(
+            client_invalid
+                .create_snapshot("d", "v", "s", None)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ionos_builder_run() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _m_dc = server
+            .mock("POST", "/datacenters")
+            .with_status(200)
+            .with_body(r#"{"id": "dc-run"}"#)
+            .create_async()
+            .await;
+
+        let _m_srv = server
+            .mock("POST", "/datacenters/dc-run/servers")
+            .with_status(200)
+            .with_body(
+                r#"{"id": "srv-run", "entities": {"volumes": {"items": [{"id": "vol-run"}]}}}"#,
+            )
+            .create_async()
+            .await;
+
+        let _m_snap = server
+            .mock(
+                "POST",
+                "/datacenters/dc-run/volumes/vol-run/create-snapshot",
+            )
+            .with_status(200)
+            .with_body(r#"{"id": "snap-run"}"#)
+            .create_async()
+            .await;
+
+        let _m_del = server
+            .mock("DELETE", "/datacenters/dc-run")
+            .with_status(200)
+            .create_async()
+            .await;
+
         let config = IonosConfig {
             name: "test-ionos".to_string(),
+            api_endpoint: Some(server.url()),
             image_alias: "ubuntu:latest".to_string(),
             snapshot_name: "gold-snap".to_string(),
+            snapshot_description: Some("description".to_string()),
             token: Some("secret".to_string()),
             location: Some("de/fra".to_string()),
+            datacenter_name: Some("custom-dc".to_string()),
+            cores: Some(4),
+            ram_mb: Some(4096),
+            disk_size_gb: Some(50),
+            ssh_username: Some("custom_ssh".to_string()),
             ..Default::default()
         };
         let b = IonosBuilder::new(config);
@@ -698,12 +980,191 @@ mod tests {
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
         ));
-        let artifact = b
+
+        let res = b
             .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
-            .await?;
-        assert!(artifact.id().starts_with("ionos:snap-"));
-        b.cancel().await?;
-        Ok(())
+            .await;
+        assert!(res.is_ok());
+        for artifact in res {
+            assert_eq!(artifact.id(), "ionos:snap-run");
+            assert_eq!(artifact.builder_id(), "test-ionos");
+            assert!(artifact.files().is_empty());
+            assert!(artifact.state("dummy").is_none());
+            assert!(artifact.destroy().is_ok());
+        }
+
+        assert!(b.cancel().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_ionos_builder_run_defaults() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _m_dc = server
+            .mock("POST", "/datacenters")
+            .with_status(200)
+            .with_body(r#"{"id": "dc-def"}"#)
+            .create_async()
+            .await;
+
+        let _m_srv = server
+            .mock("POST", "/datacenters/dc-def/servers")
+            .with_status(200)
+            .with_body(
+                r#"{"id": "srv-def", "entities": {"volumes": {"items": [{"id": "vol-def"}]}}}"#,
+            )
+            .create_async()
+            .await;
+
+        let _m_snap = server
+            .mock(
+                "POST",
+                "/datacenters/dc-def/volumes/vol-def/create-snapshot",
+            )
+            .with_status(200)
+            .with_body(r#"{"id": "snap-def"}"#)
+            .create_async()
+            .await;
+
+        let _m_del = server
+            .mock("DELETE", "/datacenters/dc-def")
+            .with_status(200)
+            .create_async()
+            .await;
+
+        let config = IonosConfig {
+            name: "test-default".to_string(),
+            api_endpoint: Some(server.url()),
+            image_alias: "ubuntu:latest".to_string(),
+            snapshot_name: "gold-snap".to_string(),
+            ..Default::default()
+        };
+        let b = IonosBuilder::new(config);
+        let hook = Arc::new(crate::engine::hook::DefaultProvisionHook {
+            provisioners: Arc::new(vec![]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let ui = Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+
+        let res = b
+            .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
+            .await;
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_ionos_builder_run_failures() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _m_dc = server
+            .mock("POST", "/datacenters")
+            .with_status(500)
+            .create_async()
+            .await;
+
+        let config = IonosConfig {
+            name: "test-fail".to_string(),
+            api_endpoint: Some(server.url()),
+            image_alias: "ubuntu:latest".to_string(),
+            snapshot_name: "gold-snap".to_string(),
+            ..Default::default()
+        };
+        let b = IonosBuilder::new(config);
+        let hook = Arc::new(crate::engine::hook::DefaultProvisionHook {
+            provisioners: Arc::new(vec![]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let ui = Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+
+        // Test with Cleanup strategy
+        let res_cleanup = b
+            .run(
+                hook.clone(),
+                ui.clone(),
+                crate::engine::packer::OnErrorStrategy::Cleanup,
+            )
+            .await;
+        assert!(res_cleanup.is_err());
+
+        // Test with Abort strategy
+        let res_abort = b
+            .run(
+                hook.clone(),
+                ui.clone(),
+                crate::engine::packer::OnErrorStrategy::Abort,
+            )
+            .await;
+        assert!(res_abort.is_err());
+
+        // Test default endpoint (None) which fails network call to default ionos endpoint
+        let b_no_endpoint = IonosBuilder::new(IonosConfig {
+            name: "test-no-endpoint".to_string(),
+            api_endpoint: None,
+            image_alias: "ubuntu:latest".to_string(),
+            snapshot_name: "gold-snap".to_string(),
+            ..Default::default()
+        });
+        let res_no_endpoint = b_no_endpoint
+            .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
+            .await;
+        assert!(res_no_endpoint.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_ionos_provision_failure_and_edges() {
+        let ui = Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+        let hook: Arc<dyn ProvisionHook> = Arc::new(crate::engine::hook::DefaultProvisionHook {
+            provisioners: Arc::new(vec![Box::new(FailingProvisioner)]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+
+        let mut step = StepProvisionIonos {
+            ui: ui.clone(),
+            name: "test-step".to_string(),
+            hook,
+            ssh_username: None,
+        };
+
+        let mut state = StateBag::new();
+        // Missing server_ip triggers fallback to "127.0.0.1"
+        assert!(step.run(&mut state).await.is_err());
+        step.cleanup(&state).await;
+
+        // When server_ip is set
+        state.put("server_ip", "10.0.0.1".to_string());
+        assert!(step.run(&mut state).await.is_err());
+
+        // StepCreateIonosInfrastructure cleanup without datacenter_id
+        let client = IonosClient::new(None, None, None);
+        let mut infra_step = StepCreateIonosInfrastructure {
+            ui: ui.clone(),
+            name: "test-infra".to_string(),
+            client: client.clone(),
+            config: IonosConfig::default(),
+        };
+        let empty_state = StateBag::new();
+        infra_step.cleanup(&empty_state).await;
+
+        // StepCaptureIonosSnapshot cleanup
+        let mut snap_step = StepCaptureIonosSnapshot {
+            ui,
+            name: "test-snap".to_string(),
+            client,
+            config: IonosConfig::default(),
+        };
+        snap_step.cleanup(&empty_state).await;
     }
 
     #[test]
@@ -715,7 +1176,26 @@ mod tests {
         assert_eq!(config.clone(), config);
         assert_eq!(format!("{config:?}"), format!("{config:?}"));
 
+        let json = serde_json::to_string(&config).unwrap_or_default();
+        let decoded: Result<IonosConfig, _> = serde_json::from_str(&json);
+        assert!(decoded.is_ok());
+
         let client = IonosClient::new(None, None, None);
         assert_eq!(format!("{client:?}"), format!("{client:?}"));
+
+        let spec = IonosServerSpec::default();
+        assert_eq!(spec.clone(), spec);
+        assert_eq!(format!("{spec:?}"), format!("{spec:?}"));
+
+        let dc_resp: Result<DcResp, _> = serde_json::from_str(r#"{"id":"dc-1"}"#);
+        assert_eq!(dc_resp.as_ref().map(|d| d.id.as_str()).ok(), Some("dc-1"));
+
+        let snap_resp: Result<SnapResp, _> = serde_json::from_str(r#"{"id":"s-1"}"#);
+        assert_eq!(snap_resp.as_ref().map(|s| s.id.as_str()).ok(), Some("s-1"));
+
+        let srv_resp: Result<ServerResp, _> = serde_json::from_str(
+            r#"{"id":"srv-1","entities":{"volumes":{"items":[{"id":"v-1"}]}}}"#,
+        );
+        assert!(srv_resp.is_ok());
     }
 }
