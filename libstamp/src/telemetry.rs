@@ -182,6 +182,9 @@ pub struct VersionInfo {
 }
 
 impl VersionInfo {
+    /// Upstream Packer compatibility version reported to tools like Bento.
+    pub const PACKER_COMPAT_VERSION: &'static str = "1.11.2";
+
     /// Creates a new `VersionInfo` initialized from compile-time and runtime platform constants.
     #[must_use]
     pub fn current() -> Self {
@@ -219,11 +222,20 @@ impl VersionInfo {
     pub fn format_human(&self, verbose: bool) -> String {
         if verbose {
             format!(
-                "Stamp v{}\n\nPlatform: {}/{}\nOS: {}\nArch: {}\nRevision: {}",
-                self.version, self.os, self.arch, self.os, self.arch, self.revision
+                "Packer v{} (Stamp drop-in replacement v{})\n\nPlatform: {}/{}\nOS: {}\nArch: {}\nRevision: {}",
+                Self::PACKER_COMPAT_VERSION,
+                self.version,
+                self.os,
+                self.arch,
+                self.os,
+                self.arch,
+                self.revision
             )
         } else {
-            format!("Stamp v{}", self.version)
+            format!(
+                "Packer v{} (Stamp drop-in replacement)",
+                Self::PACKER_COMPAT_VERSION
+            )
         }
     }
 
@@ -233,7 +245,7 @@ impl VersionInfo {
         format!(
             "{timestamp},,version,{version}\n{timestamp},,version-prerelease,{pre}\n{timestamp},,version-metadata,{meta}",
             timestamp = timestamp,
-            version = self.version,
+            version = Self::PACKER_COMPAT_VERSION,
             pre = self.prerelease.as_deref().unwrap_or(""),
             meta = self.metadata.as_deref().unwrap_or("")
         )
@@ -477,14 +489,19 @@ mod tests {
         let info = VersionInfo::current();
         assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
         let human_short = info.format_human(false);
-        assert!(human_short.contains(&info.version));
+        assert!(human_short.contains(VersionInfo::PACKER_COMPAT_VERSION));
+        assert!(human_short.contains("Stamp drop-in replacement"));
         let human_verbose = info.format_human(true);
         assert!(human_verbose.contains("Platform:"));
         assert!(human_verbose.contains(&info.os));
         assert!(human_verbose.contains(&info.arch));
+        assert!(human_verbose.contains(&info.version));
 
         let mr = info.format_machine_readable(1_700_000_000);
-        assert!(mr.contains("1700000000,,version,"));
+        assert!(mr.contains(&format!(
+            "1700000000,,version,{}",
+            VersionInfo::PACKER_COMPAT_VERSION
+        )));
         assert!(mr.contains("1700000000,,version-prerelease,"));
         assert!(mr.contains("1700000000,,version-metadata,"));
     }

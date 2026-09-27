@@ -158,11 +158,11 @@ pub fn fix_hcl_template(content: &str) -> String {
     crate::engine::fmt::format_hcl_canonical(&result)
 }
 
-/// Fixes a template file in place according to configuration.
+/// Fixes a template file in place according to configuration, and returns the fixed content.
 ///
 /// # Errors
 /// Returns `StampError` if reading, fixing, writing, or validation fails.
-pub fn fix_template(template_path: &str, config: &FixConfig) -> Result<(), StampError> {
+pub fn fix_template(template_path: &str, config: &FixConfig) -> Result<String, StampError> {
     let content = std::fs::read_to_string(template_path).map_err(StampError::Io)?;
     let is_json = std::path::Path::new(template_path)
         .extension()
@@ -187,7 +187,7 @@ pub fn fix_template(template_path: &str, config: &FixConfig) -> Result<(), Stamp
         crate::engine::packer::validate(&tmpl)?;
     }
 
-    Ok(())
+    Ok(fixed_content)
 }
 
 #[cfg(test)]

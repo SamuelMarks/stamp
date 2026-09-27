@@ -158,12 +158,9 @@ impl Ui {
         } else {
             let mut prefix = String::new();
             if self.timestamp_ui.is_enabled() {
-                // simple timestamp for regular output
-                let ts = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                prefix = format!("[{ts}] ");
+                // RFC3339 UTC timestamp matching Packer -timestamp-ui output
+                let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                prefix = format!("{ts}: ");
             }
             if !target.is_empty() {
                 prefix = format!("{prefix}==> {target}: ");
@@ -225,11 +222,8 @@ impl Ui {
         } else {
             let mut prefix = String::new();
             if self.timestamp_ui.is_enabled() {
-                let ts = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                prefix = format!("[{ts}] ");
+                let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                prefix = format!("{ts}: ");
             }
             if !target.is_empty() {
                 prefix = format!("{prefix}==> {target}: ");

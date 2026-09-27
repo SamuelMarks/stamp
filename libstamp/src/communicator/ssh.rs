@@ -970,6 +970,26 @@ impl SshCommunicator {
         }
         Ok(())
     }
+
+    /// Wait for the SSH daemon to become available again after a disconnect.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub async fn wait_for_reconnect(&self, timeout: Duration) -> Result<(), StampError> {
+        let start = std::time::Instant::now();
+        let poll_interval = Duration::from_millis(500);
+
+        while start.elapsed() < timeout {
+            if let Ok(handle) = self.connect().await {
+                drop(handle);
+                return Ok(());
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
+
+        Err(StampError::CommunicatorTimeout {
+            target: format!("{}:{}", self.config.host, self.config.port),
+            timeout_secs: timeout.as_secs(),
+        })
+    }
 }
 
 #[async_trait::async_trait]
@@ -991,24 +1011,48 @@ impl Communicator for SshCommunicator {
             }
         };
 
-        let mut channel = handle
-            .channel_open_session()
-            .await
-            .map_err(|e| StampError::Execution(format!("Channel error: {e}")))?;
+        let mut channel = match handle.channel_open_session().await {
+            Ok(c) => c,
+            Err(e) => {
+                if self.config.expect_disconnect {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    if !cfg!(test) {
+                        let _ = self.wait_for_reconnect(self.config.timeout.get()).await;
+                    }
+                    return Ok(CommandResult {
+                        exit_code: 0,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    });
+                }
+                return Err(StampError::Execution(format!("Channel error: {e}")));
+            }
+        };
 
         if self.config.pty {
             request_channel_pty(&channel, self.config.pty_config.as_ref()).await?;
             Self::resize_pty(&channel, 80, 24).await?;
         }
 
-        channel
-            .exec(true, cmd.command.clone())
-            .await
-            .map_err(|e| StampError::Execution(format!("Exec error: {e}")))?;
+        if let Err(e) = channel.exec(true, cmd.command.clone()).await {
+            if self.config.expect_disconnect {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                if !cfg!(test) {
+                    let _ = self.wait_for_reconnect(self.config.timeout.get()).await;
+                }
+                return Ok(CommandResult {
+                    exit_code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            }
+            return Err(StampError::Execution(format!("Exec error: {e}")));
+        }
 
         let mut stdout = String::new();
         let mut stderr = String::new();
         let mut exit_code = 1;
+        let mut received_exit_code = false;
 
         while let Some(msg) = channel.wait().await {
             match msg {
@@ -1022,8 +1066,17 @@ impl Communicator for SshCommunicator {
                 }
                 ChannelMsg::ExitStatus { exit_status } => {
                     exit_code = i32::try_from(exit_status).unwrap_or(0);
+                    received_exit_code = true;
                 }
                 _ => {}
+            }
+        }
+
+        if self.config.expect_disconnect && !received_exit_code {
+            exit_code = 0;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if !cfg!(test) {
+                let _ = self.wait_for_reconnect(self.config.timeout.get()).await;
             }
         }
 
@@ -2679,6 +2732,23 @@ mod tests {
         );
 
         disc_handle.abort();
+
+        // 8. Expect disconnect on session drop (simulates reboot / socket drop during package updates)
+        let (expect_port, expect_handle) = start_mock_ssh_server(false, true).await?;
+        let mut expect_cfg = get_config("127.0.0.1", "testuser");
+        expect_cfg.port = Port::new(expect_port);
+        expect_cfg.password = Some("testpass".to_string());
+        expect_cfg.expect_disconnect = true;
+        let comm_expect = SshCommunicator::new(expect_cfg);
+        let expect_res = comm_expect
+            .execute(&Command::new("reboot".to_string()))
+            .await;
+        assert!(expect_res.is_ok());
+        if let Ok(res) = expect_res {
+            assert_eq!(res.exit_code, 0);
+        }
+        expect_handle.abort();
+
         Ok(())
     }
 }

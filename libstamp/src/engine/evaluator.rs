@@ -313,27 +313,137 @@ pub fn interpolate_legacy_template<S: std::hash::BuildHasher>(
         .unwrap_or_else(|_| input.to_string())
 }
 
+/// Evaluates a raw HCL expression against the given evaluation context.
+///
+/// # Arguments
+/// * `expr` - The HCL AST expression to evaluate.
+/// * `ctx` - The evaluation context containing variables, locals, and functions.
+///
+/// # Errors
+/// Returns an error message if evaluation fails or produces diagnostic errors.
+pub fn evaluate_expression(
+    expr: &hashicorp_configuration_language_rs::ast::expr::Expression,
+    ctx: &Context,
+) -> Result<Value, String> {
+    let evaluator = Evaluator::new(ctx);
+    match evaluator.evaluate(expr) {
+        Ok((val, diags)) => {
+            if diags.has_errors() {
+                Err(diags.errors().first().map_or_else(
+                    || "Evaluation diagnostic error".to_string(),
+                    |e| e.error.to_string(),
+                ))
+            } else {
+                Ok(val)
+            }
+        }
+        Err(diags) => Err(diags.errors().first().map_or_else(
+            || "Evaluation diagnostic error".to_string(),
+            |e| e.error.to_string(),
+        )),
+    }
+}
+
+/// Converts an evaluated HCL [`Value`] into its string representation.
+#[must_use]
+pub fn value_to_string(val: &Value) -> String {
+    match &*val.data {
+        ValueData::String(s) => s.clone(),
+        ValueData::Number(n) => n.0.to_string(),
+        ValueData::Bool(b) => b.to_string(),
+        ValueData::Array(arr) => {
+            let items: Vec<String> = arr
+                .iter()
+                .map(|item| match &*item.data {
+                    ValueData::String(s) => format!("\"{s}\""),
+                    _ => value_to_string(item),
+                })
+                .collect();
+            format!("[{}]", items.join(", "))
+        }
+        ValueData::Object(obj) => {
+            let pairs: Vec<String> = obj
+                .iter()
+                .map(|(k, v)| match &*v.data {
+                    ValueData::String(s) => format!("\"{k}\": \"{s}\""),
+                    _ => format!("\"{k}\": {}", value_to_string(v)),
+                })
+                .collect();
+            format!("{{{}}}", pairs.join(", "))
+        }
+        _ => String::new(),
+    }
+}
+
 #[cfg_attr(coverage_nightly, coverage(off))]
-/// Internal documentation missing.
+/// Applies evaluated expression values to builder configurations.
 fn apply_builders(ctx: &Context, template: &mut Template) {
     for builder in &mut template.builders {
         let mut new_config = HashMap::new();
+        for (k, expr) in &builder.expressions {
+            if let Ok(evaluated) = evaluate_expression(expr, ctx) {
+                new_config.insert(k.clone(), value_to_string(&evaluated));
+            } else if let Some(fallback) = builder.config.get(k) {
+                new_config.insert(k.clone(), fallback.clone());
+            }
+        }
         for (k, v) in &builder.config {
-            if let Ok(evaluated) = evaluate_str(v, ctx) {
-                if let ValueData::String(s) = &*evaluated.data {
-                    new_config.insert(k.clone(), s.clone());
-                } else if let ValueData::Number(n) = &*evaluated.data {
-                    new_config.insert(k.clone(), n.0.to_string());
-                } else if let ValueData::Bool(b) = &*evaluated.data {
-                    new_config.insert(k.clone(), b.to_string());
+            if !new_config.contains_key(k) {
+                if let Ok(evaluated) = evaluate_str(v, ctx) {
+                    new_config.insert(k.clone(), value_to_string(&evaluated));
                 } else {
                     new_config.insert(k.clone(), v.clone());
                 }
-            } else {
-                new_config.insert(k.clone(), v.clone());
             }
         }
         builder.config = new_config;
+    }
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+/// Applies evaluated expression values to provisioner configurations.
+fn apply_provisioners(ctx: &Context, template: &mut Template) {
+    for prov in &mut template.provisioners {
+        let mut new_config = HashMap::new();
+        for (k, expr) in &prov.expressions {
+            if let Ok(evaluated) = evaluate_expression(expr, ctx) {
+                new_config.insert(k.clone(), value_to_string(&evaluated));
+            } else if let Some(fallback) = prov.config.get(k) {
+                new_config.insert(k.clone(), fallback.clone());
+            }
+        }
+        for (k, v) in &prov.config {
+            if !new_config.contains_key(k) {
+                if let Ok(evaluated) = evaluate_str(v, ctx) {
+                    new_config.insert(k.clone(), value_to_string(&evaluated));
+                } else {
+                    new_config.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        prov.config = new_config;
+    }
+    for b in &mut template.builds {
+        for prov in &mut b.provisioners {
+            let mut new_config = HashMap::new();
+            for (k, expr) in &prov.expressions {
+                if let Ok(evaluated) = evaluate_expression(expr, ctx) {
+                    new_config.insert(k.clone(), value_to_string(&evaluated));
+                } else if let Some(fallback) = prov.config.get(k) {
+                    new_config.insert(k.clone(), fallback.clone());
+                }
+            }
+            for (k, v) in &prov.config {
+                if !new_config.contains_key(k) {
+                    if let Ok(evaluated) = evaluate_str(v, ctx) {
+                        new_config.insert(k.clone(), value_to_string(&evaluated));
+                    } else {
+                        new_config.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            prov.config = new_config;
+        }
     }
 }
 
@@ -380,7 +490,7 @@ pub async fn evaluate(template: &mut Template) -> Result<(), StampError> {
 
     register_stdlib(&mut ctx);
     register_packer_funcs(&mut ctx);
-    inject_path_context(&mut ctx, None);
+    inject_path_context(&mut ctx, template.root_path.as_deref());
 
     let order = crate::engine::dag::resolve_dag(template)?;
 
@@ -388,6 +498,8 @@ pub async fn evaluate(template: &mut Template) -> Result<(), StampError> {
     let mut data_types = BTreeMap::new();
     let mut vars_map = BTreeMap::new();
     let mut vars_types = BTreeMap::new();
+    let mut locals_map = BTreeMap::new();
+    let mut locals_types = BTreeMap::new();
 
     for node in order {
         match node {
@@ -431,19 +543,47 @@ pub async fn evaluate(template: &mut Template) -> Result<(), StampError> {
                     );
 
                     for validation in &var.validations {
-                        if let Ok(eval_res) = evaluate_str(&validation.condition, &ctx)
-                            && let ValueData::Bool(false) = *eval_res.data
-                        {
-                            return Err(StampError::Validation(validation.error_message.clone()));
+                        let eval_res = if let Some(cond_expr) = &validation.condition_expr {
+                            evaluate_expression(cond_expr, &ctx).ok()
+                        } else {
+                            evaluate_str(&validation.condition, &ctx).ok()
+                        };
+                        match eval_res {
+                            Some(val) if matches!(*val.data, ValueData::Bool(false)) => {
+                                return Err(StampError::Validation(
+                                    validation.error_message.clone(),
+                                ));
+                            }
+                            None => {
+                                return Err(StampError::Validation(
+                                    validation.error_message.clone(),
+                                ));
+                            }
+                            _ => {}
                         }
                     }
                 }
             }
             crate::engine::dag::EvalNode::Local(name) => {
-                if let Some(expr_str) = template.locals.get(&name)
-                    && let Ok(evaluated) = evaluate_str(expr_str, &ctx)
-                {
-                    ctx.set_variable(&name, evaluated);
+                let evaluated = if let Some(expr) = template.local_expressions.get(&name) {
+                    evaluate_expression(expr, &ctx).ok()
+                } else if let Some(expr_str) = template.locals.get(&name) {
+                    evaluate_str(expr_str, &ctx).ok()
+                } else {
+                    None
+                };
+
+                if let Some(val) = evaluated {
+                    ctx.set_variable(&name, val.clone());
+                    locals_map.insert(name.clone(), val.clone());
+                    locals_types.insert(name.clone(), val.ty().clone());
+                    ctx.set_variable(
+                        "local",
+                        Value::new(
+                            Type::object(locals_types.clone()),
+                            ValueData::Object(locals_map.clone()),
+                        ),
+                    );
                 }
             }
             crate::engine::dag::EvalNode::DataSource(source_type, name) => {
@@ -500,6 +640,7 @@ pub async fn evaluate(template: &mut Template) -> Result<(), StampError> {
     }
 
     apply_builders(&ctx, template);
+    apply_provisioners(&ctx, template);
 
     Ok(())
 }
@@ -759,6 +900,7 @@ mod tests {
                 )]
                 .into_iter()
                 .collect(),
+                ..Default::default()
             });
         template.builders.push(crate::template::BuilderConfig {
             builder_type: "null".to_string(),
@@ -770,6 +912,7 @@ mod tests {
             .into_iter()
             .collect(),
             depends_on: vec![],
+            ..Default::default()
         });
 
         super::evaluate(&mut template).await?;
@@ -796,6 +939,7 @@ mod tests {
                 ]
                 .into_iter()
                 .collect(),
+                ..Default::default()
             });
         template.builders.push(crate::template::BuilderConfig {
             builder_type: "null".to_string(),
@@ -807,6 +951,7 @@ mod tests {
             .into_iter()
             .collect(),
             depends_on: vec![],
+            ..Default::default()
         });
 
         let res = super::evaluate(&mut template).await;
@@ -892,6 +1037,7 @@ mod tests {
             validations: vec![crate::template::VariableValidation {
                 condition: "length(var.name) > 3".to_string(),
                 error_message: "Name must be longer than 3 characters".to_string(),
+                ..Default::default()
             }],
             ..Default::default()
         };
@@ -1132,5 +1278,181 @@ mod tests {
 
         let res2 = super::evaluate_str(r#""hello world""#, &ctx);
         assert!(res2.is_ok());
+    }
+
+    #[test]
+    fn test_env_and_stdlib_functions() {
+        let mut ctx = Context::new();
+        super::register_stdlib(&mut ctx);
+        super::register_packer_funcs(&mut ctx);
+
+        // Test env() function
+        unsafe {
+            std::env::set_var("WINDOWS_PRODUCT_KEY", "VK7JG-NPHTM-C97JM-9MPGT-3V66T");
+            std::env::set_var("WIN11_MEDIA_RAW", "win11.iso");
+        }
+        let env_res = super::evaluate_str(r#"env("WINDOWS_PRODUCT_KEY")"#, &ctx).unwrap();
+        assert_eq!(
+            env_res.data.as_ref(),
+            &ValueData::String("VK7JG-NPHTM-C97JM-9MPGT-3V66T".to_string())
+        );
+
+        let media_res = super::evaluate_str(r#"env("WIN11_MEDIA_RAW")"#, &ctx).unwrap();
+        assert_eq!(
+            media_res.data.as_ref(),
+            &ValueData::String("win11.iso".to_string())
+        );
+        unsafe {
+            std::env::remove_var("WINDOWS_PRODUCT_KEY");
+            std::env::remove_var("WIN11_MEDIA_RAW");
+            std::env::remove_var("http_proxy");
+            std::env::remove_var("HTTP_PROXY");
+        }
+
+        // Test sha256() function
+        let sha_res = super::evaluate_str(r#"sha256("stamp-test")"#, &ctx).unwrap();
+        assert!(matches!(sha_res.data.as_ref(), ValueData::String(s) if !s.is_empty()));
+
+        // Test concat() and length()
+        let concat_res = super::evaluate_str(r#"length(concat(["a"], ["b", "c"]))"#, &ctx).unwrap();
+        assert_eq!(
+            concat_res.data.as_ref(),
+            &ValueData::Number(hashicorp_configuration_language_rs::number::Number::from(3))
+        );
+
+        // Test dirname() and basename()
+        let base_res =
+            super::evaluate_str(r#"basename("/path/to/SetupComplete.cmd")"#, &ctx).unwrap();
+        assert_eq!(
+            base_res.data.as_ref(),
+            &ValueData::String("SetupComplete.cmd".to_string())
+        );
+        let dir_res =
+            super::evaluate_str(r#"dirname("/path/to/SetupComplete.cmd")"#, &ctx).unwrap();
+        assert_eq!(
+            dir_res.data.as_ref(),
+            &ValueData::String("/path/to".to_string())
+        );
+    }
+
+    #[test]
+    fn test_templatefile_autounattend() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let answer_dir = temp_dir.path().join("win_answer_files").join("w11");
+        std::fs::create_dir_all(&answer_dir).unwrap();
+
+        let autounattend_path = answer_dir.join("Autounattend.xml");
+        std::fs::write(
+            &autounattend_path,
+            r#"<ProductKey>${windows_product_key}</ProductKey><ImageName>${image_name}</ImageName>"#,
+        )
+        .unwrap();
+
+        let mut ctx = Context::new();
+        super::register_stdlib(&mut ctx);
+        super::register_packer_funcs(&mut ctx);
+
+        let expr_str = format!(
+            r#"templatefile("{}", {{ "windows_product_key" = "W269N-WFGWX-YVC9B-4J6C9-T83GX", "image_name" = "Windows 11 Pro" }})"#,
+            autounattend_path.to_string_lossy()
+        );
+
+        let res = super::evaluate_str(&expr_str, &ctx).unwrap();
+        assert_eq!(
+            res.data.as_ref(),
+            &ValueData::String(
+                "<ProductKey>W269N-WFGWX-YVC9B-4J6C9-T83GX</ProductKey><ImageName>Windows 11 Pro</ImageName>".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn test_file_and_fileexists_helpers() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cmd_path = temp_dir.path().join("SetupComplete.cmd");
+        std::fs::write(&cmd_path, "@echo off\r\nnet user vagrant /active:yes\r\n").unwrap();
+
+        let mut ctx = Context::new();
+        super::register_stdlib(&mut ctx);
+        super::register_packer_funcs(&mut ctx);
+
+        let file_expr = format!(r#"file("{}")"#, cmd_path.to_string_lossy());
+        let content_res = super::evaluate_str(&file_expr, &ctx).unwrap();
+        assert_eq!(
+            content_res.data.as_ref(),
+            &ValueData::String("@echo off\r\nnet user vagrant /active:yes\r\n".to_string())
+        );
+
+        let exists_expr = format!(r#"fileexists("{}")"#, cmd_path.to_string_lossy());
+        let exists_res = super::evaluate_str(&exists_expr, &ctx).unwrap();
+        assert_eq!(exists_res.data.as_ref(), &ValueData::Bool(true));
+
+        let missing_path = temp_dir.path().join("Nonexistent.cmd");
+        let not_exists_expr = format!(r#"fileexists("{}")"#, missing_path.to_string_lossy());
+        let not_exists_res = super::evaluate_str(&not_exists_expr, &ctx).unwrap();
+        assert_eq!(not_exists_res.data.as_ref(), &ValueData::Bool(false));
+    }
+
+    #[tokio::test]
+    async fn test_scoped_resolution_and_expressions() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let template_hcl = r#"
+            variable "os_name" {
+                type = string
+                default = "ubuntu"
+            }
+
+            variable "os_ver" {
+                type = string
+                default = "22.04"
+            }
+
+            locals {
+                vm_name = "${var.os_name}-${var.os_ver}"
+                disk_size_mb = 40960
+            }
+
+            source "qemu" "vm" {
+                vm_name = local.vm_name
+                disk_size = local.disk_size_mb
+            }
+
+            build {
+                sources = ["source.qemu.vm"]
+
+                provisioner "shell" {
+                    inline = ["echo 'building ${local.vm_name}'"]
+                    environment_vars = [
+                        "TARGET=${local.vm_name}",
+                        "ROOT_DIR=${path.root}",
+                        "CWD=${path.cwd}"
+                    ]
+                }
+            }
+        "#;
+
+        let hcl_file = temp_dir.path().join("template.pkr.hcl");
+        std::fs::write(&hcl_file, template_hcl).unwrap();
+
+        let vars = HashMap::new();
+        let mut tmpl = Template::from_files_or_dirs(&[temp_dir.path()], &vars).unwrap();
+
+        super::evaluate(&mut tmpl).await.unwrap();
+
+        // Check builder evaluation with local.vm_name and local.disk_size_mb
+        assert_eq!(
+            tmpl.builders[0].config.get("vm_name"),
+            Some(&"ubuntu-22.04".to_string())
+        );
+        assert_eq!(
+            tmpl.builders[0].config.get("disk_size"),
+            Some(&"40960".to_string())
+        );
+
+        // Check build provisioners
+        assert_eq!(
+            tmpl.builds[0].provisioners[0].config.get("inline"),
+            Some(&"[\"echo 'building ubuntu-22.04'\"]".to_string())
+        );
     }
 }

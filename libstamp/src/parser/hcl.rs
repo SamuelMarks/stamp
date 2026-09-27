@@ -99,8 +99,10 @@ fn extract_build(
     let mut build_desc = None;
     let mut build_name = None;
     let mut build_sources = Vec::new();
+    let mut build_expressions = std::collections::HashMap::new();
 
     for (name, attr) in &block.body.attributes {
+        build_expressions.insert(name.clone(), attr.expr.clone());
         if name == "description" {
             if let Expression::String(s, _) = &attr.expr {
                 build_desc = Some(s.clone());
@@ -137,13 +139,16 @@ fn extract_build(
             };
 
             let mut config = std::collections::HashMap::new();
+            let mut expressions = std::collections::HashMap::new();
             for (k, attr) in &inner.body.attributes {
                 config.insert(k.clone(), expr_to_string(&attr.expr));
+                expressions.insert(k.clone(), attr.expr.clone());
             }
             builders.push(crate::template::BuilderConfig {
                 builder_type: b_type,
                 name: b_name,
                 config,
+                expressions,
                 depends_on: vec![],
             });
         } else if inner.block_type == "provisioner"
@@ -153,6 +158,7 @@ fn extract_build(
             if inner.labels.len() == 1 {
                 let type_name = inner.labels[0].clone();
                 let mut config = std::collections::HashMap::new();
+                let mut expressions = std::collections::HashMap::new();
                 let mut only = Vec::new();
                 let mut except = Vec::new();
                 let mut keep_input_artifact = false;
@@ -166,6 +172,7 @@ fn extract_build(
                         keep_input_artifact = expr_to_string(&attr.expr) == "true";
                     } else {
                         config.insert(attr_name.clone(), expr_to_string(&attr.expr));
+                        expressions.insert(attr_name.clone(), attr.expr.clone());
                     }
                 }
 
@@ -175,6 +182,8 @@ fn extract_build(
                             format!("{}.{}", nested.block_type, k),
                             expr_to_string(&attr.expr),
                         );
+                        expressions
+                            .insert(format!("{}.{}", nested.block_type, k), attr.expr.clone());
                     }
                 }
 
@@ -184,6 +193,7 @@ fn extract_build(
                         only,
                         except,
                         config,
+                        expressions,
                     };
                     current_build_provs.push(prov.clone());
                     provs.push(prov);
@@ -194,6 +204,7 @@ fn extract_build(
                         only,
                         except,
                         config,
+                        expressions,
                     };
                     current_build_posts.push(post.clone());
                     posts.push(post);
@@ -203,6 +214,7 @@ fn extract_build(
                         only,
                         except,
                         config,
+                        expressions,
                     };
                     current_build_err_provs.push(err_prov.clone());
                     err_provs.push(err_prov);
@@ -218,6 +230,7 @@ fn extract_build(
                 if nested.block_type == "post-processor" && nested.labels.len() == 1 {
                     let type_name = nested.labels[0].clone();
                     let mut config = std::collections::HashMap::new();
+                    let mut expressions = std::collections::HashMap::new();
                     let mut only = Vec::new();
                     let mut except = Vec::new();
                     let mut keep_input_artifact = false;
@@ -231,6 +244,7 @@ fn extract_build(
                             keep_input_artifact = expr_to_string(&attr.expr) == "true";
                         } else {
                             config.insert(attr_name.clone(), expr_to_string(&attr.expr));
+                            expressions.insert(attr_name.clone(), attr.expr.clone());
                         }
                     }
 
@@ -240,6 +254,8 @@ fn extract_build(
                                 format!("{}.{}", sub.block_type, k),
                                 expr_to_string(&attr.expr),
                             );
+                            expressions
+                                .insert(format!("{}.{}", sub.block_type, k), attr.expr.clone());
                         }
                     }
 
@@ -249,6 +265,7 @@ fn extract_build(
                         only,
                         except,
                         config,
+                        expressions,
                     };
                     current_build_posts.push(post.clone());
                     posts.push(post);
@@ -264,13 +281,15 @@ fn extract_build(
         provisioners: current_build_provs,
         error_cleanup_provisioners: current_build_err_provs,
         post_processors: current_build_posts,
+        expressions: build_expressions,
     });
 
     Ok(())
 }
 
 /// Converts an HCL expression into a string representation.
-fn expr_to_string(expr: &Expression) -> String {
+#[must_use]
+pub fn expr_to_string(expr: &Expression) -> String {
     match expr {
         Expression::String(s, _) => s.clone(),
         Expression::Variable(v, _) => v.clone(),
@@ -365,22 +384,18 @@ fn extract_test(block: &Block, tests: &mut Vec<crate::template::TestBlock>) {
     tests.push(crate::template::TestBlock { name, assertions });
 }
 
-/// Parses an HCL template string.
+/// Ingests a parsed HCL2 AST [`Body`](hashicorp_configuration_language_rs::ast::structure::Body) into Stamp's unified [`Template`] container,
+/// preserving AST expressions for dynamic runtime evaluation and enforcing duplicate checks.
+///
+/// # Arguments
+/// * `body` - The parsed or merged HCL2 AST body.
+///
 /// # Errors
-/// Returns `StampError` if parsing fails.
-pub fn parse_hcl<S: ::std::hash::BuildHasher>(
-    input: &str,
-    _vars: &std::collections::HashMap<String, String, S>,
+/// Returns `StampError::Parse` if duplicate definitions (sources, variables, locals, data sources)
+/// are detected or if block labels are invalid.
+pub fn parse_body_to_template(
+    body: &hashicorp_configuration_language_rs::ast::structure::Body,
 ) -> Result<Template, StampError> {
-    let mut parser = Parser::new(input);
-    let body = parser.parse_body();
-    if parser.errors().has_errors() {
-        return Err(crate::error::StampError::Parse(format!(
-            "{:?}",
-            parser.errors()
-        )));
-    }
-
     let mut builders = Vec::new();
     let mut provisioners = Vec::new();
     let mut error_cleanup_provisioners = Vec::new();
@@ -389,6 +404,7 @@ pub fn parse_hcl<S: ::std::hash::BuildHasher>(
     let mut variables = std::collections::HashMap::new();
     let mut post_processors = Vec::new();
     let mut locals = std::collections::HashMap::new();
+    let mut local_expressions = std::collections::HashMap::new();
     let mut tests = Vec::new();
     let mut data_sources = Vec::new();
     let mut builds = Vec::new();
@@ -401,9 +417,23 @@ pub fn parse_hcl<S: ::std::hash::BuildHasher>(
             extract_test(block, &mut tests);
         } else if block.block_type == "data" {
             if block.labels.len() >= 2 {
+                let stype = block.labels[0].clone();
+                let sname = block.labels[1].clone();
+                if data_sources
+                    .iter()
+                    .any(|d: &crate::template::DataSourceConfig| {
+                        d.source_type == stype && d.name == sname
+                    })
+                {
+                    return Err(crate::error::StampError::Parse(format!(
+                        "Data source '{stype}.{sname}' defined multiple times"
+                    )));
+                }
                 let mut config = std::collections::HashMap::new();
+                let mut expressions = std::collections::HashMap::new();
                 for (k, attr) in &block.body.attributes {
                     config.insert(k.clone(), expr_to_string(&attr.expr));
+                    expressions.insert(k.clone(), attr.expr.clone());
                 }
                 for inner_block in &block.body.blocks {
                     for (k, attr) in &inner_block.body.attributes {
@@ -411,12 +441,17 @@ pub fn parse_hcl<S: ::std::hash::BuildHasher>(
                             format!("{}.{}", inner_block.block_type, k),
                             expr_to_string(&attr.expr),
                         );
+                        expressions.insert(
+                            format!("{}.{}", inner_block.block_type, k),
+                            attr.expr.clone(),
+                        );
                     }
                 }
                 data_sources.push(crate::template::DataSourceConfig {
-                    source_type: block.labels[0].clone(),
-                    name: block.labels[1].clone(),
+                    source_type: stype,
+                    name: sname,
                     config,
+                    expressions,
                 });
             } else {
                 return Err(crate::error::StampError::Parse(
@@ -425,16 +460,26 @@ pub fn parse_hcl<S: ::std::hash::BuildHasher>(
             }
         } else if block.block_type == "source" {
             if block.labels.len() >= 2 {
-                let config = block
-                    .body
-                    .attributes
-                    .iter()
-                    .map(|(k, attr)| (k.clone(), expr_to_string(&attr.expr)))
-                    .collect();
+                let btype = block.labels[0].clone();
+                let bname = block.labels[1].clone();
+                if builders.iter().any(|b: &crate::template::BuilderConfig| {
+                    b.builder_type == btype && b.name == bname
+                }) {
+                    return Err(crate::error::StampError::Parse(format!(
+                        "Source '{btype}.{bname}' defined multiple times"
+                    )));
+                }
+                let mut config = std::collections::HashMap::new();
+                let mut expressions = std::collections::HashMap::new();
+                for (k, attr) in &block.body.attributes {
+                    config.insert(k.clone(), expr_to_string(&attr.expr));
+                    expressions.insert(k.clone(), attr.expr.clone());
+                }
                 builders.push(crate::template::BuilderConfig {
-                    builder_type: block.labels[0].clone(),
-                    name: block.labels[1].clone(),
+                    builder_type: btype,
+                    name: bname,
                     config,
+                    expressions,
                     depends_on: vec![],
                 });
             } else {
@@ -454,6 +499,11 @@ pub fn parse_hcl<S: ::std::hash::BuildHasher>(
             )?;
         } else if block.block_type == "variable" {
             if let Some(label) = block.labels.first() {
+                if variables.contains_key(label) {
+                    return Err(crate::error::StampError::Parse(format!(
+                        "Variable '{label}' defined multiple times"
+                    )));
+                }
                 let mut var = crate::template::VariableConfig::default();
                 for (k, attr) in &block.body.attributes {
                     let v = expr_to_string(&attr.expr);
@@ -475,24 +525,34 @@ pub fn parse_hcl<S: ::std::hash::BuildHasher>(
                     var.validations.push(crate::template::VariableValidation {
                         condition: expr_to_string(&v_block.condition),
                         error_message: expr_to_string(&v_block.error_message),
+                        condition_expr: Some(v_block.condition.clone()),
+                        error_message_expr: Some(v_block.error_message.clone()),
                     });
                 }
                 variables.insert(label.clone(), var);
             }
         } else if block.block_type == "locals" {
             for (k, attr) in &block.body.attributes {
+                if locals.contains_key(k) {
+                    return Err(crate::error::StampError::Parse(format!(
+                        "Local '{k}' defined multiple times"
+                    )));
+                }
                 locals.insert(k.clone(), expr_to_string(&attr.expr));
+                local_expressions.insert(k.clone(), attr.expr.clone());
             }
         }
     }
 
     Ok(Template {
         description,
+        root_path: None,
         builders,
         provisioners,
         error_cleanup_provisioners,
         post_processors,
         locals,
+        local_expressions,
         variables,
         data_sources,
         required_plugins,
@@ -500,6 +560,29 @@ pub fn parse_hcl<S: ::std::hash::BuildHasher>(
         tests,
         builds,
     })
+}
+
+/// Parses an HCL template string into a [`Template`].
+///
+/// # Arguments
+/// * `input` - HCL configuration string to parse.
+/// * `_vars` - Map of variable overrides provided for evaluation.
+///
+/// # Errors
+/// Returns `StampError::Parse` if parsing or duplicate validation fails.
+pub fn parse_hcl<S: ::std::hash::BuildHasher>(
+    input: &str,
+    _vars: &std::collections::HashMap<String, String, S>,
+) -> Result<Template, StampError> {
+    let mut parser = Parser::new(input);
+    let body = parser.parse_body();
+    if parser.errors().has_errors() {
+        return Err(crate::error::StampError::Parse(format!(
+            "{:?}",
+            parser.errors()
+        )));
+    }
+    parse_body_to_template(&body)
 }
 
 #[cfg(test)]

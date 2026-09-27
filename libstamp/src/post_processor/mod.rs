@@ -31,6 +31,16 @@ pub trait PostProcessor: Send + Sync {
     fn keep_input_artifact(&self) -> bool {
         true
     }
+
+    /// Target source filters for `only`.
+    fn only(&self) -> Option<&[String]> {
+        None
+    }
+
+    /// Target source filters for `except`.
+    fn except(&self) -> Option<&[String]> {
+        None
+    }
 }
 
 /// `alicloud_import` post-processor.
@@ -163,9 +173,9 @@ pub fn create_post_processor(
                 vsphere_template::VsphereTemplateConfig::default(),
             ),
         )),
-        "vagrant" => Ok(Box::new(vagrant::VagrantPostProcessor::new(
-            vagrant::VagrantConfig::default(),
-        ))),
+        "vagrant" | "utm-vagrant" => Ok(Box::new(
+            vagrant::VagrantPostProcessor::from_post_processor_config(config),
+        )),
         "vagrant-cloud" => Ok(Box::new(vagrant_cloud::VagrantCloudPostProcessor::new(
             vagrant_cloud::VagrantCloudConfig::default(),
         ))),

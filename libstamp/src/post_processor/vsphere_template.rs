@@ -135,7 +135,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_vsphere_template_process_success() -> Result<(), StampError> {
+    async fn test_vsphere_template_process_success() {
         let config = VsphereTemplateConfig {
             identifier: "templated".to_string(),
             vcenter_server: Some("vcenter.example.com".to_string()),
@@ -149,10 +149,33 @@ mod tests {
         let processor = VsphereTemplatePostProcessor::new(config);
         let artifact = Artifact::new("base_vm".to_string(), vec![]);
 
-        let result = processor.process(artifact).await?;
-        assert_eq!(result.id, "vsphere-template-golden-image");
+        let result = processor.process(artifact).await;
+        assert_eq!(
+            result.ok().as_ref().map(|a| a.id.as_str()),
+            Some("vsphere-template-golden-image")
+        );
         assert!(processor.keep_input_artifact());
-        Ok(())
+        assert!(processor.only().is_none());
+        assert!(processor.except().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_vsphere_template_process_no_template_name() {
+        let config = VsphereTemplateConfig {
+            identifier: "templated".to_string(),
+            template_name: None,
+            keep_input_artifact: false,
+            ..Default::default()
+        };
+        let processor = VsphereTemplatePostProcessor::new(config);
+        let artifact = Artifact::new("my_vm".to_string(), vec![]);
+
+        let result = processor.process(artifact).await;
+        assert_eq!(
+            result.ok().as_ref().map(|a| a.id.as_str()),
+            Some("vsphere-template-my_vm")
+        );
+        assert!(!processor.keep_input_artifact());
     }
 
     #[tokio::test]
@@ -181,6 +204,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_vsphere_template_process_bad_exit() {
+        let config = VsphereTemplateConfig {
+            identifier: "golden-image".to_string(),
+            ..Default::default()
+        };
+        let processor = VsphereTemplatePostProcessor::new(config);
+        let artifact = Artifact::new("test_bad_exit".to_string(), vec!["img.ova".to_string()]);
+        let res = processor.process(artifact).await;
+        assert_eq!(
+            res.ok().as_ref().map(|a| a.id.as_str()),
+            Some("vsphere-template-golden-image")
+        );
+    }
+
+    #[tokio::test]
     async fn test_vsphere_template_process_missing() {
         let config = VsphereTemplateConfig {
             identifier: "golden-image".to_string(),
@@ -188,7 +226,11 @@ mod tests {
         };
         let processor = VsphereTemplatePostProcessor::new(config);
         let artifact = Artifact::new("test_missing".to_string(), vec!["img.ova".to_string()]);
-        assert!(processor.process(artifact).await.is_ok());
+        let res = processor.process(artifact).await;
+        assert_eq!(
+            res.ok().as_ref().map(|a| a.id.as_str()),
+            Some("vsphere-template-golden-image")
+        );
     }
 
     #[test]
@@ -206,6 +248,8 @@ mod tests {
         let config2 = config1.clone();
         assert_eq!(config1, config2);
         assert_eq!(format!("{config1:?}"), format!("{config2:?}"));
+        let def = VsphereTemplateConfig::default();
+        assert_eq!(def.identifier, "");
         let st1 = VsphereTemplatePostProcessor::new(config1);
         let st2 = st1.clone();
         assert_eq!(format!("{st1:?}"), format!("{st2:?}"));

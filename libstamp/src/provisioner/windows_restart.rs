@@ -22,6 +22,10 @@ pub struct WindowsRestartConfig {
     pub post_reboot_delay: Option<Timeout>,
     /// Whether to check Windows registry keys for pending reboot status before triggering restart.
     pub check_registry: bool,
+    /// Optional list of builders this provisioner only applies to.
+    pub only: Option<Vec<String>>,
+    /// Optional list of builders this provisioner does not apply to.
+    pub except: Option<Vec<String>>,
 }
 
 impl Default for WindowsRestartConfig {
@@ -33,6 +37,8 @@ impl Default for WindowsRestartConfig {
             pause_before: None,
             post_reboot_delay: None,
             check_registry: true,
+            only: None,
+            except: None,
         }
     }
 }
@@ -49,6 +55,54 @@ impl WindowsRestartProvisioner {
     #[must_use]
     pub const fn new(config: WindowsRestartConfig) -> Self {
         Self { config }
+    }
+
+    /// Creates a new `WindowsRestartProvisioner` from a `ProvisionerConfig`.
+    #[must_use]
+    pub fn from_provisioner_config(config: &crate::template::ProvisionerConfig) -> Self {
+        use std::str::FromStr as _;
+
+        let restart_command = config.config.get("restart_command").cloned();
+        let restart_check_command = config.config.get("restart_check_command").cloned();
+        let restart_timeout = config
+            .config
+            .get("restart_timeout")
+            .and_then(|s| Timeout::from_str(s).ok())
+            .unwrap_or_else(|| Timeout::new(Duration::from_secs(300)));
+        let pause_before = config
+            .config
+            .get("pause_before")
+            .and_then(|s| Timeout::from_str(s).ok());
+        let post_reboot_delay = config
+            .config
+            .get("post_reboot_delay")
+            .and_then(|s| Timeout::from_str(s).ok());
+        let check_registry = config
+            .config
+            .get("check_registry")
+            .map_or(true, |v| v != "false");
+
+        let only = if config.only.is_empty() {
+            None
+        } else {
+            Some(config.only.clone())
+        };
+        let except = if config.except.is_empty() {
+            None
+        } else {
+            Some(config.except.clone())
+        };
+
+        Self::new(WindowsRestartConfig {
+            restart_command,
+            restart_check_command,
+            restart_timeout,
+            pause_before,
+            post_reboot_delay,
+            check_registry,
+            only,
+            except,
+        })
     }
 
     /// Checks Windows registry keys for pending reboot requirements.
@@ -123,6 +177,14 @@ impl WindowsRestartProvisioner {
 
 #[async_trait]
 impl Provisioner for WindowsRestartProvisioner {
+    fn only(&self) -> Option<&[String]> {
+        self.config.only.as_deref()
+    }
+
+    fn except(&self) -> Option<&[String]> {
+        self.config.except.as_deref()
+    }
+
     async fn provision(
         &self,
         comm: &dyn Communicator,
@@ -281,5 +343,38 @@ mod tests {
         ));
         p.provision(&mock_comm, ui).await?;
         Ok(())
+    }
+
+    #[test]
+    fn test_windows_restart_from_provisioner_config() {
+        let mut cfg = crate::template::ProvisionerConfig {
+            provisioner_type: "windows-restart".to_string(),
+            only: vec!["hyperv".to_string()],
+            except: vec![],
+            ..Default::default()
+        };
+        cfg.config.insert(
+            "restart_command".to_string(),
+            "shutdown /r /t 0".to_string(),
+        );
+        cfg.config
+            .insert("restart_check_command".to_string(), "echo ok".to_string());
+        cfg.config
+            .insert("restart_timeout".to_string(), "30m".to_string());
+        cfg.config
+            .insert("pause_before".to_string(), "10s".to_string());
+        cfg.config
+            .insert("post_reboot_delay".to_string(), "5s".to_string());
+        cfg.config
+            .insert("check_registry".to_string(), "false".to_string());
+
+        let prov = WindowsRestartProvisioner::from_provisioner_config(&cfg);
+        assert_eq!(
+            prov.config.restart_command.as_deref(),
+            Some("shutdown /r /t 0")
+        );
+        assert_eq!(prov.config.check_registry, false);
+        assert_eq!(prov.only(), Some(&["hyperv".to_string()][..]));
+        assert_eq!(prov.except(), None);
     }
 }

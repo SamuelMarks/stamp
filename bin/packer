@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Forwarding wrapper for Stamp as Packer drop-in replacement
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+if [ -f "${PROJECT_ROOT}/target/release/packer" ]; then
+    exec "${PROJECT_ROOT}/target/release/packer" "$@"
+elif [ -f "${PROJECT_ROOT}/target/debug/packer" ]; then
+    exec "${PROJECT_ROOT}/target/debug/packer" "$@"
+elif [ -f "${PROJECT_ROOT}/target/release/stamp" ]; then
+    exec "${PROJECT_ROOT}/target/release/stamp" "$@"
+elif [ -f "${PROJECT_ROOT}/target/debug/stamp" ]; then
+    exec "${PROJECT_ROOT}/target/debug/stamp" "$@"
+else
+    exec cargo run --quiet --manifest-path "${PROJECT_ROOT}/stamp/Cargo.toml" --bin packer -- "$@"
+fi

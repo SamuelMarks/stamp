@@ -58,6 +58,24 @@ impl PostProcessor for HcpPostProcessor {
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_derived_traits() {
+        let config = HcpPostProcessorConfig {
+            keep_input_artifact: true,
+        };
+        assert_eq!(config.clone(), config);
+        assert_eq!(format!("{config:?}"), format!("{config:?}"));
+        let json = serde_json::to_string(&config).unwrap_or_default();
+        let parsed: Result<HcpPostProcessorConfig, _> = serde_json::from_str(&json);
+        assert_eq!(parsed.ok(), Some(config.clone()));
+
+        let pp = HcpPostProcessor::new(config);
+        assert_eq!(format!("{pp:?}"), format!("{pp:?}"));
+        assert!(pp.keep_input_artifact());
+        assert!(pp.only().is_none());
+        assert!(pp.except().is_none());
+    }
+
     #[tokio::test]
     async fn test_hcp_post_processor_success() {
         let config = HcpPostProcessorConfig {
@@ -77,6 +95,9 @@ mod tests {
         let pp = HcpPostProcessor::new(config);
         let artifact = Artifact::new("test_missing".into(), vec![]);
         let res = pp.process(artifact).await;
-        assert!(matches!(res, Err(StampError::HcpApi(_))));
+        assert_eq!(
+            res.err().as_ref().map(ToString::to_string),
+            Some("HCP API error: Missing HCP credentials".to_string())
+        );
     }
 }

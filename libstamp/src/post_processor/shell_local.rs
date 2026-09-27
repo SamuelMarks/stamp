@@ -48,20 +48,25 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_shell_local_process_success() -> Result<(), StampError> {
+    async fn test_shell_local_process_success() {
         let config = ShellLocalConfig {
             identifier: "processed".to_string(),
         };
         let processor = ShellLocalPostProcessor::new(config);
         let artifact = Artifact::new("base".to_string(), vec![]);
 
-        let result = processor.process(artifact).await?;
-        assert_eq!(result.id, "base-processed");
-        Ok(())
+        let result = processor.process(artifact).await;
+        assert_eq!(
+            result.ok().as_ref().map(|a| a.id.as_str()),
+            Some("base-processed")
+        );
+        assert!(processor.keep_input_artifact());
+        assert!(processor.only().is_none());
+        assert!(processor.except().is_none());
     }
 
     #[tokio::test]
-    async fn test_shell_local_process_failure() -> Result<(), StampError> {
+    async fn test_shell_local_process_failure() {
         let config = ShellLocalConfig {
             identifier: String::new(),
         };
@@ -69,8 +74,10 @@ mod tests {
         let artifact = Artifact::new("base".to_string(), vec![]);
 
         let err = processor.process(artifact).await;
-        assert!(matches!(err, Err(StampError::Parse(_))));
-        Ok(())
+        assert_eq!(
+            err.err().as_ref().map(ToString::to_string),
+            Some("Parse error: Identifier is empty".to_string())
+        );
     }
 
     #[test]
@@ -81,6 +88,8 @@ mod tests {
         let config2 = config1.clone();
         assert_eq!(config1, config2);
         assert_eq!(format!("{config1:?}"), format!("{config2:?}"));
+        let def = ShellLocalConfig::default();
+        assert_eq!(def.identifier, "");
     }
 
     #[test]

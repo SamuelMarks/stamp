@@ -70,6 +70,26 @@ impl PostProcessorPipeline {
             let mut current_artifact = initial_artifact.clone();
 
             for (proc_idx, processor) in branch.processors.iter().enumerate() {
+                let target_name = &initial_artifact.id;
+                let matches_target = |pattern: &str, target_name: &str| -> bool {
+                    pattern == target_name
+                        || pattern.strip_prefix("source.") == Some(target_name)
+                        || target_name.strip_prefix("source.") == Some(pattern)
+                        || target_name.contains(pattern)
+                        || pattern.contains(target_name)
+                };
+
+                if let Some(only) = processor.only() {
+                    if !only.is_empty() && !only.iter().any(|o| matches_target(o, target_name)) {
+                        continue;
+                    }
+                }
+                if let Some(except) = processor.except() {
+                    if !except.is_empty() && except.iter().any(|e| matches_target(e, target_name)) {
+                        continue;
+                    }
+                }
+
                 let previous_files = current_artifact.files.clone();
                 let keep_input = processor.keep_input_artifact();
 

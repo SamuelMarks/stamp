@@ -65,6 +65,8 @@ pub mod nutanix;
 pub mod opennebula;
 pub mod openstack;
 pub mod oracle;
+/// `parallels-ipsw` builder.
+pub mod parallels_ipsw;
 pub mod parallels_iso;
 pub mod parallels_pvm;
 pub mod podman;
@@ -75,6 +77,8 @@ pub mod scaleway;
 pub mod tencentcloud;
 pub mod triton;
 pub mod upcloud;
+/// `utm-iso` builder.
+pub mod utm_iso;
 pub mod vagrant;
 pub mod virtualbox_iso;
 pub mod virtualbox_ovf;
@@ -183,10 +187,7 @@ fn create_raw_builder(config: &BuilderConfig) -> Result<Box<dyn Builder>, StampE
             },
         ))),
         "hyperv-iso" => Ok(Box::new(hyperv_iso::HypervIsoBuilder::new(
-            hyperv_iso::HypervIsoConfig {
-                name: config.name.clone(),
-                ..Default::default()
-            },
+            hyperv_iso::HypervIsoConfig::from_builder_config(config)?,
         ))),
         "hyperv-vmcx" => Ok(Box::new(hyperv_vmcx::HypervVmcxBuilder::new(
             hyperv_vmcx::HypervVmcxConfig {
@@ -209,10 +210,10 @@ fn create_raw_builder(config: &BuilderConfig) -> Result<Box<dyn Builder>, StampE
             },
         ))),
         "parallels-iso" => Ok(Box::new(parallels_iso::ParallelsIsoBuilder::new(
-            parallels_iso::ParallelsIsoConfig {
-                name: config.name.clone(),
-                test_cmd: None,
-            },
+            parallels_iso::ParallelsIsoConfig::from_builder_config(config)?,
+        ))),
+        "parallels-ipsw" => Ok(Box::new(parallels_ipsw::ParallelsIpswBuilder::new(
+            parallels_ipsw::ParallelsIpswConfig::from_builder_config(config)?,
         ))),
         "parallels-pvm" => Ok(Box::new(parallels_pvm::ParallelsPvmBuilder::new(
             parallels_pvm::ParallelsPvmConfig {
@@ -232,10 +233,9 @@ fn create_raw_builder(config: &BuilderConfig) -> Result<Box<dyn Builder>, StampE
                 ..Default::default()
             },
         ))),
-        "qemu" => Ok(Box::new(qemu::QemuBuilder::new(qemu::QemuConfig {
-            name: config.name.clone(),
-            ..Default::default()
-        }))),
+        "qemu" => Ok(Box::new(qemu::QemuBuilder::new(
+            qemu::QemuConfig::from_builder_config(config)?,
+        ))),
         "podman" => Ok(Box::new(podman::PodmanBuilder::new(podman::PodmanConfig {
             name: config.name.clone(),
             image: "alpine".to_string(),
@@ -248,23 +248,17 @@ fn create_raw_builder(config: &BuilderConfig) -> Result<Box<dyn Builder>, StampE
                 ..Default::default()
             },
         ))),
+        "utm-iso" => Ok(Box::new(utm_iso::UtmIsoBuilder::new(
+            utm_iso::UtmIsoConfig::from_builder_config(config)?,
+        ))),
         "virtualbox-iso" => Ok(Box::new(virtualbox_iso::VirtualboxIsoBuilder::new(
-            virtualbox_iso::VirtualboxIsoConfig {
-                name: config.name.clone(),
-                ..Default::default()
-            },
+            virtualbox_iso::VirtualboxIsoConfig::from_builder_config(config)?,
         ))),
         "virtualbox-ovf" => Ok(Box::new(virtualbox_ovf::VirtualboxOvfBuilder::new(
-            virtualbox_ovf::VirtualboxOvfConfig {
-                name: config.name.clone(),
-                ..Default::default()
-            },
+            virtualbox_ovf::VirtualboxOvfConfig::from_builder_config(config)?,
         ))),
         "vmware-iso" => Ok(Box::new(vmware_iso::VmwareIsoBuilder::new(
-            vmware_iso::VmwareIsoConfig {
-                name: config.name.clone(),
-                ..Default::default()
-            },
+            vmware_iso::VmwareIsoConfig::from_builder_config(config)?,
         ))),
         "vmware-vmx" => Ok(Box::new(vmware_vmx::VmwareVmxBuilder::new(
             vmware_vmx::VmwareVmxConfig {
@@ -463,12 +457,14 @@ mod tests {
             "openstack",
             "oracle-oci",
             "parallels-iso",
+            "parallels-ipsw",
             "parallels-pvm",
             "podman",
             "proxmox-clone",
             "proxmox-iso",
             "qemu",
             "triton",
+            "utm-iso",
             "vagrant",
             "virtualbox-iso",
             "virtualbox-ovf",
@@ -520,6 +516,7 @@ mod tests {
             name: "n".to_string(),
             depends_on: vec![],
             config: hm,
+            ..Default::default()
         };
         assert!(create_builder(&c).is_ok());
     }
@@ -551,6 +548,7 @@ mod tests {
             name: "dep_builder".to_string(),
             depends_on: vec!["base_builder".to_string()],
             config: std::collections::HashMap::new(),
+            ..Default::default()
         };
         let b = create_builder(&c)?;
         assert_eq!(b.name(), "dep_builder");

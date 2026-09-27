@@ -33,6 +33,29 @@ pub async fn init(template_path: &str, upgrade: bool) -> Result<(), StampError> 
     init_with_options(template_path, &opts).await
 }
 
+/// Returns whether a plugin type is natively supported as a built-in within Stamp.
+#[must_use]
+pub fn is_builtin_plugin(plugin_type: &str) -> bool {
+    matches!(
+        plugin_type,
+        "qemu"
+            | "virtualbox"
+            | "vmware"
+            | "parallels"
+            | "hyperv"
+            | "utm"
+            | "vagrant"
+            | "windows-update"
+            | "null"
+            | "file"
+            | "amazon"
+            | "azure"
+            | "googlecompute"
+            | "docker"
+            | "podman"
+    )
+}
+
 /// Initializes a template with fine-grained configuration options.
 ///
 /// # Errors
@@ -56,6 +79,14 @@ pub async fn init_with_options(
     for (name, plugin) in &template.required_plugins {
         let parsed_addr = PluginAddress::parse(&plugin.source)
             .or_else(|_| PluginAddress::parse(&format!("mock/{}", plugin.source)))?;
+
+        if is_builtin_plugin(parsed_addr.plugin_type()) {
+            println!(
+                "Plugin '{name}' ({}) is built into Stamp; skipping installation.",
+                plugin.source
+            );
+            continue;
+        }
 
         let id = crate::engine::plugins::PluginId::new(parsed_addr.plugin_type());
 

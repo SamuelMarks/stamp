@@ -2342,7 +2342,6 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 [[package]]
 name = "hashicorp-configuration-language-rs"
 version = "0.0.1"
-source = "git+https://github.com/SamuelMarks/hashicorp-configuration-language-rs.git?branch=master#e69db005130d736e95f02884650f84b3a04ce04e"
 dependencies = [
  "base64 0.23.1",
  "bcrypt",
@@ -2350,6 +2349,7 @@ dependencies = [
  "chrono",
  "csv",
  "derive_more 2.1.1",
+ "encoding_rs",
  "flate2",
  "hcl-macros",
  "ipnet",
@@ -2363,6 +2363,7 @@ dependencies = [
  "sha1 0.11.0",
  "sha2 0.11.0",
  "tar",
+ "unicode-segmentation",
  "uuid",
  "zip 2.4.2",
 ]
@@ -2370,7 +2371,6 @@ dependencies = [
 [[package]]
 name = "hcl-macros"
 version = "0.0.1"
-source = "git+https://github.com/SamuelMarks/hashicorp-configuration-language-rs.git?branch=master#e69db005130d736e95f02884650f84b3a04ce04e"
 dependencies = [
  "proc-macro2",
  "quote",

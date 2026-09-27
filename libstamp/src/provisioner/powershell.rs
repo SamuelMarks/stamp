@@ -33,6 +33,14 @@ pub struct PowershellConfig {
     pub max_retries: u32,
     /// Whether to clean up uploaded scripts upon completion or failure. Defaults to true.
     pub clean_up: bool,
+    /// Optional pause duration before executing commands.
+    pub pause_before: Option<Timeout>,
+    /// Optional pause duration after executing commands.
+    pub pause_after: Option<Timeout>,
+    /// Optional list of builders this provisioner only applies to.
+    pub only: Option<Vec<String>>,
+    /// Optional list of builders this provisioner does not apply to.
+    pub except: Option<Vec<String>>,
 }
 
 /// The `powershell` provisioner.
@@ -47,6 +55,98 @@ impl PowershellProvisioner {
     #[must_use]
     pub const fn new(config: PowershellConfig) -> Self {
         Self { config }
+    }
+
+    /// Creates a new `PowershellProvisioner` from a `ProvisionerConfig`.
+    #[must_use]
+    pub fn from_provisioner_config(config: &crate::template::ProvisionerConfig) -> Self {
+        use std::str::FromStr as _;
+
+        let inline = config.config.get("inline").map(|s| {
+            if let Ok(vec) = serde_json::from_str::<Vec<String>>(s) {
+                vec
+            } else {
+                vec![s.clone()]
+            }
+        });
+        let script = config
+            .config
+            .get("script")
+            .map(|s| FilePath::new(PathBuf::from(s)));
+        let scripts = config.config.get("scripts").map(|s| {
+            let list: Vec<String> = serde_json::from_str(s).unwrap_or_else(|_| vec![s.clone()]);
+            list.into_iter()
+                .map(|p| FilePath::new(PathBuf::from(p)))
+                .collect()
+        });
+        let environment_vars = config.config.get("environment_vars").map(|s| {
+            if let Ok(vec) = serde_json::from_str::<Vec<String>>(s) {
+                vec
+            } else {
+                vec![s.clone()]
+            }
+        });
+        let remote_path = config.config.get("remote_path").cloned();
+        let execute_command = config.config.get("execute_command").cloned();
+        let valid_exit_codes = config.config.get("valid_exit_codes").map(|s| {
+            if let Ok(vec) = serde_json::from_str::<Vec<i32>>(s) {
+                vec
+            } else if let Ok(c) = s.parse::<i32>() {
+                vec![c]
+            } else {
+                vec![0]
+            }
+        });
+        let elevated_user = config.config.get("elevated_user").cloned();
+        let elevated_password = config.config.get("elevated_password").cloned();
+        let timeout = config
+            .config
+            .get("timeout")
+            .and_then(|s| Timeout::from_str(s).ok());
+        let max_retries = config
+            .config
+            .get("max_retries")
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0);
+        let clean_up = config.config.get("clean_up").map_or(true, |v| v != "false");
+        let pause_before = config
+            .config
+            .get("pause_before")
+            .and_then(|s| Timeout::from_str(s).ok());
+        let pause_after = config
+            .config
+            .get("pause_after")
+            .and_then(|s| Timeout::from_str(s).ok());
+
+        let only = if config.only.is_empty() {
+            None
+        } else {
+            Some(config.only.clone())
+        };
+        let except = if config.except.is_empty() {
+            None
+        } else {
+            Some(config.except.clone())
+        };
+
+        Self::new(PowershellConfig {
+            inline,
+            script,
+            scripts,
+            environment_vars,
+            remote_path,
+            execute_command,
+            valid_exit_codes,
+            elevated_user,
+            elevated_password,
+            timeout,
+            max_retries,
+            clean_up,
+            pause_before,
+            pause_after,
+            only,
+            except,
+        })
     }
 
     /// Wraps a command for elevated execution via Windows Scheduled Tasks if credentials are configured.
@@ -199,12 +299,24 @@ impl PowershellProvisioner {
 #[async_trait::async_trait]
 #[cfg_attr(coverage_nightly, coverage(off))]
 impl Provisioner for PowershellProvisioner {
+    fn only(&self) -> Option<&[String]> {
+        self.config.only.as_deref()
+    }
+
+    fn except(&self) -> Option<&[String]> {
+        self.config.except.as_deref()
+    }
+
     async fn provision(
         &self,
         comm: &dyn Communicator,
         ui: std::sync::Arc<crate::engine::ui::Ui>,
     ) -> Result<(), StampError> {
         #![cfg_attr(coverage_nightly, coverage(off))]
+        if let Some(pause) = &self.config.pause_before {
+            tokio::time::sleep(pause.0).await;
+        }
+
         let mut has_executed = false;
         let valid_codes = self
             .config
@@ -293,6 +405,10 @@ impl Provisioner for PowershellProvisioner {
             return Err(StampError::Provisioner(
                 "No commands or scripts provided".to_string(),
             ));
+        }
+
+        if let Some(pause) = &self.config.pause_after {
+            tokio::time::sleep(pause.0).await;
         }
 
         Ok(())
@@ -505,6 +621,64 @@ mod tests {
             .await;
         assert!(result.is_err());
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_powershell_pauses_and_filters() -> Result<(), StampError> {
+        let config = PowershellConfig {
+            inline: Some(vec!["Write-Output hi".to_string()]),
+            pause_before: Some(crate::types::Timeout::new(
+                std::time::Duration::from_millis(5),
+            )),
+            pause_after: Some(crate::types::Timeout::new(
+                std::time::Duration::from_millis(5),
+            )),
+            only: Some(vec!["virtualbox-iso.vm".to_string()]),
+            except: Some(vec!["qemu".to_string()]),
+            ..Default::default()
+        };
+        let prov = PowershellProvisioner::new(config);
+        assert_eq!(prov.only(), Some(&["virtualbox-iso.vm".to_string()][..]));
+        assert_eq!(prov.except(), Some(&["qemu".to_string()][..]));
+
+        let comm = MockCommunicator::new();
+        let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+        assert!(prov.provision(&comm, ui).await.is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn test_powershell_from_provisioner_config() {
+        let mut cfg = crate::template::ProvisionerConfig {
+            provisioner_type: "powershell".to_string(),
+            only: vec!["winrm".to_string()],
+            except: vec![],
+            ..Default::default()
+        };
+        cfg.config
+            .insert("inline".to_string(), "[\"Write-Host 1\"]".to_string());
+        cfg.config
+            .insert("scripts".to_string(), "[\"provision.ps1\"]".to_string());
+        cfg.config
+            .insert("elevated_user".to_string(), "Administrator".to_string());
+        cfg.config
+            .insert("elevated_password".to_string(), "Secret123!".to_string());
+        cfg.config
+            .insert("valid_exit_codes".to_string(), "[0, 1]".to_string());
+        cfg.config
+            .insert("pause_before".to_string(), "2s".to_string());
+        cfg.config
+            .insert("pause_after".to_string(), "1s".to_string());
+
+        let prov = PowershellProvisioner::from_provisioner_config(&cfg);
+        assert_eq!(prov.config.elevated_user.as_deref(), Some("Administrator"));
+        assert_eq!(prov.config.valid_exit_codes, Some(vec![0, 1]));
+        assert!(prov.config.pause_before.is_some());
+        assert!(prov.config.pause_after.is_some());
     }
 
     #[test]

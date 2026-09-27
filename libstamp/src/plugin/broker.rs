@@ -144,6 +144,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_plugin_broker_tcp_lifecycle() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let ui = Arc::new(Ui::new(
             FeatureState::Disabled,
             FeatureState::Disabled,

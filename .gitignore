@@ -71,3 +71,9 @@ rustc-ice-*.txt
 coverage.json
 UNDERCOVERED.md
 mock-plugins/
+libstamp/custom-output-dir
+libstamp/custom-vbox-out
+libstamp/output-hyperv-*
+libstamp/output-utm*
+libstamp/output-virtualbox-*
+libstamp/packer_cache

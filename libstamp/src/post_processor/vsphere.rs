@@ -154,7 +154,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_vsphere_process_success() -> Result<(), StampError> {
+    async fn test_vsphere_process_success() {
         let config = VsphereConfig {
             identifier: "imported".to_string(),
             vcenter_server: Some("vcenter.example.com".to_string()),
@@ -162,18 +162,44 @@ mod tests {
             password: Some("secret".to_string()),
             insecure_connection: true,
             datacenter: Some("DC1".to_string()),
+            cluster: Some("Cluster1".to_string()),
+            resource_pool: Some("Pool1".to_string()),
             datastore: Some("datastore1".to_string()),
+            folder: Some("Templates".to_string()),
             vm_name: Some("test-vm".to_string()),
+            host: Some("esxi1.example.com".to_string()),
             keep_input_artifact: true,
-            ..Default::default()
         };
         let processor = VspherePostProcessor::new(config);
         let artifact = Artifact::new("base".to_string(), vec!["vm.ova".to_string()]);
 
-        let result = processor.process(artifact).await?;
-        assert_eq!(result.id, "vsphere-vm-test-vm");
+        let result = processor.process(artifact).await;
+        assert_eq!(
+            result.ok().as_ref().map(|a| a.id.as_str()),
+            Some("vsphere-vm-test-vm")
+        );
         assert!(processor.keep_input_artifact());
-        Ok(())
+        assert!(processor.only().is_none());
+        assert!(processor.except().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_vsphere_process_no_files_no_vm_name() {
+        let config = VsphereConfig {
+            identifier: "imported".to_string(),
+            vm_name: None,
+            keep_input_artifact: false,
+            ..Default::default()
+        };
+        let processor = VspherePostProcessor::new(config);
+        let artifact = Artifact::new("base_vm".to_string(), vec![]);
+
+        let result = processor.process(artifact).await;
+        assert_eq!(
+            result.ok().as_ref().map(|a| a.id.as_str()),
+            Some("vsphere-vm-base_vm")
+        );
+        assert!(!processor.keep_input_artifact());
     }
 
     #[tokio::test]
@@ -199,6 +225,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_vsphere_process_bad_exit() {
+        let config = VsphereConfig {
+            identifier: "proc".to_string(),
+            ..Default::default()
+        };
+        let processor = VspherePostProcessor::new(config);
+        let artifact = Artifact::new("test_bad_exit".to_string(), vec!["file.ova".to_string()]);
+        let res = processor.process(artifact).await;
+        assert_eq!(
+            res.ok().as_ref().map(|a| a.id.as_str()),
+            Some("vsphere-vm-proc")
+        );
+    }
+
+    #[tokio::test]
     async fn test_vsphere_process_missing() {
         let config = VsphereConfig {
             identifier: "proc".to_string(),
@@ -206,7 +247,11 @@ mod tests {
         };
         let processor = VspherePostProcessor::new(config);
         let artifact = Artifact::new("test_missing".to_string(), vec!["file.ova".to_string()]);
-        assert!(processor.process(artifact).await.is_ok());
+        let res = processor.process(artifact).await;
+        assert_eq!(
+            res.ok().as_ref().map(|a| a.id.as_str()),
+            Some("vsphere-vm-proc")
+        );
     }
 
     #[test]
@@ -229,6 +274,8 @@ mod tests {
         let config2 = config1.clone();
         assert_eq!(config1, config2);
         assert_eq!(format!("{config1:?}"), format!("{config2:?}"));
+        let def = VsphereConfig::default();
+        assert_eq!(def.identifier, "");
         let st1 = VspherePostProcessor::new(config1);
         let st2 = st1.clone();
         assert_eq!(format!("{st1:?}"), format!("{st2:?}"));

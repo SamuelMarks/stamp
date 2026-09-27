@@ -69,6 +69,14 @@ sources = [
         let input = "invalid hcl {{{";
         let formatted = format_hcl_canonical(input);
         assert!(formatted.contains("invalid hcl"));
+        assert!(formatted.ends_with('\n'));
+
+        let input_with_newline = "invalid hcl {{{\n";
+        let formatted_newline = format_hcl_canonical(input_with_newline);
+        assert_eq!(formatted_newline, "invalid hcl {{{\n");
+
+        let empty = format_hcl_canonical("");
+        assert!(empty.is_empty());
     }
 
     #[test]

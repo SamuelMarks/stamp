@@ -81,10 +81,15 @@ mod tests {
         assert_eq!(format!("{config:?}"), format!("{config:?}"));
         let ds = VaultSecretDataSource::new(config);
         assert_eq!(format!("{ds:?}"), format!("{:?}", ds.clone()));
+        let def = VaultSecretConfig::default();
+        assert_eq!(def.path, "");
+        assert!(def.key.is_none());
+        assert!(def.address.is_none());
+        assert!(def.token.is_none());
     }
 
     #[tokio::test]
-    async fn test_vault_secret_success_with_key() -> Result<(), StampError> {
+    async fn test_vault_secret_success_with_key() {
         let ds = VaultSecretDataSource::new(VaultSecretConfig {
             path: "secret/data/database".to_string(),
             key: Some("password".to_string()),
@@ -92,32 +97,51 @@ mod tests {
             ..Default::default()
         });
 
-        let val = ds.read().await?;
-        assert_eq!(val["password"], "mock-val-for-password");
-        Ok(())
+        let res = ds.read().await;
+        assert_eq!(
+            res.ok()
+                .as_ref()
+                .and_then(|v| v.get("password"))
+                .and_then(Value::as_str),
+            Some("mock-val-for-password")
+        );
     }
 
     #[tokio::test]
-    async fn test_vault_secret_success_whole_object() -> Result<(), StampError> {
+    async fn test_vault_secret_success_whole_object() {
         let ds = VaultSecretDataSource::new(VaultSecretConfig {
             path: "secret/data/app".to_string(),
             ..Default::default()
         });
 
-        let val = ds.read().await?;
-        assert_eq!(val["data"]["username"], "vault_user");
-        Ok(())
+        let res = ds.read().await;
+        assert_eq!(
+            res.ok()
+                .as_ref()
+                .and_then(|v| v.get("data"))
+                .and_then(|d| d.get("username"))
+                .and_then(Value::as_str),
+            Some("vault_user")
+        );
     }
 
     #[tokio::test]
     async fn test_vault_secret_errors() {
         let ds_empty = VaultSecretDataSource::new(VaultSecretConfig::default());
-        assert!(ds_empty.read().await.is_err());
+        let res_empty = ds_empty.read().await;
+        assert_eq!(
+            res_empty.err().as_ref().map(ToString::to_string),
+            Some("Parse error: vault-secret requires 'path'".to_string())
+        );
 
         let ds_err = VaultSecretDataSource::new(VaultSecretConfig {
             path: "error_path".to_string(),
             ..Default::default()
         });
-        assert!(ds_err.read().await.is_err());
+        let res_err = ds_err.read().await;
+        assert_eq!(
+            res_err.err().as_ref().map(ToString::to_string),
+            Some("Execution error: Vault query failed".to_string())
+        );
     }
 }

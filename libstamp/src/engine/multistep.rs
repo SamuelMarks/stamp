@@ -216,6 +216,34 @@ impl StateBag {
     pub fn set_source_ami_name(&mut self, name: String) {
         self.put("source_ami_name", name);
     }
+
+    /// Gets the HTTP server IP if set in the state bag.
+    #[must_use]
+    pub fn http_ip(&self) -> Option<&str> {
+        self.get::<String>("http_ip").map(String::as_str)
+    }
+
+    /// Sets the HTTP server IP in the state bag.
+    pub fn set_http_ip(&mut self, ip: String) {
+        self.put("http_ip", ip);
+    }
+
+    /// Gets the HTTP server port if set in the state bag.
+    #[must_use]
+    pub fn http_port(&self) -> Option<u16> {
+        self.get::<u16>("http_port").copied()
+    }
+
+    /// Sets the HTTP server port in the state bag.
+    pub fn set_http_port(&mut self, port: u16) {
+        self.put("http_port", port);
+    }
+
+    /// Removes and returns a value from the state bag if present and of type `T`.
+    pub fn take<T: Any + Send + Sync>(&mut self, key: &str) -> Option<T> {
+        let boxed = self.state.remove(key)?;
+        boxed.downcast::<T>().ok().map(|b| *b)
+    }
 }
 
 /// A thread-safe wrapper around [`StateBag`] enabling concurrent reads and mutations across tasks.
@@ -258,6 +286,33 @@ impl SharedStateBag {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         f(&mut guard)
+    }
+
+    /// Removes and returns a value from the shared state bag if present and of type `T`.
+    pub fn take<T: Any + Send + Sync>(&self, key: &str) -> Option<T> {
+        self.write(|b| b.take::<T>(key))
+    }
+
+    /// Gets the HTTP server IP from the shared state bag.
+    #[must_use]
+    pub fn http_ip(&self) -> Option<String> {
+        self.read(|b| b.http_ip().map(ToString::to_string))
+    }
+
+    /// Sets the HTTP server IP in the shared state bag.
+    pub fn set_http_ip(&self, ip: String) {
+        self.write(|b| b.set_http_ip(ip));
+    }
+
+    /// Gets the HTTP server port from the shared state bag.
+    #[must_use]
+    pub fn http_port(&self) -> Option<u16> {
+        self.read(|b| b.http_port())
+    }
+
+    /// Sets the HTTP server port in the shared state bag.
+    pub fn set_http_port(&self, port: u16) {
+        self.write(|b| b.set_http_port(port));
     }
 }
 

@@ -29,6 +29,8 @@ pub struct ShellConfig {
     pub valid_exit_codes: Option<Vec<i32>>,
     /// Optional pause duration before executing commands.
     pub pause_before: Option<Timeout>,
+    /// Optional pause duration after executing commands.
+    pub pause_after: Option<Timeout>,
     /// Optional execution timeout for each command or script.
     pub timeout: Option<Timeout>,
     /// Maximum number of retry attempts for failed commands or scripts. Defaults to 0.
@@ -37,6 +39,12 @@ pub struct ShellConfig {
     pub binary: bool,
     /// Whether to use shebang line execution or default shell interpreter. Defaults to true.
     pub use_shebang: bool,
+    /// Whether to expect a connection disconnect during execution (e.g. system reboot or network restart).
+    pub expect_disconnect: bool,
+    /// Optional list of builders this provisioner only applies to.
+    pub only: Option<Vec<String>>,
+    /// Optional list of builders this provisioner does not apply to.
+    pub except: Option<Vec<String>>,
 }
 
 impl Default for ShellConfig {
@@ -52,10 +60,14 @@ impl Default for ShellConfig {
             clean_up: true,
             valid_exit_codes: None,
             pause_before: None,
+            pause_after: None,
             timeout: None,
             max_retries: 0,
             binary: false,
             use_shebang: true,
+            expect_disconnect: false,
+            only: None,
+            except: None,
         }
     }
 }
@@ -72,6 +84,108 @@ impl ShellProvisioner {
     #[must_use]
     pub const fn new(config: ShellConfig) -> Self {
         Self { config }
+    }
+
+    /// Creates a new `ShellProvisioner` from a `ProvisionerConfig`.
+    #[must_use]
+    pub fn from_provisioner_config(config: &crate::template::ProvisionerConfig) -> Self {
+        use std::str::FromStr as _;
+
+        let inline = config.config.get("inline").map(|s| {
+            if let Ok(vec) = serde_json::from_str::<Vec<String>>(s) {
+                vec
+            } else {
+                vec![s.clone()]
+            }
+        });
+        let script = config
+            .config
+            .get("script")
+            .map(|s| FilePath::new(PathBuf::from(s)));
+        let scripts = config.config.get("scripts").map(|s| {
+            let list: Vec<String> = serde_json::from_str(s).unwrap_or_else(|_| vec![s.clone()]);
+            list.into_iter()
+                .map(|p| FilePath::new(PathBuf::from(p)))
+                .collect()
+        });
+        let environment_vars = config.config.get("environment_vars").map(|s| {
+            if let Ok(vec) = serde_json::from_str::<Vec<String>>(s) {
+                vec
+            } else {
+                vec![s.clone()]
+            }
+        });
+        let remote_path = config.config.get("remote_path").cloned();
+        let remote_folder = config.config.get("remote_folder").cloned();
+        let execute_command = config.config.get("execute_command").cloned();
+        let clean_up = config.config.get("clean_up").map_or(true, |v| v != "false");
+        let valid_exit_codes = config.config.get("valid_exit_codes").map(|s| {
+            if let Ok(vec) = serde_json::from_str::<Vec<i32>>(s) {
+                vec
+            } else if let Ok(c) = s.parse::<i32>() {
+                vec![c]
+            } else {
+                vec![0]
+            }
+        });
+        let pause_before = config
+            .config
+            .get("pause_before")
+            .and_then(|s| Timeout::from_str(s).ok());
+        let pause_after = config
+            .config
+            .get("pause_after")
+            .and_then(|s| Timeout::from_str(s).ok());
+        let timeout = config
+            .config
+            .get("timeout")
+            .and_then(|s| Timeout::from_str(s).ok());
+        let max_retries = config
+            .config
+            .get("max_retries")
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0);
+        let binary = config.config.get("binary").is_some_and(|v| v == "true");
+        let use_shebang = config
+            .config
+            .get("use_shebang")
+            .map_or(true, |v| v != "false");
+        let expect_disconnect = config
+            .config
+            .get("expect_disconnect")
+            .is_some_and(|v| v == "true");
+
+        let only = if config.only.is_empty() {
+            None
+        } else {
+            Some(config.only.clone())
+        };
+        let except = if config.except.is_empty() {
+            None
+        } else {
+            Some(config.except.clone())
+        };
+
+        Self::new(ShellConfig {
+            inline,
+            script,
+            scripts,
+            environment_vars,
+            remote_path,
+            remote_folder,
+            execute_command,
+            clean_up,
+            valid_exit_codes,
+            pause_before,
+            pause_after,
+            timeout,
+            max_retries,
+            binary,
+            use_shebang,
+            expect_disconnect,
+            only,
+            except,
+        })
     }
 
     /// Formats environment variables with POSIX shell escaping.
@@ -134,6 +248,25 @@ impl ShellProvisioner {
         max_retries: u32,
         ui: &crate::engine::ui::Ui,
     ) -> Result<(), StampError> {
+        Self::execute_command_advanced(comm, cmd, valid_codes, timeout, max_retries, false, ui)
+            .await
+    }
+
+    /// Executes a command with timeout, retry, and disconnect handling.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StampError::CommunicatorTimeout`] if execution times out, or [`StampError::Provisioner`]
+    /// if the command fails with an invalid exit code.
+    pub async fn execute_command_advanced(
+        comm: &dyn Communicator,
+        cmd: &str,
+        valid_codes: &[i32],
+        timeout: Option<Timeout>,
+        max_retries: u32,
+        expect_disconnect: bool,
+        ui: &crate::engine::ui::Ui,
+    ) -> Result<(), StampError> {
         let mut attempts = 0;
         loop {
             let command = Command::new(cmd.to_string());
@@ -165,7 +298,7 @@ impl ShellProvisioner {
             match res {
                 Ok(exec_result) => {
                     Self::stream_output(ui, &exec_result.stdout, &exec_result.stderr);
-                    if valid_codes.contains(&exec_result.exit_code) {
+                    if valid_codes.contains(&exec_result.exit_code) || expect_disconnect {
                         return Ok(());
                     }
                     if attempts < max_retries {
@@ -185,6 +318,14 @@ impl ShellProvisioner {
                     )));
                 }
                 Err(err) => {
+                    if expect_disconnect {
+                        ui.say(
+                            "shell",
+                            "Connection severed as expected (expect_disconnect = true)",
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        return Ok(());
+                    }
                     if attempts < max_retries {
                         attempts += 1;
                         ui.say(
@@ -218,6 +359,14 @@ impl ShellProvisioner {
 
 #[async_trait::async_trait]
 impl Provisioner for ShellProvisioner {
+    fn only(&self) -> Option<&[String]> {
+        self.config.only.as_deref()
+    }
+
+    fn except(&self) -> Option<&[String]> {
+        self.config.except.as_deref()
+    }
+
     async fn provision(
         &self,
         comm: &dyn Communicator,
@@ -251,12 +400,13 @@ impl Provisioner for ShellProvisioner {
                     format!("{env_vars} {cmd}")
                 };
 
-                Self::execute_command_with_retries(
+                Self::execute_command_advanced(
                     comm,
                     &full_cmd,
                     valid_codes,
                     self.config.timeout,
                     self.config.max_retries,
+                    self.config.expect_disconnect,
                     &ui,
                 )
                 .await?;
@@ -286,12 +436,13 @@ impl Provisioner for ShellProvisioner {
             comm.upload(script, &remote_path).await?;
 
             let exec_cmd = self.build_command(&remote_path_str);
-            let res = Self::execute_command_with_retries(
+            let res = Self::execute_command_advanced(
                 comm,
                 &exec_cmd,
                 valid_codes,
                 self.config.timeout,
                 self.config.max_retries,
+                self.config.expect_disconnect,
                 &ui,
             )
             .await;
@@ -309,6 +460,10 @@ impl Provisioner for ShellProvisioner {
             return Err(StampError::Provisioner(
                 "No commands or scripts provided".to_string(),
             ));
+        }
+
+        if let Some(pause) = &self.config.pause_after {
+            tokio::time::sleep(pause.0).await;
         }
 
         Ok(())
@@ -560,6 +715,63 @@ mod tests {
         )
         .await?;
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_shell_expect_disconnect_and_pause_after() -> Result<(), StampError> {
+        let config = ShellConfig {
+            inline: Some(vec!["fail_provision".to_string()]),
+            expect_disconnect: true,
+            pause_after: Some(Timeout::new(std::time::Duration::from_millis(5))),
+            only: Some(vec!["qemu.vm".to_string()]),
+            except: Some(vec!["docker".to_string()]),
+            ..Default::default()
+        };
+        let prov = ShellProvisioner::new(config);
+        assert_eq!(prov.only(), Some(&["qemu.vm".to_string()][..]));
+        assert_eq!(prov.except(), Some(&["docker".to_string()][..]));
+
+        let comm = MockCommunicator::new();
+        let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+        assert!(prov.provision(&comm, ui).await.is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn test_shell_from_provisioner_config() {
+        let mut cfg = crate::template::ProvisionerConfig {
+            provisioner_type: "shell".to_string(),
+            only: vec!["qemu".to_string()],
+            except: vec!["vmware".to_string()],
+            ..Default::default()
+        };
+        cfg.config
+            .insert("inline".to_string(), "echo 1".to_string());
+        cfg.config
+            .insert("scripts".to_string(), "[\"s1.sh\"]".to_string());
+        cfg.config
+            .insert("environment_vars".to_string(), "[\"FOO=bar\"]".to_string());
+        cfg.config
+            .insert("valid_exit_codes".to_string(), "[0, 143]".to_string());
+        cfg.config
+            .insert("pause_before".to_string(), "1s".to_string());
+        cfg.config
+            .insert("pause_after".to_string(), "500ms".to_string());
+        cfg.config.insert("timeout".to_string(), "2m".to_string());
+        cfg.config
+            .insert("expect_disconnect".to_string(), "true".to_string());
+        cfg.config.insert("binary".to_string(), "true".to_string());
+
+        let prov = ShellProvisioner::from_provisioner_config(&cfg);
+        assert_eq!(prov.config.expect_disconnect, true);
+        assert_eq!(prov.config.binary, true);
+        assert_eq!(prov.config.valid_exit_codes, Some(vec![0, 143]));
+        assert!(prov.config.pause_before.is_some());
+        assert!(prov.config.pause_after.is_some());
     }
 
     #[test]

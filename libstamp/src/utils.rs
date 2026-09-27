@@ -14,6 +14,29 @@ pub fn docker_executable() -> String {
 /// Mutex for synchronizing tests that mutate environment variables.
 pub static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Helper to parse variable file content (supporting both JSON and HCL formats).
+fn parse_var_content(content: &str, vars: &mut HashMap<String, String>) {
+    if let Ok(parsed) = serde_json::from_str::<HashMap<String, serde_json::Value>>(content) {
+        for (k, v) in parsed {
+            vars.insert(
+                k,
+                match v {
+                    serde_json::Value::String(s) => s,
+                    other => other.to_string(),
+                },
+            );
+        }
+    } else {
+        let mut parser = hashicorp_configuration_language_rs::parse::parser::Parser::new(content);
+        let body = parser.parse_body();
+        if !parser.errors().has_errors() {
+            for (k, attr) in body.attributes {
+                vars.insert(k, crate::parser::hcl::expr_to_string(&attr.expr));
+            }
+        }
+    }
+}
+
 /// Loads and merges variables according to `HashiCorp` Packer's strict precedence rules:
 /// 1. Auto-loaded `.pkrvars.hcl` / `.pkrvars.json` in directory (alphabetical)
 /// 2. Auto-loaded `.auto.pkrvars.hcl` / `.auto.pkrvars.json` (alphabetical)
@@ -45,19 +68,8 @@ pub fn load_variables_with_precedence(
         }
         auto_files.sort();
         for path in auto_files {
-            if let Ok(content) = std::fs::read_to_string(&path)
-                && let Ok(parsed) =
-                    serde_json::from_str::<HashMap<String, serde_json::Value>>(&content)
-            {
-                for (k, v) in parsed {
-                    vars.insert(
-                        k,
-                        match v {
-                            serde_json::Value::String(s) => s,
-                            other => other.to_string(),
-                        },
-                    );
-                }
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                parse_var_content(&content, &mut vars);
             }
         }
     }
@@ -72,19 +84,8 @@ pub fn load_variables_with_precedence(
     // 4. CLI -var-file files in the order passed
     if let Some(files) = var_files {
         for f in files {
-            if let Ok(content) = std::fs::read_to_string(f)
-                && let Ok(parsed) =
-                    serde_json::from_str::<HashMap<String, serde_json::Value>>(&content)
-            {
-                for (k, v) in parsed {
-                    vars.insert(
-                        k,
-                        match v {
-                            serde_json::Value::String(s) => s,
-                            other => other.to_string(),
-                        },
-                    );
-                }
+            if let Ok(content) = std::fs::read_to_string(f) {
+                parse_var_content(&content, &mut vars);
             }
         }
     }

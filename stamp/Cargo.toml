@@ -21,3 +21,15 @@ tokio = { version = "1.53", default-features = false, features = ["macros", "rt-
 serde = { version = "1.0", default-features = false }
 serde_json = { version = "1.0", default-features = false, features = ["std"] }
 derive_more = { version = "1.0", default-features = false }
+
+[[bin]]
+name = "stamp"
+path = "src/main.rs"
+
+[[bin]]
+name = "packer"
+path = "src/bin/packer.rs"
+
+[[bin]]
+name = "grounding"
+path = "src/bin/grounding.rs"

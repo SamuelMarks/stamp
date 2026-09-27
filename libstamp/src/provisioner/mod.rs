@@ -14,6 +14,16 @@ pub trait Provisioner: Send + Sync {
         comm: &dyn Communicator,
         ui: std::sync::Arc<crate::engine::ui::Ui>,
     ) -> Result<(), StampError>;
+
+    /// Target source filters for `only`.
+    fn only(&self) -> Option<&[String]> {
+        None
+    }
+
+    /// Target source filters for `except`.
+    fn except(&self) -> Option<&[String]> {
+        None
+    }
 }
 
 pub mod ansible;
@@ -77,9 +87,9 @@ pub fn create_provisioner(config: &ProvisionerConfig) -> Result<Box<dyn Provisio
         "inspec" => Ok(Box::new(inspec::InspecProvisioner::new(
             inspec::InspecConfig::default(),
         ))),
-        "powershell" => Ok(Box::new(powershell::PowershellProvisioner::new(
-            powershell::PowershellConfig::default(),
-        ))),
+        "powershell" => Ok(Box::new(
+            powershell::PowershellProvisioner::from_provisioner_config(config),
+        )),
         "puppet-masterless" => Ok(Box::new(
             puppet_masterless::PuppetMasterlessProvisioner::new(
                 puppet_masterless::PuppetMasterlessConfig::default(),
@@ -91,8 +101,8 @@ pub fn create_provisioner(config: &ProvisionerConfig) -> Result<Box<dyn Provisio
         "salt-masterless" => Ok(Box::new(salt_masterless::SaltMasterlessProvisioner::new(
             salt_masterless::SaltMasterlessConfig::default(),
         ))),
-        "shell" => Ok(Box::new(shell::ShellProvisioner::new(
-            shell::ShellConfig::default(),
+        "shell" => Ok(Box::new(shell::ShellProvisioner::from_provisioner_config(
+            config,
         ))),
         "shell-local" => Ok(Box::new(shell_local::ShellLocalProvisioner::new(
             shell_local::ShellLocalConfig::default(),
@@ -100,15 +110,15 @@ pub fn create_provisioner(config: &ProvisionerConfig) -> Result<Box<dyn Provisio
         "sysprep" => Ok(Box::new(sysprep::SysprepProvisioner::new(
             sysprep::SysprepConfig::default(),
         ))),
-        "windows-restart" => Ok(Box::new(windows_restart::WindowsRestartProvisioner::new(
-            windows_restart::WindowsRestartConfig::default(),
-        ))),
+        "windows-restart" => Ok(Box::new(
+            windows_restart::WindowsRestartProvisioner::from_provisioner_config(config),
+        )),
         "windows-shell" => Ok(Box::new(windows_shell::WindowsShellProvisioner::new(
             windows_shell::WindowsShellConfig::default(),
         ))),
-        "windows-update" => Ok(Box::new(windows_update::WindowsUpdateProvisioner::new(
-            windows_update::WindowsUpdateConfig::default(),
-        ))),
+        "windows-update" => Ok(Box::new(
+            windows_update::WindowsUpdateProvisioner::from_provisioner_config(config),
+        )),
         "custom-hook" => Ok(Box::new(custom_hook::CustomHookProvisioner::new(
             custom_hook::CustomHookConfig::default(),
         ))),

@@ -102,10 +102,15 @@ pub async fn build_concurrently(
         .into_iter()
         .filter(|b| {
             let name = b.name();
-            if !config.only.is_empty() && !config.only.contains(&name) {
+            let matches_target = |pattern: &str| -> bool {
+                pattern == name
+                    || pattern.strip_prefix("source.") == Some(&name)
+                    || name.strip_prefix("source.") == Some(pattern)
+            };
+            if !config.only.is_empty() && !config.only.iter().any(|o| matches_target(o)) {
                 return false;
             }
-            if !config.except.is_empty() && config.except.contains(&name) {
+            if !config.except.is_empty() && config.except.iter().any(|e| matches_target(e)) {
                 return false;
             }
             true
@@ -928,7 +933,7 @@ pub fn hcl2_upgrade(template_path: &str, output_path: Option<&str>) -> Result<()
 ///
 /// # Errors
 /// Returns `StampError` if fixing fails.
-pub fn fix(template_path: &str) -> Result<(), StampError> {
+pub fn fix(template_path: &str) -> Result<String, StampError> {
     crate::engine::fix::fix_template(template_path, &crate::engine::fix::FixConfig::default())
 }
 
@@ -1792,6 +1797,7 @@ mod inspect_tests {
             source_type: "amazon-ami".to_string(),
             name: "ami".to_string(),
             config: std::collections::HashMap::new(),
+            ..Default::default()
         });
 
         let config = InspectConfig {
@@ -1826,6 +1832,7 @@ mod inspect_tests {
             source_type: "amazon-ami".to_string(),
             name: "ami".to_string(),
             config: std::collections::HashMap::new(),
+            ..Default::default()
         });
 
         let config = InspectConfig {

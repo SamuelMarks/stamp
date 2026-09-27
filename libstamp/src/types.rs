@@ -84,6 +84,40 @@ impl fmt::Display for Timeout {
     }
 }
 
+impl FromStr for Timeout {
+    type Err = StampError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let trimmed = s.trim();
+        if let Some(ms_str) = trimmed.strip_suffix("ms") {
+            if let Ok(ms) = ms_str.parse::<u64>() {
+                return Ok(Self(Duration::from_millis(ms)));
+            }
+        }
+        if let Some(s_str) = trimmed.strip_suffix('s') {
+            if let Ok(secs) = s_str.parse::<u64>() {
+                return Ok(Self(Duration::from_secs(secs)));
+            }
+        }
+        if let Some(m_str) = trimmed.strip_suffix('m') {
+            if let Ok(mins) = m_str.parse::<u64>() {
+                return Ok(Self(Duration::from_secs(mins * 60)));
+            }
+        }
+        if let Some(h_str) = trimmed.strip_suffix('h') {
+            if let Ok(hours) = h_str.parse::<u64>() {
+                return Ok(Self(Duration::from_secs(hours * 3600)));
+            }
+        }
+        if let Ok(secs) = trimmed.parse::<u64>() {
+            return Ok(Self(Duration::from_secs(secs)));
+        }
+        Err(StampError::InvalidType(format!(
+            "invalid duration string '{s}'"
+        )))
+    }
+}
+
 /// A strongly-typed file path wrapper.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub struct FilePath(pub PathBuf);

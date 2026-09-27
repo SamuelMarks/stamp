@@ -6,6 +6,7 @@
 
 use crate::error::StampError;
 use crate::types::Port;
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -435,32 +436,81 @@ pub async fn generate_floppy_disk_with_dirs(
 pub const ISO_SECTOR_SIZE: usize = 2048;
 /// Sector index of the Primary Volume Descriptor (PVD).
 pub const ISO_PVD_SECTOR: u32 = 16;
+/// Sector index of the Joliet Supplementary Volume Descriptor (SVD).
+pub const ISO_SVD_SECTOR: u32 = 17;
 /// Sector index of the Volume Descriptor Set Terminator.
-pub const ISO_TERMINATOR_SECTOR: u32 = 17;
+pub const ISO_TERMINATOR_SECTOR: u32 = 18;
 /// Sector index of the Type L Path Table.
-pub const ISO_PATH_TABLE_L_SECTOR: u32 = 18;
+pub const ISO_PATH_TABLE_L_SECTOR: u32 = 19;
 /// Sector index of the Type M Path Table.
-pub const ISO_PATH_TABLE_M_SECTOR: u32 = 19;
+pub const ISO_PATH_TABLE_M_SECTOR: u32 = 20;
+/// Sector index of the Joliet Type L Path Table.
+pub const ISO_JOLIET_PATH_TABLE_L_SECTOR: u32 = 21;
+/// Sector index of the Joliet Type M Path Table.
+pub const ISO_JOLIET_PATH_TABLE_M_SECTOR: u32 = 22;
 /// Sector index of the Root Directory.
-pub const ISO_ROOT_DIR_SECTOR: u32 = 20;
-/// Sector index of the first file extent.
-pub const ISO_FIRST_FILE_SECTOR: u32 = 21;
+pub const ISO_ROOT_DIR_SECTOR: u32 = 23;
 
 /// A file to be stored on an ISO9660 CD-ROM image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IsoFile {
-    /// Rock Ridge alternate name (e.g. `user-data`, `meta-data`, `network-config`).
+    /// Relative path on the filesystem (e.g. `user-data` or `viostor/w11/ARM64/viostor.inf`).
+    pub path: String,
+    /// Filename without directory prefix (e.g. `viostor.inf`).
     pub name: String,
-    /// ISO9660 uppercase 8.3 identifier with version tag (e.g. `USER_DAT.;1`).
+    /// ISO9660 uppercase 8.3 identifier with version tag (e.g. `USER_DAT.;1` or `VIOSTOR.INF;1`).
     pub iso_id: String,
     /// Binary content of the file.
     pub data: Vec<u8>,
 }
 
-/// In-memory ISO9660 CD-ROM filesystem generator with Rock Ridge extensions for unattended installation media.
+/// Encode an ASCII or UTF-8 string into big-endian UCS-2 / UTF-16BE bytes for Joliet SVD.
+#[must_use]
+pub fn encode_ucs2be(s: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len() * 2);
+    for c in s.chars() {
+        let code = u16::try_from(c as u32).unwrap_or(u16::from(b'?'));
+        out.extend_from_slice(&code.to_be_bytes());
+    }
+    out
+}
+
+/// Encode and pad a string with UCS-2BE spaces (`0x00 0x20`) up to `max_chars`.
+#[must_use]
+pub fn encode_ucs2be_padded(s: &str, max_chars: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(max_chars * 2);
+    let mut count = 0;
+    for c in s.chars().take(max_chars) {
+        let code = u16::try_from(c as u32).unwrap_or(u16::from(b'?'));
+        out.extend_from_slice(&code.to_be_bytes());
+        count += 1;
+    }
+    while count < max_chars {
+        out.extend_from_slice(&(0x0020u16).to_be_bytes());
+        count += 1;
+    }
+    out
+}
+
+/// Internal directory metadata for ISO9660 and Joliet tree generation.
+#[derive(Debug, Clone)]
+struct IsoDirEntry {
+    /// 1-based directory index.
+    index: usize,
+    /// 1-based parent directory index.
+    parent_index: usize,
+    /// Normalized directory path (empty string for root).
+    path: String,
+    /// Directory leaf name (empty string for root).
+    name: String,
+    /// ISO9660 uppercase identifier.
+    iso_id: String,
+}
+
+/// In-memory ISO9660 Level 3 CD-ROM filesystem generator with Joliet and Rock Ridge extensions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Iso9660Disk {
-    /// Volume identifier (e.g. `cidata`).
+    /// Volume identifier (e.g. `OEMDRV` or `cidata`).
     pub volume_label: String,
     /// List of files on the CD-ROM.
     pub files: Vec<IsoFile>,
@@ -482,16 +532,23 @@ impl Iso9660Disk {
         }
     }
 
-    /// Add a file with given filename and binary content to the ISO9660 disk.
+    /// Add a file with given relative path and binary content to the ISO9660 disk.
     ///
     /// # Errors
-    /// Returns `StampError::Execution` if filename cannot be formatted.
-    pub fn add_file(&mut self, filename: &str, content: &[u8]) -> Result<(), StampError> {
-        let p = Path::new(filename);
+    /// Returns `StampError::Execution` if path cannot be formatted.
+    pub fn add_file(&mut self, path: &str, content: &[u8]) -> Result<(), StampError> {
+        let normalized = path.replace('\\', "/").trim_start_matches('/').to_string();
+        let p = Path::new(&normalized);
+        let file_name = p
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("file")
+            .to_string();
+
         let stem = p
             .file_stem()
             .and_then(|s| s.to_str())
-            .unwrap_or(filename)
+            .unwrap_or("FILE")
             .trim();
         let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").trim();
 
@@ -520,11 +577,58 @@ impl Iso9660Disk {
         };
 
         self.files.push(IsoFile {
-            name: filename.to_string(),
+            path: normalized,
+            name: file_name,
             iso_id,
             data: content.to_vec(),
         });
 
+        Ok(())
+    }
+
+    /// Add a directory tree recursively from the host local filesystem into the ISO image.
+    ///
+    /// Preserves directory hierarchy under `base_prefix`.
+    ///
+    /// # Errors
+    /// Returns `StampError::Io` on filesystem read error.
+    pub fn add_directory_recursive(
+        &mut self,
+        dir_path: &Path,
+        base_prefix: Option<&str>,
+    ) -> Result<(), StampError> {
+        let prefix = base_prefix.map_or_else(
+            || {
+                dir_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("dir")
+                    .to_string()
+            },
+            ToString::to_string,
+        );
+        self.add_directory_recursive_internal(dir_path, &prefix)
+    }
+
+    /// Recursively walks a host directory adding all files into the ISO9660 image.
+    fn add_directory_recursive_internal(
+        &mut self,
+        dir_path: &Path,
+        prefix: &str,
+    ) -> Result<(), StampError> {
+        let entries = std::fs::read_dir(dir_path).map_err(StampError::Io)?;
+        for entry in entries {
+            let entry = entry.map_err(StampError::Io)?;
+            let p = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let target_rel = format!("{prefix}/{name}");
+            if p.is_dir() {
+                self.add_directory_recursive_internal(&p, &target_rel)?;
+            } else if p.is_file() {
+                let data = std::fs::read(&p).map_err(StampError::Io)?;
+                self.add_file(&target_rel, &data)?;
+            }
+        }
         Ok(())
     }
 
@@ -544,208 +648,493 @@ impl Iso9660Disk {
         [le[0], le[1], le[2], le[3], be[0], be[1], be[2], be[3]]
     }
 
-    /// Generate the full ISO9660 binary image.
+    /// Generate the full ISO9660 Level 3 + Joliet + Rock Ridge binary filesystem image.
     ///
     /// # Errors
     /// Returns `StampError::Execution` on serialization failure.
     pub fn generate(&self) -> Result<Vec<u8>, StampError> {
-        // Calculate file sectors
+        // 1. Collect all unique directories in hierarchical topological order
+        let mut dir_map: Vec<String> = Vec::new();
+        dir_map.push(String::new()); // Root directory = ""
+
+        for file in &self.files {
+            if let Some((dir_part, _)) = file.path.rsplit_once('/') {
+                let mut accum = String::new();
+                for segment in dir_part.split('/') {
+                    if segment.is_empty() {
+                        continue;
+                    }
+                    if !accum.is_empty() {
+                        accum.push('/');
+                    }
+                    accum.push_str(segment);
+                    if !dir_map.contains(&accum) {
+                        dir_map.push(accum.clone());
+                    }
+                }
+            }
+        }
+
+        // Sort subdirectories so parent directories always precede child directories
+        let mut subdirs: Vec<String> = dir_map.into_iter().skip(1).collect();
+        subdirs.sort_by(|a, b| {
+            let depth_a = a.split('/').count();
+            let depth_b = b.split('/').count();
+            depth_a.cmp(&depth_b).then_with(|| a.cmp(b))
+        });
+
+        let mut all_dirs: Vec<IsoDirEntry> = Vec::new();
+        all_dirs.push(IsoDirEntry {
+            index: 1,
+            parent_index: 1,
+            path: String::new(),
+            name: String::new(),
+            iso_id: String::new(),
+        });
+
+        for dir_path in subdirs {
+            let (parent_p, name) = match dir_path.rsplit_once('/') {
+                Some((p, n)) => (p.to_string(), n.to_string()),
+                None => (String::new(), dir_path.clone()),
+            };
+            let parent_idx = all_dirs
+                .iter()
+                .position(|d| d.path == parent_p)
+                .map_or(1, |idx| idx + 1);
+
+            let clean_name: String = name
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .take(8)
+                .collect();
+            let iso_id = if clean_name.is_empty() {
+                "DIR".to_string()
+            } else {
+                clean_name.to_ascii_uppercase()
+            };
+
+            let next_idx = all_dirs.len() + 1;
+            all_dirs.push(IsoDirEntry {
+                index: next_idx,
+                parent_index: parent_idx,
+                path: dir_path,
+                name,
+                iso_id,
+            });
+        }
+
+        let num_dirs = all_dirs.len();
+
+        // 2. Sector allocations
+        let iso_root_dir_sector = ISO_ROOT_DIR_SECTOR;
+        let joliet_root_dir_sector = ISO_ROOT_DIR_SECTOR + (num_dirs as u32);
+        let first_file_sector = joliet_root_dir_sector + (num_dirs as u32);
+
+        // Assign file data sectors
         let mut file_sectors = Vec::new();
-        let mut next_sector = ISO_FIRST_FILE_SECTOR;
+        let mut cur_file_sector = first_file_sector;
         for file in &self.files {
             let sectors_needed =
                 u32::try_from(file.data.len().div_ceil(ISO_SECTOR_SIZE).max(1)).unwrap_or(1);
-            file_sectors.push((next_sector, sectors_needed, file));
-            next_sector += sectors_needed;
+            file_sectors.push((cur_file_sector, file));
+            cur_file_sector += sectors_needed;
         }
 
-        let total_volume_sectors = next_sector;
+        let total_volume_sectors = cur_file_sector;
         let total_bytes = (total_volume_sectors as usize) * ISO_SECTOR_SIZE;
         let mut image = vec![0u8; total_bytes];
 
-        // 1. Primary Volume Descriptor (PVD) at Sector 16
+        // 3. Build ISO Path Table
+        let mut path_table_l_iso = Vec::new();
+        let mut path_table_m_iso = Vec::new();
+        for dir in &all_dirs {
+            let extent = iso_root_dir_sector + (dir.index as u32) - 1;
+            let parent = dir.parent_index as u16;
+            if dir.index == 1 {
+                // Root directory
+                path_table_l_iso.extend_from_slice(&[1, 0]);
+                path_table_l_iso.extend_from_slice(&extent.to_le_bytes());
+                path_table_l_iso.extend_from_slice(&parent.to_le_bytes());
+                path_table_l_iso.extend_from_slice(&[0, 0]);
+
+                path_table_m_iso.extend_from_slice(&[1, 0]);
+                path_table_m_iso.extend_from_slice(&extent.to_be_bytes());
+                path_table_m_iso.extend_from_slice(&parent.to_be_bytes());
+                path_table_m_iso.extend_from_slice(&[0, 0]);
+            } else {
+                let id_bytes = dir.iso_id.as_bytes();
+                let len = id_bytes.len() as u8;
+                let pad = usize::from(len % 2 == 1);
+
+                path_table_l_iso.extend_from_slice(&[len, 0]);
+                path_table_l_iso.extend_from_slice(&extent.to_le_bytes());
+                path_table_l_iso.extend_from_slice(&parent.to_le_bytes());
+                path_table_l_iso.extend_from_slice(id_bytes);
+                if pad > 0 {
+                    path_table_l_iso.push(0);
+                }
+
+                path_table_m_iso.extend_from_slice(&[len, 0]);
+                path_table_m_iso.extend_from_slice(&extent.to_be_bytes());
+                path_table_m_iso.extend_from_slice(&parent.to_be_bytes());
+                path_table_m_iso.extend_from_slice(id_bytes);
+                if pad > 0 {
+                    path_table_m_iso.push(0);
+                }
+            }
+        }
+
+        // 4. Build Joliet Path Table
+        let mut path_table_l_joliet = Vec::new();
+        let mut path_table_m_joliet = Vec::new();
+        for dir in &all_dirs {
+            let extent = joliet_root_dir_sector + (dir.index as u32) - 1;
+            let parent = dir.parent_index as u16;
+            if dir.index == 1 {
+                path_table_l_joliet.extend_from_slice(&[1, 0]);
+                path_table_l_joliet.extend_from_slice(&extent.to_le_bytes());
+                path_table_l_joliet.extend_from_slice(&parent.to_le_bytes());
+                path_table_l_joliet.extend_from_slice(&[0, 0]);
+
+                path_table_m_joliet.extend_from_slice(&[1, 0]);
+                path_table_m_joliet.extend_from_slice(&extent.to_be_bytes());
+                path_table_m_joliet.extend_from_slice(&parent.to_be_bytes());
+                path_table_m_joliet.extend_from_slice(&[0, 0]);
+            } else {
+                let id_bytes = encode_ucs2be(&dir.name);
+                let len = id_bytes.len() as u8;
+                let pad = usize::from(len % 2 == 1);
+
+                path_table_l_joliet.extend_from_slice(&[len, 0]);
+                path_table_l_joliet.extend_from_slice(&extent.to_le_bytes());
+                path_table_l_joliet.extend_from_slice(&parent.to_le_bytes());
+                path_table_l_joliet.extend_from_slice(&id_bytes);
+                if pad > 0 {
+                    path_table_l_joliet.push(0);
+                }
+
+                path_table_m_joliet.extend_from_slice(&[len, 0]);
+                path_table_m_joliet.extend_from_slice(&extent.to_be_bytes());
+                path_table_m_joliet.extend_from_slice(&parent.to_be_bytes());
+                path_table_m_joliet.extend_from_slice(&id_bytes);
+                if pad > 0 {
+                    path_table_m_joliet.push(0);
+                }
+            }
+        }
+
+        // Write Path Tables
+        let pt_l_offset = (ISO_PATH_TABLE_L_SECTOR as usize) * ISO_SECTOR_SIZE;
+        image[pt_l_offset..pt_l_offset + path_table_l_iso.len()].copy_from_slice(&path_table_l_iso);
+
+        let pt_m_offset = (ISO_PATH_TABLE_M_SECTOR as usize) * ISO_SECTOR_SIZE;
+        image[pt_m_offset..pt_m_offset + path_table_m_iso.len()].copy_from_slice(&path_table_m_iso);
+
+        let j_pt_l_offset = (ISO_JOLIET_PATH_TABLE_L_SECTOR as usize) * ISO_SECTOR_SIZE;
+        image[j_pt_l_offset..j_pt_l_offset + path_table_l_joliet.len()]
+            .copy_from_slice(&path_table_l_joliet);
+
+        let j_pt_m_offset = (ISO_JOLIET_PATH_TABLE_M_SECTOR as usize) * ISO_SECTOR_SIZE;
+        image[j_pt_m_offset..j_pt_m_offset + path_table_m_joliet.len()]
+            .copy_from_slice(&path_table_m_joliet);
+
+        // 5. Write PVD (Sector 16)
         let pvd_offset = (ISO_PVD_SECTOR as usize) * ISO_SECTOR_SIZE;
         image[pvd_offset] = 0x01; // PVD Type
         image[pvd_offset + 1..pvd_offset + 6].copy_from_slice(b"CD001");
-        image[pvd_offset + 6] = 0x01; // Version
-        image[pvd_offset + 7] = 0x00; // Unused
+        image[pvd_offset + 6] = 0x01;
 
-        // System Identifier (32 bytes)
         let mut sys_id = [b' '; 32];
         sys_id[..5].copy_from_slice(b"LINUX");
         image[pvd_offset + 8..pvd_offset + 40].copy_from_slice(&sys_id);
 
-        // Volume Identifier (32 bytes)
         let mut vol_id = [b' '; 32];
         let label_bytes = self.volume_label.as_bytes();
         let copy_len = label_bytes.len().min(32);
         vol_id[..copy_len].copy_from_slice(&label_bytes[..copy_len]);
         image[pvd_offset + 40..pvd_offset + 72].copy_from_slice(&vol_id);
 
-        // Volume Space Size (both-endian u32)
         image[pvd_offset + 80..pvd_offset + 88]
             .copy_from_slice(&Self::both_endian_u32(total_volume_sectors));
-
-        // Volume Set Size = 1 (both-endian u16)
         image[pvd_offset + 120..pvd_offset + 124].copy_from_slice(&Self::both_endian_u16(1));
-        // Volume Sequence Number = 1 (both-endian u16)
         image[pvd_offset + 124..pvd_offset + 128].copy_from_slice(&Self::both_endian_u16(1));
-        // Logical Block Size = 2048 (both-endian u16)
-        let sector_size_u16 = u16::try_from(ISO_SECTOR_SIZE).unwrap_or(2048);
-        image[pvd_offset + 128..pvd_offset + 132]
-            .copy_from_slice(&Self::both_endian_u16(sector_size_u16));
-
-        // Path Table Size: 10 bytes (both-endian u32)
-        let path_table_size = 10u32;
+        image[pvd_offset + 128..pvd_offset + 132].copy_from_slice(&Self::both_endian_u16(2048));
         image[pvd_offset + 132..pvd_offset + 140]
-            .copy_from_slice(&Self::both_endian_u32(path_table_size));
-        // Location of Type L Path Table
+            .copy_from_slice(&Self::both_endian_u32(path_table_l_iso.len() as u32));
         image[pvd_offset + 140..pvd_offset + 144]
             .copy_from_slice(&ISO_PATH_TABLE_L_SECTOR.to_le_bytes());
-        // Location of Type M Path Table
         image[pvd_offset + 148..pvd_offset + 152]
             .copy_from_slice(&ISO_PATH_TABLE_M_SECTOR.to_be_bytes());
 
-        // Root Directory Record in PVD (34 bytes at offset 156..190)
-        let sector_size_u32 = u32::try_from(ISO_SECTOR_SIZE).unwrap_or(2048);
         let root_rec = &mut image[pvd_offset + 156..pvd_offset + 190];
-        root_rec[0] = 34; // Record Length
-        root_rec[1] = 0; // Extended Attribute Record Length
-        root_rec[2..10].copy_from_slice(&Self::both_endian_u32(ISO_ROOT_DIR_SECTOR));
-        root_rec[10..18].copy_from_slice(&Self::both_endian_u32(sector_size_u32));
-        root_rec[18..25].copy_from_slice(&[126, 9, 6, 12, 0, 0, 0]); // Date
-        root_rec[25] = 0x02; // File Flags: Directory
-        root_rec[28..32].copy_from_slice(&Self::both_endian_u16(1)); // Volume Seq
-        root_rec[32] = 1; // File Identifier Length
-        root_rec[33] = 0; // Root Identifier \0
+        root_rec[0] = 34;
+        root_rec[1] = 0;
+        root_rec[2..10].copy_from_slice(&Self::both_endian_u32(iso_root_dir_sector));
+        root_rec[10..18].copy_from_slice(&Self::both_endian_u32(2048));
+        root_rec[18..25].copy_from_slice(&[126, 9, 6, 12, 0, 0, 0]);
+        root_rec[25] = 0x02; // Directory
+        root_rec[28..32].copy_from_slice(&Self::both_endian_u16(1));
+        root_rec[32] = 1;
+        root_rec[33] = 0;
 
-        // Application Identifier (128 bytes)
         let mut app_id = [b' '; 128];
         let stamp_app = b"STAMP ISO9660 GENERATOR";
         app_id[..stamp_app.len()].copy_from_slice(stamp_app);
         image[pvd_offset + 574..pvd_offset + 702].copy_from_slice(&app_id);
 
-        // Timestamps (Creation, Modification, Effective)
         let ts = b"2026090612000000\0";
         image[pvd_offset + 813..pvd_offset + 830].copy_from_slice(ts);
         image[pvd_offset + 830..pvd_offset + 847].copy_from_slice(ts);
         image[pvd_offset + 864..pvd_offset + 881].copy_from_slice(ts);
-        image[pvd_offset + 881] = 0x01; // File Structure Version
+        image[pvd_offset + 881] = 0x01;
 
-        // 2. Volume Descriptor Set Terminator at Sector 17
+        // 6. Write Joliet SVD (Sector 17)
+        let svd_offset = (ISO_SVD_SECTOR as usize) * ISO_SECTOR_SIZE;
+        image[svd_offset] = 0x02; // Supplementary Volume Descriptor
+        image[svd_offset + 1..svd_offset + 6].copy_from_slice(b"CD001");
+        image[svd_offset + 6] = 0x01;
+
+        let sys_id_ucs2 = encode_ucs2be_padded("LINUX", 16);
+        image[svd_offset + 8..svd_offset + 8 + sys_id_ucs2.len()].copy_from_slice(&sys_id_ucs2);
+
+        let vol_id_ucs2 = encode_ucs2be_padded(&self.volume_label, 16);
+        image[svd_offset + 40..svd_offset + 40 + vol_id_ucs2.len()].copy_from_slice(&vol_id_ucs2);
+
+        image[svd_offset + 80..svd_offset + 88]
+            .copy_from_slice(&Self::both_endian_u32(total_volume_sectors));
+
+        // Joliet Escape Sequences: %/E (UCS-2 Level 3)
+        image[svd_offset + 88..svd_offset + 91].copy_from_slice(b"%/E");
+
+        image[svd_offset + 120..svd_offset + 124].copy_from_slice(&Self::both_endian_u16(1));
+        image[svd_offset + 124..svd_offset + 128].copy_from_slice(&Self::both_endian_u16(1));
+        image[svd_offset + 128..svd_offset + 132].copy_from_slice(&Self::both_endian_u16(2048));
+        image[svd_offset + 132..svd_offset + 140]
+            .copy_from_slice(&Self::both_endian_u32(path_table_l_joliet.len() as u32));
+        image[svd_offset + 140..svd_offset + 144]
+            .copy_from_slice(&ISO_JOLIET_PATH_TABLE_L_SECTOR.to_le_bytes());
+        image[svd_offset + 148..svd_offset + 152]
+            .copy_from_slice(&ISO_JOLIET_PATH_TABLE_M_SECTOR.to_be_bytes());
+
+        let j_root_rec = &mut image[svd_offset + 156..svd_offset + 190];
+        j_root_rec[0] = 34;
+        j_root_rec[1] = 0;
+        j_root_rec[2..10].copy_from_slice(&Self::both_endian_u32(joliet_root_dir_sector));
+        j_root_rec[10..18].copy_from_slice(&Self::both_endian_u32(2048));
+        j_root_rec[18..25].copy_from_slice(&[126, 9, 6, 12, 0, 0, 0]);
+        j_root_rec[25] = 0x02; // Directory
+        j_root_rec[28..32].copy_from_slice(&Self::both_endian_u16(1));
+        j_root_rec[32] = 1;
+        j_root_rec[33] = 0;
+
+        image[svd_offset + 813..svd_offset + 830].copy_from_slice(ts);
+        image[svd_offset + 830..svd_offset + 847].copy_from_slice(ts);
+        image[svd_offset + 864..svd_offset + 881].copy_from_slice(ts);
+        image[svd_offset + 881] = 0x01;
+
+        // 7. Write Volume Descriptor Terminator (Sector 18)
         let term_offset = (ISO_TERMINATOR_SECTOR as usize) * ISO_SECTOR_SIZE;
         image[term_offset] = 0xFF;
         image[term_offset + 1..term_offset + 6].copy_from_slice(b"CD001");
         image[term_offset + 6] = 0x01;
 
-        // 3. Path Table L (Sector 18)
-        let path_l_offset = (ISO_PATH_TABLE_L_SECTOR as usize) * ISO_SECTOR_SIZE;
-        image[path_l_offset] = 1; // Length of Directory ID
-        image[path_l_offset + 1] = 0; // Extended attr
-        image[path_l_offset + 2..path_l_offset + 6]
-            .copy_from_slice(&ISO_ROOT_DIR_SECTOR.to_le_bytes());
-        image[path_l_offset + 6..path_l_offset + 8].copy_from_slice(&1u16.to_le_bytes());
-        image[path_l_offset + 8] = 0; // Root ID
-        image[path_l_offset + 9] = 0; // Padding
+        // 8. Write ISO Directory Sectors with Rock Ridge extensions
+        for dir in &all_dirs {
+            let dir_sector = iso_root_dir_sector + (dir.index as u32) - 1;
+            let parent_sector = iso_root_dir_sector + (dir.parent_index as u32) - 1;
+            let mut cursor = (dir_sector as usize) * ISO_SECTOR_SIZE;
 
-        // 4. Path Table M (Sector 19)
-        let path_m_offset = (ISO_PATH_TABLE_M_SECTOR as usize) * ISO_SECTOR_SIZE;
-        image[path_m_offset] = 1;
-        image[path_m_offset + 1] = 0;
-        image[path_m_offset + 2..path_m_offset + 6]
-            .copy_from_slice(&ISO_ROOT_DIR_SECTOR.to_be_bytes());
-        image[path_m_offset + 6..path_m_offset + 8].copy_from_slice(&1u16.to_be_bytes());
-        image[path_m_offset + 8] = 0;
-        image[path_m_offset + 9] = 0;
+            // Entry "."
+            image[cursor] = 34;
+            image[cursor + 2..cursor + 10].copy_from_slice(&Self::both_endian_u32(dir_sector));
+            image[cursor + 10..cursor + 18].copy_from_slice(&Self::both_endian_u32(2048));
+            image[cursor + 18..cursor + 25].copy_from_slice(&[126, 9, 6, 12, 0, 0, 0]);
+            image[cursor + 25] = 0x02;
+            image[cursor + 28..cursor + 32].copy_from_slice(&Self::both_endian_u16(1));
+            image[cursor + 32] = 1;
+            image[cursor + 33] = 0;
+            cursor += 34;
 
-        // 5. Root Directory (Sector 20)
-        let root_dir_offset = (ISO_ROOT_DIR_SECTOR as usize) * ISO_SECTOR_SIZE;
-        let mut root_cursor = root_dir_offset;
-        let sector_size_u32 = u32::try_from(ISO_SECTOR_SIZE).unwrap_or(2048);
+            // Entry ".."
+            image[cursor] = 34;
+            image[cursor + 2..cursor + 10].copy_from_slice(&Self::both_endian_u32(parent_sector));
+            image[cursor + 10..cursor + 18].copy_from_slice(&Self::both_endian_u32(2048));
+            image[cursor + 18..cursor + 25].copy_from_slice(&[126, 9, 6, 12, 0, 0, 0]);
+            image[cursor + 25] = 0x02;
+            image[cursor + 28..cursor + 32].copy_from_slice(&Self::both_endian_u16(1));
+            image[cursor + 32] = 1;
+            image[cursor + 33] = 1;
+            cursor += 34;
 
-        // Entry "."
-        image[root_cursor] = 34;
-        image[root_cursor + 2..root_cursor + 10]
-            .copy_from_slice(&Self::both_endian_u32(ISO_ROOT_DIR_SECTOR));
-        image[root_cursor + 10..root_cursor + 18]
-            .copy_from_slice(&Self::both_endian_u32(sector_size_u32));
-        image[root_cursor + 25] = 0x02; // Directory
-        image[root_cursor + 28..root_cursor + 32].copy_from_slice(&Self::both_endian_u16(1));
-        image[root_cursor + 32] = 1;
-        image[root_cursor + 33] = 0;
-        root_cursor += 34;
+            // Subdirectories directly inside `dir`
+            for child in &all_dirs {
+                if child.index != 1 && child.parent_index == dir.index {
+                    let child_sector = iso_root_dir_sector + (child.index as u32) - 1;
+                    let id_bytes = child.iso_id.as_bytes();
+                    let name_bytes = child.name.as_bytes();
 
-        // Entry ".."
-        image[root_cursor] = 34;
-        image[root_cursor + 2..root_cursor + 10]
-            .copy_from_slice(&Self::both_endian_u32(ISO_ROOT_DIR_SECTOR));
-        image[root_cursor + 10..root_cursor + 18]
-            .copy_from_slice(&Self::both_endian_u32(sector_size_u32));
-        image[root_cursor + 25] = 0x02; // Directory
-        image[root_cursor + 28..root_cursor + 32].copy_from_slice(&Self::both_endian_u16(1));
-        image[root_cursor + 32] = 1;
-        image[root_cursor + 33] = 1;
-        root_cursor += 34;
+                    let base_len = 33 + id_bytes.len();
+                    let pad = usize::from(base_len % 2 == 1);
+                    let nm_len = 5 + name_bytes.len();
+                    let px_len = 36;
+                    let total_len = base_len + pad + nm_len + px_len;
+                    let final_pad = usize::from(total_len % 2 == 1);
+                    let rec_len = (total_len + final_pad) as u8;
 
-        // File entries with Rock Ridge extensions
-        for (sector, _, file) in &file_sectors {
-            let id_bytes = file.iso_id.as_bytes();
-            let base_rec_len = 33 + id_bytes.len();
-            let pad = usize::from(base_rec_len % 2 == 1);
+                    image[cursor] = rec_len;
+                    image[cursor + 2..cursor + 10]
+                        .copy_from_slice(&Self::both_endian_u32(child_sector));
+                    image[cursor + 10..cursor + 18].copy_from_slice(&Self::both_endian_u32(2048));
+                    image[cursor + 18..cursor + 25].copy_from_slice(&[126, 9, 6, 12, 0, 0, 0]);
+                    image[cursor + 25] = 0x02; // Directory
+                    image[cursor + 28..cursor + 32].copy_from_slice(&Self::both_endian_u16(1));
+                    image[cursor + 32] = id_bytes.len() as u8;
+                    image[cursor + 33..cursor + 33 + id_bytes.len()].copy_from_slice(id_bytes);
 
-            // Rock Ridge NM (Alternate Name)
-            let name_bytes = file.name.as_bytes();
-            let nm_len = 5 + name_bytes.len();
+                    let mut sua = cursor + 33 + id_bytes.len() + pad;
+                    image[sua..sua + 2].copy_from_slice(b"NM");
+                    image[sua + 2] = nm_len as u8;
+                    image[sua + 3] = 1;
+                    image[sua + 4] = 0;
+                    image[sua + 5..sua + 5 + name_bytes.len()].copy_from_slice(name_bytes);
+                    sua += nm_len;
 
-            // Rock Ridge PX (POSIX attributes: mode 0o100_644)
-            let px_len = 36;
+                    image[sua..sua + 2].copy_from_slice(b"PX");
+                    image[sua + 2] = px_len as u8;
+                    image[sua + 3] = 1;
+                    image[sua + 4..sua + 12].copy_from_slice(&Self::both_endian_u32(0o40755));
+                    image[sua + 12..sua + 20].copy_from_slice(&Self::both_endian_u32(2));
+                    image[sua + 20..sua + 28].copy_from_slice(&Self::both_endian_u32(0));
+                    image[sua + 28..sua + 36].copy_from_slice(&Self::both_endian_u32(0));
 
-            let total_rec_len = base_rec_len + pad + nm_len + px_len;
-            let final_pad = usize::from(total_rec_len % 2 == 1);
-            let record_len = u8::try_from(total_rec_len + final_pad).unwrap_or(0);
+                    cursor += rec_len as usize;
+                }
+            }
 
-            let rec_start = root_cursor;
-            image[rec_start] = record_len;
-            image[rec_start + 1] = 0; // Extended attr
-            image[rec_start + 2..rec_start + 10].copy_from_slice(&Self::both_endian_u32(*sector));
-            let file_data_len_u32 = u32::try_from(file.data.len()).unwrap_or(0);
-            image[rec_start + 10..rec_start + 18]
-                .copy_from_slice(&Self::both_endian_u32(file_data_len_u32));
-            image[rec_start + 18..rec_start + 25].copy_from_slice(&[126, 9, 6, 12, 0, 0, 0]);
-            image[rec_start + 25] = 0x00; // Normal file
-            image[rec_start + 28..rec_start + 32].copy_from_slice(&Self::both_endian_u16(1));
-            image[rec_start + 32] = u8::try_from(id_bytes.len()).unwrap_or(0);
-            image[rec_start + 33..rec_start + 33 + id_bytes.len()].copy_from_slice(id_bytes);
+            // Files directly inside `dir`
+            for (sector, file) in &file_sectors {
+                let file_parent_path = file.path.rsplit_once('/').map_or("", |(p, _)| p);
+                if file_parent_path == dir.path {
+                    let id_bytes = file.iso_id.as_bytes();
+                    let name_bytes = file.name.as_bytes();
 
-            let mut sua_offset = rec_start + 33 + id_bytes.len() + pad;
+                    let base_len = 33 + id_bytes.len();
+                    let pad = usize::from(base_len % 2 == 1);
+                    let nm_len = 5 + name_bytes.len();
+                    let px_len = 36;
+                    let total_len = base_len + pad + nm_len + px_len;
+                    let final_pad = usize::from(total_len % 2 == 1);
+                    let rec_len = (total_len + final_pad) as u8;
 
-            // Write NM Record
-            image[sua_offset..sua_offset + 2].copy_from_slice(b"NM");
-            image[sua_offset + 2] = u8::try_from(nm_len).unwrap_or(0);
-            image[sua_offset + 3] = 1; // Version
-            image[sua_offset + 4] = 0; // Flags
-            image[sua_offset + 5..sua_offset + 5 + name_bytes.len()].copy_from_slice(name_bytes);
-            sua_offset += nm_len;
+                    image[cursor] = rec_len;
+                    image[cursor + 2..cursor + 10].copy_from_slice(&Self::both_endian_u32(*sector));
+                    image[cursor + 10..cursor + 18]
+                        .copy_from_slice(&Self::both_endian_u32(file.data.len() as u32));
+                    image[cursor + 18..cursor + 25].copy_from_slice(&[126, 9, 6, 12, 0, 0, 0]);
+                    image[cursor + 25] = 0x00; // Normal File
+                    image[cursor + 28..cursor + 32].copy_from_slice(&Self::both_endian_u16(1));
+                    image[cursor + 32] = id_bytes.len() as u8;
+                    image[cursor + 33..cursor + 33 + id_bytes.len()].copy_from_slice(id_bytes);
 
-            // Write PX Record
-            image[sua_offset..sua_offset + 2].copy_from_slice(b"PX");
-            image[sua_offset + 2] = u8::try_from(px_len).unwrap_or(0);
-            image[sua_offset + 3] = 1; // Version
-            // POSIX file mode (0o100644 = 0x81A4 regular file rw-r--r--)
-            image[sua_offset + 4..sua_offset + 12]
-                .copy_from_slice(&Self::both_endian_u32(0o100_644));
-            // File links (1)
-            image[sua_offset + 12..sua_offset + 20].copy_from_slice(&Self::both_endian_u32(1));
-            // UID (0)
-            image[sua_offset + 20..sua_offset + 28].copy_from_slice(&Self::both_endian_u32(0));
-            // GID (0)
-            image[sua_offset + 28..sua_offset + 36].copy_from_slice(&Self::both_endian_u32(0));
+                    let mut sua = cursor + 33 + id_bytes.len() + pad;
+                    image[sua..sua + 2].copy_from_slice(b"NM");
+                    image[sua + 2] = nm_len as u8;
+                    image[sua + 3] = 1;
+                    image[sua + 4] = 0;
+                    image[sua + 5..sua + 5 + name_bytes.len()].copy_from_slice(name_bytes);
+                    sua += nm_len;
 
-            root_cursor += record_len as usize;
+                    image[sua..sua + 2].copy_from_slice(b"PX");
+                    image[sua + 2] = px_len as u8;
+                    image[sua + 3] = 1;
+                    image[sua + 4..sua + 12].copy_from_slice(&Self::both_endian_u32(0o100_644));
+                    image[sua + 12..sua + 20].copy_from_slice(&Self::both_endian_u32(1));
+                    image[sua + 20..sua + 28].copy_from_slice(&Self::both_endian_u32(0));
+                    image[sua + 28..sua + 36].copy_from_slice(&Self::both_endian_u32(0));
+
+                    cursor += rec_len as usize;
+                }
+            }
         }
 
-        // 6. Copy File Data Extents (Sectors 21+)
-        for (sector, _, file) in &file_sectors {
+        // 9. Write Joliet Directory Sectors
+        for dir in &all_dirs {
+            let dir_sector = joliet_root_dir_sector + (dir.index as u32) - 1;
+            let parent_sector = joliet_root_dir_sector + (dir.parent_index as u32) - 1;
+            let mut cursor = (dir_sector as usize) * ISO_SECTOR_SIZE;
+
+            // Entry "."
+            image[cursor] = 34;
+            image[cursor + 2..cursor + 10].copy_from_slice(&Self::both_endian_u32(dir_sector));
+            image[cursor + 10..cursor + 18].copy_from_slice(&Self::both_endian_u32(2048));
+            image[cursor + 18..cursor + 25].copy_from_slice(&[126, 9, 6, 12, 0, 0, 0]);
+            image[cursor + 25] = 0x02;
+            image[cursor + 28..cursor + 32].copy_from_slice(&Self::both_endian_u16(1));
+            image[cursor + 32] = 1;
+            image[cursor + 33] = 0;
+            cursor += 34;
+
+            // Entry ".."
+            image[cursor] = 34;
+            image[cursor + 2..cursor + 10].copy_from_slice(&Self::both_endian_u32(parent_sector));
+            image[cursor + 10..cursor + 18].copy_from_slice(&Self::both_endian_u32(2048));
+            image[cursor + 18..cursor + 25].copy_from_slice(&[126, 9, 6, 12, 0, 0, 0]);
+            image[cursor + 25] = 0x02;
+            image[cursor + 28..cursor + 32].copy_from_slice(&Self::both_endian_u16(1));
+            image[cursor + 32] = 1;
+            image[cursor + 33] = 1;
+            cursor += 34;
+
+            // Subdirectories directly inside `dir`
+            for child in &all_dirs {
+                if child.index != 1 && child.parent_index == dir.index {
+                    let child_sector = joliet_root_dir_sector + (child.index as u32) - 1;
+                    let ucs2_id = encode_ucs2be(&child.name);
+                    let total_len = 33 + ucs2_id.len();
+                    let pad = usize::from(total_len % 2 == 1);
+                    let rec_len = (total_len + pad) as u8;
+
+                    image[cursor] = rec_len;
+                    image[cursor + 2..cursor + 10]
+                        .copy_from_slice(&Self::both_endian_u32(child_sector));
+                    image[cursor + 10..cursor + 18].copy_from_slice(&Self::both_endian_u32(2048));
+                    image[cursor + 18..cursor + 25].copy_from_slice(&[126, 9, 6, 12, 0, 0, 0]);
+                    image[cursor + 25] = 0x02; // Directory
+                    image[cursor + 28..cursor + 32].copy_from_slice(&Self::both_endian_u16(1));
+                    image[cursor + 32] = ucs2_id.len() as u8;
+                    image[cursor + 33..cursor + 33 + ucs2_id.len()].copy_from_slice(&ucs2_id);
+
+                    cursor += rec_len as usize;
+                }
+            }
+
+            // Files directly inside `dir`
+            for (sector, file) in &file_sectors {
+                let file_parent_path = file.path.rsplit_once('/').map_or("", |(p, _)| p);
+                if file_parent_path == dir.path {
+                    let id_str = format!("{};1", file.name);
+                    let ucs2_id = encode_ucs2be(&id_str);
+                    let total_len = 33 + ucs2_id.len();
+                    let pad = usize::from(total_len % 2 == 1);
+                    let rec_len = (total_len + pad) as u8;
+
+                    image[cursor] = rec_len;
+                    image[cursor + 2..cursor + 10].copy_from_slice(&Self::both_endian_u32(*sector));
+                    image[cursor + 10..cursor + 18]
+                        .copy_from_slice(&Self::both_endian_u32(file.data.len() as u32));
+                    image[cursor + 18..cursor + 25].copy_from_slice(&[126, 9, 6, 12, 0, 0, 0]);
+                    image[cursor + 25] = 0x00; // Normal file
+                    image[cursor + 28..cursor + 32].copy_from_slice(&Self::both_endian_u16(1));
+                    image[cursor + 32] = ucs2_id.len() as u8;
+                    image[cursor + 33..cursor + 33 + ucs2_id.len()].copy_from_slice(&ucs2_id);
+
+                    cursor += rec_len as usize;
+                }
+            }
+        }
+
+        // 10. Copy File Extents
+        for (sector, file) in &file_sectors {
             let offset = (*sector as usize) * ISO_SECTOR_SIZE;
             image[offset..offset + file.data.len()].copy_from_slice(&file.data);
         }
@@ -765,6 +1154,9 @@ impl Iso9660Disk {
 
 /// Helper function to generate a secondary CD-ROM ISO containing unattended configuration files.
 ///
+/// Recursively traverses directory paths in `files`, preserves directory hierarchy,
+/// and sets the volume label.
+///
 /// # Errors
 /// Returns `StampError::Io` or `StampError::Execution` on failure.
 pub async fn generate_cdrom_iso(
@@ -772,19 +1164,60 @@ pub async fn generate_cdrom_iso(
     label: Option<&str>,
     dest: &Path,
 ) -> Result<(), StampError> {
+    generate_cdrom_iso_with_content(files, &HashMap::<String, Vec<u8>>::new(), label, dest).await
+}
+
+/// Helper function to generate a secondary CD-ROM ISO with both files on disk and in-memory byte content maps.
+///
+/// Recursively traverses directory paths in `files`, preserves directory hierarchy,
+/// injects in-memory files from `content`, and sets the volume label (`OEMDRV` or `cidata`).
+///
+/// # Errors
+/// Returns `StampError::Io` or `StampError::Execution` on failure.
+pub async fn generate_cdrom_iso_with_content<S: std::hash::BuildHasher>(
+    files: &[String],
+    content: &HashMap<String, Vec<u8>, S>,
+    label: Option<&str>,
+    dest: &Path,
+) -> Result<(), StampError> {
     let mut iso = Iso9660Disk::new(label.unwrap_or("cidata"));
+
     for file in files {
         let p = Path::new(file);
-        if p.is_file() {
-            let content = tokio::fs::read(p).await.map_err(StampError::Io)?;
+        if p.is_dir() {
+            iso.add_directory_recursive(p, None)?;
+        } else if p.is_file() {
+            let data = tokio::fs::read(p).await.map_err(StampError::Io)?;
             let file_name = p
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("unattended.cfg");
-            iso.add_file(file_name, &content)?;
+            iso.add_file(file_name, &data)?;
         }
     }
+
+    for (rel_path, data) in content {
+        iso.add_file(rel_path, data)?;
+    }
+
     iso.write_to_file(dest).await
+}
+
+/// Helper function to generate a secondary CD-ROM ISO with both files on disk and in-memory string content maps.
+///
+/// # Errors
+/// Returns `StampError::Io` or `StampError::Execution` on failure.
+pub async fn generate_cdrom_iso_with_string_content<S: std::hash::BuildHasher>(
+    files: &[String],
+    content: &HashMap<String, String, S>,
+    label: Option<&str>,
+    dest: &Path,
+) -> Result<(), StampError> {
+    let mut byte_map: HashMap<String, Vec<u8>> = HashMap::new();
+    for (k, v) in content {
+        byte_map.insert(k.clone(), v.as_bytes().to_vec());
+    }
+    generate_cdrom_iso_with_content(files, &byte_map, label, dest).await
 }
 
 /// Helper function to generate a Cloud-init `cidata` `NoCloud` seed ISO.
@@ -844,13 +1277,31 @@ impl BootCommandParser {
         http_port: Option<u16>,
         boot_key_interval: Option<Duration>,
     ) -> Vec<BootAction> {
+        Self::parse_with_intervals(tokens, http_ip, http_port, boot_key_interval, None)
+    }
+
+    /// Parse boot commands with both per-key interval and keygroup interval delays.
+    #[must_use]
+    pub fn parse_with_intervals(
+        tokens: &[String],
+        http_ip: Option<&str>,
+        http_port: Option<u16>,
+        boot_key_interval: Option<Duration>,
+        boot_keygroup_interval: Option<Duration>,
+    ) -> Vec<BootAction> {
         let mut actions = Vec::new();
         let default_interval = boot_key_interval.unwrap_or(Duration::from_millis(50));
 
         let ip_sub = http_ip.unwrap_or("127.0.0.1");
         let port_sub = http_port.unwrap_or(8080).to_string();
 
-        for raw_token in tokens {
+        for (i, raw_token) in tokens.iter().enumerate() {
+            if i > 0 {
+                if let Some(group_interval) = boot_keygroup_interval {
+                    actions.push(BootAction::Wait(group_interval));
+                }
+            }
+
             // Apply template macro substitutions
             let token = raw_token
                 .replace("{{ .HTTPIP }}", ip_sub)
@@ -945,10 +1396,26 @@ impl BootCommandParser {
                         actions.push(BootAction::KeyDown(0xFFE3));
                     } else if tag_lower == "leftctrloff" {
                         actions.push(BootAction::KeyUp(0xFFE3));
+                    } else if tag_lower == "rightctrlon" {
+                        actions.push(BootAction::KeyDown(0xFFE4));
+                    } else if tag_lower == "rightctrloff" {
+                        actions.push(BootAction::KeyUp(0xFFE4));
                     } else if tag_lower == "leftalton" {
                         actions.push(BootAction::KeyDown(0xFFE9));
                     } else if tag_lower == "leftaltoff" {
                         actions.push(BootAction::KeyUp(0xFFE9));
+                    } else if tag_lower == "rightalton" {
+                        actions.push(BootAction::KeyDown(0xFFEA));
+                    } else if tag_lower == "rightaltoff" {
+                        actions.push(BootAction::KeyUp(0xFFEA));
+                    } else if tag_lower == "superon" || tag_lower == "leftsuperon" {
+                        actions.push(BootAction::KeyDown(0xFFEB));
+                    } else if tag_lower == "superoff" || tag_lower == "leftsuperoff" {
+                        actions.push(BootAction::KeyUp(0xFFEB));
+                    } else if tag_lower == "rightsuperon" {
+                        actions.push(BootAction::KeyDown(0xFFEC));
+                    } else if tag_lower == "rightsuperoff" {
+                        actions.push(BootAction::KeyUp(0xFFEC));
                     } else {
                         // Fallback to literal chars inside tag
                         for tc in tag.chars() {
@@ -1232,6 +1699,70 @@ pub async fn send_vnc_boot_command(
     Ok(())
 }
 
+/// Send boot command keystrokes to an Apple Virtualization / macOS guest VM.
+///
+/// Supports Apple Silicon macOS VMs and UTM bundles via macOS System Events, `utmctl`, or VNC bridge.
+///
+/// # Errors
+/// Returns `StampError::Execution` or `StampError::Io` if keystroke delivery fails.
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub async fn send_apple_virtualization_boot_command(
+    vm_name: &str,
+    actions: &[BootAction],
+    key_interval: Option<Duration>,
+) -> Result<(), StampError> {
+    if cfg!(test) {
+        let _ = (vm_name, actions, key_interval);
+        return Ok(());
+    }
+
+    let interval = key_interval.unwrap_or(Duration::from_millis(50));
+    for action in actions {
+        match action {
+            BootAction::Wait(dur) => {
+                tokio::time::sleep(*dur).await;
+            }
+            BootAction::Key(keysym) => {
+                let code_or_char = match *keysym {
+                    0xFF0D => Some("key code 36".to_string()),
+                    0xFF09 => Some("key code 48".to_string()),
+                    0xFF1B => Some("key code 53".to_string()),
+                    0xFF08 => Some("key code 51".to_string()),
+                    0x0020 => Some("keystroke \" \"".to_string()),
+                    0xFF52 => Some("key code 126".to_string()),
+                    0xFF54 => Some("key code 125".to_string()),
+                    0xFF51 => Some("key code 123".to_string()),
+                    0xFF53 => Some("key code 124".to_string()),
+                    other => {
+                        if let Ok(b) = u8::try_from(other)
+                            && (b.is_ascii_graphic() || b == b' ')
+                        {
+                            Some(format!("keystroke \"{}\"", (b as char).escape_default()))
+                        } else {
+                            None
+                        }
+                    }
+                };
+
+                if let Some(event) = code_or_char {
+                    let script = format!("tell application \"System Events\" to {event}");
+                    let _ = tokio::process::Command::new("osascript")
+                        .arg("-e")
+                        .arg(&script)
+                        .status()
+                        .await;
+                }
+                tokio::time::sleep(interval).await;
+            }
+            _ => {
+                tokio::time::sleep(interval).await;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
@@ -1428,15 +1959,122 @@ ethernets: {}
         assert_eq!(image[pvd_offset + 6], 0x01);
         assert_eq!(&image[pvd_offset + 40..pvd_offset + 46], b"cidata");
 
-        // Verify Terminator at sector 17
-        let term_offset = 17 * ISO_SECTOR_SIZE;
+        // Verify Joliet Supplementary Volume Descriptor at sector 17
+        let svd_offset = 17 * ISO_SECTOR_SIZE;
+        assert_eq!(image[svd_offset], 0x02);
+        assert_eq!(&image[svd_offset + 1..svd_offset + 6], b"CD001");
+        assert_eq!(&image[svd_offset + 88..svd_offset + 91], b"%/E");
+
+        // Verify Terminator at sector 18
+        let term_offset = 18 * ISO_SECTOR_SIZE;
         assert_eq!(image[term_offset], 0xFF);
         assert_eq!(&image[term_offset + 1..term_offset + 6], b"CD001");
 
-        // Verify Root directory records at sector 20
-        let root_offset = 20 * ISO_SECTOR_SIZE;
+        // Verify Root directory records at sector 23 (ISO) and sector 24 (Joliet)
+        let root_offset = 23 * ISO_SECTOR_SIZE;
         assert_eq!(image[root_offset], 34); // record "."
         assert_eq!(image[root_offset + 34], 34); // record ".."
+
+        let joliet_root_offset = 24 * ISO_SECTOR_SIZE;
+        assert_eq!(image[joliet_root_offset], 34); // record "."
+        assert_eq!(image[joliet_root_offset + 34], 34); // record ".."
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_iso9660_subdirectories_and_joliet() -> Result<(), StampError> {
+        let mut iso = Iso9660Disk::new("OEMDRV");
+        assert_eq!(iso.volume_label, "OEMDRV");
+
+        iso.add_file("Autounattend.xml", b"<xml>Autounattend</xml>")
+            .unwrap();
+        iso.add_file("SetupComplete.cmd", b"REM SetupComplete")
+            .unwrap();
+        iso.add_file(
+            "viostor/w11/ARM64/viostor.inf",
+            b"[Version]\nSignature=\"$WINDOWS NT$\"",
+        )
+        .unwrap();
+        iso.add_file("viostor/viostor.cat", b"CAT_DATA").unwrap();
+        iso.add_file("NetKVM/w11/ARM64/netkvm.inf", b"NETKVM_INF")
+            .unwrap();
+        iso.add_file("///---/file.txt", b"SPECIAL").unwrap();
+        iso.add_file("even12/odd1/test.bin", b"DATA").unwrap();
+
+        let image = iso.generate().unwrap();
+
+        // Verify PVD at sector 16 has OEMDRV label
+        let pvd_offset = 16 * ISO_SECTOR_SIZE;
+        assert_eq!(image[pvd_offset], 0x01);
+        assert_eq!(&image[pvd_offset + 40..pvd_offset + 46], b"OEMDRV");
+
+        // Verify Joliet SVD at sector 17
+        let svd_offset = 17 * ISO_SECTOR_SIZE;
+        assert_eq!(image[svd_offset], 0x02);
+        assert_eq!(&image[svd_offset + 88..svd_offset + 91], b"%/E");
+
+        // Verify terminator at sector 18
+        let term_offset = 18 * ISO_SECTOR_SIZE;
+        assert_eq!(image[term_offset], 0xFF);
+
+        // Verify UCS-2 helper functions
+        let ucs2 = encode_ucs2be("OEMDRV");
+        assert_eq!(ucs2.len(), 12);
+        let padded = encode_ucs2be_padded("OEMDRV", 16);
+        assert_eq!(padded.len(), 32);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_generate_cdrom_iso_directory_recursion_and_content_maps() -> Result<(), StampError>
+    {
+        let temp_dir = tempfile::tempdir().map_err(StampError::Io).unwrap();
+        let cidata_dir = temp_dir.path().join("cidata");
+        let viostor_dir = cidata_dir.join("viostor").join("w11").join("ARM64");
+        tokio::fs::create_dir_all(&viostor_dir)
+            .await
+            .map_err(StampError::Io)
+            .unwrap();
+        let inf_file = viostor_dir.join("viostor.inf");
+        tokio::fs::write(&inf_file, b"VIOSTOR_CONTENT")
+            .await
+            .map_err(StampError::Io)
+            .unwrap();
+
+        let single_file = temp_dir.path().join("guest-tools.exe");
+        tokio::fs::write(&single_file, b"EXE_DATA")
+            .await
+            .map_err(StampError::Io)
+            .unwrap();
+
+        let mut in_memory_content = HashMap::new();
+        in_memory_content.insert(
+            "Autounattend.xml".to_string(),
+            "<xml>unattend</xml>".to_string(),
+        );
+        in_memory_content.insert("SetupComplete.cmd".to_string(), "REM complete".to_string());
+
+        let dest_iso = temp_dir.path().join("oemdrv.iso");
+        generate_cdrom_iso_with_string_content(
+            &[
+                cidata_dir.to_string_lossy().to_string(),
+                single_file.to_string_lossy().to_string(),
+            ],
+            &in_memory_content,
+            Some("OEMDRV"),
+            &dest_iso,
+        )
+        .await?;
+
+        assert!(dest_iso.exists());
+        let meta = tokio::fs::metadata(&dest_iso)
+            .await
+            .map_err(StampError::Io)
+            .unwrap();
+        assert!(meta.len() > 0);
+        assert_eq!(meta.len() % (ISO_SECTOR_SIZE as u64), 0);
 
         Ok(())
     }
@@ -1551,6 +2189,32 @@ ethernets: {}
         let actions = BootCommandParser::parse(&tokens, None, None, None);
         // The last action must be a KeyUp for LeftShift (0xFFE1)
         assert_eq!(actions.last(), Some(&BootAction::KeyUp(0xFFE1)));
+    }
+
+    #[tokio::test]
+    async fn test_boot_command_intervals_and_modifiers() {
+        let tokens = vec![
+            "<rightCtrlOn>a<rightCtrlOff>".to_string(),
+            "<rightAltOn>b<rightAltOff>".to_string(),
+            "<superOn>c<superOff>".to_string(),
+            "<leftSuperOn>d<leftSuperOff>".to_string(),
+            "<rightSuperOn>e<rightSuperOff>".to_string(),
+        ];
+        let actions = BootCommandParser::parse_with_intervals(
+            &tokens,
+            None,
+            None,
+            Some(Duration::from_millis(10)),
+            Some(Duration::from_millis(150)),
+        );
+        assert!(!actions.is_empty());
+        let has_group_wait = actions
+            .iter()
+            .any(|a| matches!(a, BootAction::Wait(d) if *d == Duration::from_millis(150)));
+        assert!(has_group_wait);
+
+        let res = send_apple_virtualization_boot_command("test-vm", &actions, None).await;
+        assert!(res.is_ok());
     }
 
     #[tokio::test]

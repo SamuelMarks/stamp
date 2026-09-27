@@ -112,6 +112,7 @@ pub fn parse_json<S: ::std::hash::BuildHasher>(
             name,
             depends_on: b.depends_on,
             config,
+            expressions: std::collections::HashMap::new(),
         });
     }
 
@@ -130,6 +131,7 @@ pub fn parse_json<S: ::std::hash::BuildHasher>(
             only: p.only,
             except: p.except,
             config,
+            expressions: std::collections::HashMap::new(),
         });
     }
 
@@ -148,6 +150,7 @@ pub fn parse_json<S: ::std::hash::BuildHasher>(
             only: p.only,
             except: p.except,
             config,
+            expressions: std::collections::HashMap::new(),
         });
     }
 
@@ -167,6 +170,7 @@ pub fn parse_json<S: ::std::hash::BuildHasher>(
             only: p.only,
             except: p.except,
             config,
+            expressions: std::collections::HashMap::new(),
         });
     }
 

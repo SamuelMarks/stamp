@@ -78,10 +78,30 @@ impl ProvisionHook for DefaultProvisionHook {
     async fn run_provisioners(
         &self,
         comm: Arc<dyn Communicator>,
-        _ctx: &BuildContext,
+        ctx: &BuildContext,
         ui: Arc<crate::engine::ui::Ui>,
     ) -> Result<(), StampError> {
+        let matches_target = |pattern: &str, target_name: &str| -> bool {
+            pattern == target_name
+                || pattern.strip_prefix("source.") == Some(target_name)
+                || target_name.strip_prefix("source.") == Some(pattern)
+                || target_name.contains(pattern)
+                || pattern.contains(target_name)
+        };
+
         for provisioner in self.provisioners.iter() {
+            let target_name = &ctx.build_id;
+            if let Some(only) = provisioner.only() {
+                if !only.is_empty() && !only.iter().any(|o| matches_target(o, target_name)) {
+                    continue;
+                }
+            }
+            if let Some(except) = provisioner.except() {
+                if !except.is_empty() && except.iter().any(|e| matches_target(e, target_name)) {
+                    continue;
+                }
+            }
+
             provisioner.provision(comm.as_ref(), ui.clone()).await?;
         }
         Ok(())
@@ -90,10 +110,30 @@ impl ProvisionHook for DefaultProvisionHook {
     async fn run_error_cleanup_provisioners(
         &self,
         comm: Arc<dyn Communicator>,
-        _ctx: &BuildContext,
+        ctx: &BuildContext,
         ui: Arc<crate::engine::ui::Ui>,
     ) -> Result<(), StampError> {
+        let matches_target = |pattern: &str, target_name: &str| -> bool {
+            pattern == target_name
+                || pattern.strip_prefix("source.") == Some(target_name)
+                || target_name.strip_prefix("source.") == Some(pattern)
+                || target_name.contains(pattern)
+                || pattern.contains(target_name)
+        };
+
         for provisioner in self.error_cleanup_provisioners.iter() {
+            let target_name = &ctx.build_id;
+            if let Some(only) = provisioner.only() {
+                if !only.is_empty() && !only.iter().any(|o| matches_target(o, target_name)) {
+                    continue;
+                }
+            }
+            if let Some(except) = provisioner.except() {
+                if !except.is_empty() && except.iter().any(|e| matches_target(e, target_name)) {
+                    continue;
+                }
+            }
+
             provisioner.provision(comm.as_ref(), ui.clone()).await?;
         }
         Ok(())

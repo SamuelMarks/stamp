@@ -26,6 +26,14 @@ pub struct VagrantConfig {
     pub compression_level: u32,
     /// Whether to keep the input artifact files after bundling into the box. Defaults to true.
     pub keep_input_artifact: bool,
+    /// Whether to operate in passthrough mode, keeping raw uncompressed machine images for external packagers.
+    pub passthrough: bool,
+    /// Custom path for writing `_metadata.json` build metadata records.
+    pub metadata_output: Option<String>,
+    /// Optional list of builders this post-processor only applies to.
+    pub only: Option<Vec<String>>,
+    /// Optional list of builders this post-processor does not apply to.
+    pub except: Option<Vec<String>>,
 }
 
 impl Default for VagrantConfig {
@@ -37,6 +45,10 @@ impl Default for VagrantConfig {
             include: Vec::new(),
             compression_level: 6,
             keep_input_artifact: true,
+            passthrough: false,
+            metadata_output: None,
+            only: None,
+            except: None,
         }
     }
 }
@@ -53,6 +65,67 @@ impl VagrantPostProcessor {
     #[must_use]
     pub const fn new(config: VagrantConfig) -> Self {
         Self { config }
+    }
+
+    /// Creates a new `VagrantPostProcessor` from a `PostProcessorConfig`.
+    #[must_use]
+    pub fn from_post_processor_config(config: &crate::template::PostProcessorConfig) -> Self {
+        let output = config
+            .config
+            .get("output")
+            .cloned()
+            .unwrap_or_else(|| "package.box".to_string());
+        let provider_override = config.config.get("provider_override").cloned().or_else(|| {
+            if config.post_processor_type == "utm-vagrant" {
+                Some("utm".to_string())
+            } else {
+                None
+            }
+        });
+        let vagrantfile_template = config.config.get("vagrantfile_template").cloned();
+        let include = config
+            .config
+            .get("include")
+            .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+            .unwrap_or_default();
+        let compression_level = config
+            .config
+            .get("compression_level")
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(6);
+        let keep_input_artifact = config
+            .config
+            .get("keep_input_artifact")
+            .map_or(true, |v| v != "false");
+        let passthrough = config
+            .config
+            .get("passthrough")
+            .is_some_and(|v| v == "true");
+        let metadata_output = config.config.get("metadata_output").cloned();
+
+        let only = if config.only.is_empty() {
+            None
+        } else {
+            Some(config.only.clone())
+        };
+        let except = if config.except.is_empty() {
+            None
+        } else {
+            Some(config.except.clone())
+        };
+
+        Self::new(VagrantConfig {
+            output,
+            provider_override,
+            vagrantfile_template,
+            include,
+            compression_level,
+            keep_input_artifact,
+            passthrough,
+            metadata_output,
+            only,
+            except,
+        })
     }
 
     /// Infers the Vagrant provider string based on explicit configuration or input file extensions.
@@ -78,6 +151,9 @@ impl VagrantPostProcessor {
         if id_lower.contains("parallels") {
             return "parallels".to_string();
         }
+        if id_lower.contains("utm") {
+            return "utm".to_string();
+        }
 
         for file in &artifact.files {
             let path = Path::new(file);
@@ -96,9 +172,33 @@ impl VagrantPostProcessor {
             if ext_lower == "pvm" {
                 return "parallels".to_string();
             }
+            if ext_lower == "utm" || f_lower.ends_with(".utm") {
+                return "utm".to_string();
+            }
         }
 
         "virtualbox".to_string()
+    }
+
+    /// Generates Bento-compatible `_metadata.json` record content.
+    #[must_use]
+    pub fn generate_bento_metadata(&self, provider: &str, artifact: &Artifact) -> String {
+        let now = chrono::Utc::now().to_rfc3339();
+        let box_basename = Path::new(&self.config.output)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("box");
+
+        serde_json::to_string_pretty(&serde_json::json!({
+            "name": box_basename,
+            "version": "0.1.0",
+            "box_basename": box_basename,
+            "builder": artifact.id,
+            "provider": provider,
+            "files": artifact.files,
+            "timestamp": now,
+        }))
+        .unwrap_or_default()
     }
 
     /// Generates the standard `metadata.json` content for the target provider.
@@ -131,8 +231,38 @@ impl VagrantPostProcessor {
 
 #[async_trait]
 impl PostProcessor for VagrantPostProcessor {
+    fn only(&self) -> Option<&[String]> {
+        self.config.only.as_deref()
+    }
+
+    fn except(&self) -> Option<&[String]> {
+        self.config.except.as_deref()
+    }
+
     async fn process(&self, artifact: Artifact) -> Result<Artifact, StampError> {
         let provider = self.infer_provider(&artifact);
+
+        if self.config.passthrough {
+            let metadata = self.generate_bento_metadata(&provider, &artifact);
+            let meta_path = if let Some(ref p) = self.config.metadata_output {
+                std::path::PathBuf::from(p)
+            } else {
+                let out_path = Path::new(&self.config.output);
+                let parent = out_path.parent().unwrap_or_else(|| Path::new("."));
+                parent.join("_metadata.json")
+            };
+
+            if let Some(parent) = meta_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&meta_path, metadata);
+
+            return Ok(Artifact::new(
+                format!("vagrant-passthrough-{provider}"),
+                artifact.files,
+            ));
+        }
+
         let metadata_content = self.generate_metadata(&provider);
         let vagrantfile_content = self.generate_vagrantfile()?;
 
@@ -269,6 +399,7 @@ mod tests {
             include: vec![],
             compression_level: 1,
             keep_input_artifact: true,
+            ..Default::default()
         });
 
         let input_art = Artifact::new(
@@ -302,5 +433,68 @@ mod tests {
         assert!(entry_names.contains(&"disk.vmdk".to_string()));
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_vagrant_passthrough_mode() -> Result<(), StampError> {
+        let tmp_dir = tempfile::tempdir().map_err(StampError::Io)?;
+        let raw_disk = tmp_dir.path().join("disk.qcow2");
+        std::fs::write(&raw_disk, b"raw qemu disk").map_err(StampError::Io)?;
+        let meta_file = tmp_dir.path().join("_metadata.json");
+
+        let pp = VagrantPostProcessor::new(VagrantConfig {
+            output: tmp_dir
+                .path()
+                .join("bento.box")
+                .to_string_lossy()
+                .to_string(),
+            passthrough: true,
+            metadata_output: Some(meta_file.to_string_lossy().to_string()),
+            only: Some(vec!["source.qemu.vm".to_string()]),
+            except: None,
+            ..Default::default()
+        });
+
+        assert_eq!(pp.only(), Some(&["source.qemu.vm".to_string()][..]));
+        assert_eq!(pp.except(), None);
+
+        let input_art = Artifact::new(
+            "qemu".to_string(),
+            vec![raw_disk.to_string_lossy().to_string()],
+        );
+
+        let out_art = pp.process(input_art).await?;
+        assert_eq!(out_art.id, "vagrant-passthrough-qemu");
+        assert_eq!(out_art.files.len(), 1);
+        assert_eq!(out_art.files[0], raw_disk.to_string_lossy().to_string());
+        assert!(meta_file.exists());
+
+        let meta_str = std::fs::read_to_string(&meta_file).map_err(StampError::Io)?;
+        assert!(meta_str.contains("\"builder\": \"qemu\""));
+        assert!(meta_str.contains("\"provider\": \"qemu\""));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_vagrant_utm_and_from_config() {
+        let a_utm = Artifact::new("utm".to_string(), vec!["bundle.utm".to_string()]);
+        let pp = VagrantPostProcessor::new(VagrantConfig::default());
+        assert_eq!(pp.infer_provider(&a_utm), "utm");
+
+        let mut cfg = crate::template::PostProcessorConfig {
+            post_processor_type: "utm-vagrant".to_string(),
+            only: vec!["utm-iso.vm".to_string()],
+            ..Default::default()
+        };
+        cfg.config
+            .insert("passthrough".to_string(), "true".to_string());
+        cfg.config
+            .insert("output".to_string(), "builds/utm.box".to_string());
+
+        let pp_cfg = VagrantPostProcessor::from_post_processor_config(&cfg);
+        assert_eq!(pp_cfg.config.provider_override.as_deref(), Some("utm"));
+        assert_eq!(pp_cfg.config.passthrough, true);
+        assert_eq!(pp_cfg.only(), Some(&["utm-iso.vm".to_string()][..]));
     }
 }

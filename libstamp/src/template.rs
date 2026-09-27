@@ -7,10 +7,13 @@
 use serde::{Deserialize, Serialize};
 
 /// The unified template structure.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Template {
     /// A generic description of the template.
     pub description: Option<String>,
+    /// The root path of the template directory if loaded from disk.
+    #[serde(skip)]
+    pub root_path: Option<std::path::PathBuf>,
     /// The builders defined in the template.
     #[serde(default)]
     pub builders: Vec<BuilderConfig>,
@@ -26,6 +29,12 @@ pub struct Template {
     /// The locals defined in the template.
     #[serde(default)]
     pub locals: std::collections::HashMap<String, String>,
+    /// Raw AST expressions for locals defined in the template.
+    #[serde(skip)]
+    pub local_expressions: std::collections::HashMap<
+        String,
+        hashicorp_configuration_language_rs::ast::expr::Expression,
+    >,
     /// The variables defined in the template.
     #[serde(default)]
     pub variables: std::collections::HashMap<String, VariableConfig>,
@@ -47,7 +56,7 @@ pub struct Template {
 }
 
 /// A strongly-typed configuration for a build block in HCL2.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct BuildConfig {
     /// The name of this build block if provided.
     pub name: Option<String>,
@@ -65,6 +74,12 @@ pub struct BuildConfig {
     /// The post-processors defined for this build block.
     #[serde(default)]
     pub post_processors: Vec<PostProcessorConfig>,
+    /// Raw AST expressions for dynamic runtime evaluation.
+    #[serde(skip)]
+    pub expressions: std::collections::HashMap<
+        String,
+        hashicorp_configuration_language_rs::ast::expr::Expression,
+    >,
 }
 
 /// A block representing a single test suite in HCL.
@@ -147,7 +162,7 @@ pub struct PluginConfig {
 }
 
 /// A strongly-typed configuration for a builder.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct BuilderConfig {
     /// The type of the builder (e.g., "amazon-ebs", "virtualbox-iso").
     pub builder_type: String,
@@ -159,10 +174,16 @@ pub struct BuilderConfig {
     /// Builder configuration fields.
     #[serde(flatten)]
     pub config: std::collections::HashMap<String, String>,
+    /// Raw AST expressions for dynamic runtime evaluation.
+    #[serde(skip)]
+    pub expressions: std::collections::HashMap<
+        String,
+        hashicorp_configuration_language_rs::ast::expr::Expression,
+    >,
 }
 
 /// A strongly-typed configuration for a provisioner.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ProvisionerConfig {
     /// The type of the provisioner (e.g., "shell", "ansible").
     pub provisioner_type: String,
@@ -175,10 +196,16 @@ pub struct ProvisionerConfig {
     /// Provisioner configuration fields.
     #[serde(flatten)]
     pub config: std::collections::HashMap<String, String>,
+    /// Raw AST expressions for dynamic runtime evaluation.
+    #[serde(skip)]
+    pub expressions: std::collections::HashMap<
+        String,
+        hashicorp_configuration_language_rs::ast::expr::Expression,
+    >,
 }
 
 /// A strongly-typed configuration for a post-processor.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct PostProcessorConfig {
     /// The type of the post-processor.
     pub post_processor_type: String,
@@ -194,19 +221,31 @@ pub struct PostProcessorConfig {
     /// Post-processor configuration fields.
     #[serde(flatten)]
     pub config: std::collections::HashMap<String, String>,
+    /// Raw AST expressions for dynamic runtime evaluation.
+    #[serde(skip)]
+    pub expressions: std::collections::HashMap<
+        String,
+        hashicorp_configuration_language_rs::ast::expr::Expression,
+    >,
 }
 
 /// A validation rule block inside an HCL2 variable definition.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct VariableValidation {
     /// The boolean condition expression to validate.
     pub condition: String,
     /// The error message returned if validation fails.
     pub error_message: String,
+    /// Raw condition expression AST if available.
+    #[serde(skip)]
+    pub condition_expr: Option<hashicorp_configuration_language_rs::ast::expr::Expression>,
+    /// Raw error message expression AST if available.
+    #[serde(skip)]
+    pub error_message_expr: Option<hashicorp_configuration_language_rs::ast::expr::Expression>,
 }
 
 /// A strongly-typed configuration for a variable.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct VariableConfig {
     /// The type of the variable (e.g., "string", "bool").
     #[serde(rename = "type")]
@@ -223,7 +262,7 @@ pub struct VariableConfig {
 }
 
 /// A strongly-typed configuration for a data source.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct DataSourceConfig {
     /// The type of the data source (e.g., "amazon-ami").
     pub source_type: String,
@@ -232,6 +271,12 @@ pub struct DataSourceConfig {
     /// Data source configuration fields.
     #[serde(flatten)]
     pub config: std::collections::HashMap<String, String>,
+    /// Raw AST expressions for dynamic runtime evaluation.
+    #[serde(skip)]
+    pub expressions: std::collections::HashMap<
+        String,
+        hashicorp_configuration_language_rs::ast::expr::Expression,
+    >,
 }
 
 impl Template {
@@ -240,12 +285,16 @@ impl Template {
         if other.description.is_some() {
             self.description = other.description;
         }
+        if other.root_path.is_some() {
+            self.root_path = other.root_path;
+        }
         self.builders.extend(other.builders);
         self.provisioners.extend(other.provisioners);
         self.error_cleanup_provisioners
             .extend(other.error_cleanup_provisioners);
         self.post_processors.extend(other.post_processors);
         self.locals.extend(other.locals);
+        self.local_expressions.extend(other.local_expressions);
         self.variables.extend(other.variables);
         self.data_sources.extend(other.data_sources);
         self.required_plugins.extend(other.required_plugins);
@@ -255,45 +304,58 @@ impl Template {
         self.tests.extend(other.tests);
         self.builds.extend(other.builds);
     }
-}
 
-/// Loads and merges template files or directories into a single unified `Template`.
-///
-/// If a path is a directory, it scans for `*.pkr.hcl` and `*.pkr.json` files (falling back to `*.hcl` and `*.json`)
-/// in alphabetical order, parsing and merging them all.
-///
-/// # Errors
-/// Returns `StampError` if reading or parsing any template file fails, or if a path does not exist.
-pub fn load_templates<P: AsRef<std::path::Path>, S: std::hash::BuildHasher>(
-    paths: &[P],
-    vars: &std::collections::HashMap<String, String, S>,
-) -> Result<Template, crate::error::StampError> {
-    if paths.is_empty() {
-        return Err(crate::error::StampError::Validation(
-            "At least one template file or directory must be specified".to_string(),
-        ));
-    }
-
-    let mut unified = Template::default();
-    let mut files_to_load = Vec::new();
-
-    for p in paths {
-        let path = p.as_ref();
-        if !path.exists() {
-            return Err(crate::error::StampError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Template path '{}' does not exist", path.display()),
-            )));
+    /// Loads and merges template files or directories into a single unified `Template`,
+    /// performing multi-file HCL2 AST pre-merging across all `*.pkr.hcl` files before
+    /// evaluating expressions.
+    ///
+    /// # Arguments
+    /// * `paths` - Collection of file and/or directory paths to load.
+    /// * `vars` - Map of variable overrides provided via CLI flags or var-files.
+    ///
+    /// # Errors
+    /// Returns `StampError::Validation` if no paths are provided or a directory contains no valid templates.
+    /// Returns `StampError::Io` if reading files or traversing directories fails.
+    /// Returns `StampError::Parse` if HCL syntax diagnostics or AST merge collisions occur.
+    pub fn from_files_or_dirs<P: AsRef<std::path::Path>, S: std::hash::BuildHasher>(
+        paths: &[P],
+        vars: &std::collections::HashMap<String, String, S>,
+    ) -> Result<Self, crate::error::StampError> {
+        if paths.is_empty() {
+            return Err(crate::error::StampError::Validation(
+                "At least one template file or directory must be specified".to_string(),
+            ));
         }
 
-        if path.is_dir() {
-            let mut dir_entries = Vec::new();
-            for entry in std::fs::read_dir(path)? {
-                let entry = entry?;
-                let file_path = entry.path();
-                if file_path.is_file() {
-                    let is_template =
-                        file_path
+        let mut unified = Self::default();
+        let mut hcl_files: Vec<std::path::PathBuf> = Vec::new();
+        let mut json_files: Vec<std::path::PathBuf> = Vec::new();
+        let mut root_path_candidate: Option<std::path::PathBuf> = None;
+
+        for p in paths {
+            let path = p.as_ref();
+            if !path.exists() {
+                return Err(crate::error::StampError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("Template path '{}' does not exist", path.display()),
+                )));
+            }
+
+            if root_path_candidate.is_none() {
+                if path.is_dir() {
+                    root_path_candidate = Some(path.to_path_buf());
+                } else if let Some(parent) = path.parent() {
+                    root_path_candidate = Some(parent.to_path_buf());
+                }
+            }
+
+            if path.is_dir() {
+                let mut dir_entries = Vec::new();
+                for entry in std::fs::read_dir(path)? {
+                    let entry = entry?;
+                    let file_path = entry.path();
+                    if file_path.is_file() {
+                        let is_template = file_path
                             .file_name()
                             .and_then(|n| n.to_str())
                             .is_some_and(|name| {
@@ -305,38 +367,86 @@ pub fn load_templates<P: AsRef<std::path::Path>, S: std::hash::BuildHasher>(
                                             || ext.eq_ignore_ascii_case("json")
                                     })
                             });
-                    if is_template {
-                        dir_entries.push(file_path);
+                        if is_template {
+                            dir_entries.push(file_path);
+                        }
                     }
                 }
+                dir_entries.sort();
+                if dir_entries.is_empty() {
+                    return Err(crate::error::StampError::Validation(format!(
+                        "No valid template files (*.pkr.hcl, *.pkr.json, *.hcl, *.json) found in directory '{}'",
+                        path.display()
+                    )));
+                }
+                for f in dir_entries {
+                    if f.extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+                    {
+                        json_files.push(f);
+                    } else {
+                        hcl_files.push(f);
+                    }
+                }
+            } else if path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+            {
+                json_files.push(path.to_path_buf());
+            } else {
+                hcl_files.push(path.to_path_buf());
             }
-            dir_entries.sort();
-            if dir_entries.is_empty() {
-                return Err(crate::error::StampError::Validation(format!(
-                    "No valid template files (*.pkr.hcl, *.pkr.json, *.hcl, *.json) found in directory '{}'",
-                    path.display()
-                )));
-            }
-            files_to_load.extend(dir_entries);
-        } else {
-            files_to_load.push(path.to_path_buf());
         }
-    }
 
-    for file in files_to_load {
-        let content = std::fs::read_to_string(&file)?;
-        let tmpl = if file
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
-        {
-            crate::parser::json::parse_json(&content, vars)?
-        } else {
-            crate::parser::hcl::parse_hcl(&content, vars)?
-        };
-        unified.merge(tmpl);
-    }
+        unified.root_path = root_path_candidate;
 
-    Ok(unified)
+        // Multi-file HCL AST pre-merging across all *.pkr.hcl and *.hcl files
+        if !hcl_files.is_empty() {
+            let mut file_tuples = Vec::with_capacity(hcl_files.len());
+            for hcl_file in &hcl_files {
+                let content = std::fs::read_to_string(hcl_file)?;
+                file_tuples.push((hcl_file.to_string_lossy().to_string(), content));
+            }
+            let files_ref: Vec<(&str, &str)> = file_tuples
+                .iter()
+                .map(|(name, content)| (name.as_str(), content.as_str()))
+                .collect();
+
+            let merged_body =
+                hashicorp_configuration_language_rs::parse::merge::merge_files(&files_ref)
+                    .map_err(|diags| crate::error::StampError::Parse(diags.to_string()))?;
+
+            let hcl_template = crate::parser::hcl::parse_body_to_template(&merged_body)?;
+            unified.merge(hcl_template);
+        }
+
+        // Process any legacy JSON templates
+        for json_file in json_files {
+            let content = std::fs::read_to_string(&json_file)?;
+            let json_tmpl = crate::parser::json::parse_json(&content, vars)?;
+            unified.merge(json_tmpl);
+        }
+
+        Ok(unified)
+    }
+}
+
+/// Loads and merges template files or directories into a single unified `Template`.
+///
+/// If a path is a directory, it scans for `*.pkr.hcl` and `*.pkr.json` files (falling back to `*.hcl` and `*.json`)
+/// in alphabetical order, parsing and merging them all.
+///
+/// # Arguments
+/// * `paths` - Collection of file and/or directory paths to load.
+/// * `vars` - Map of variable overrides provided via CLI flags or var-files.
+///
+/// # Errors
+/// Returns `StampError` if reading or parsing any template file fails, or if a path does not exist.
+pub fn load_templates<P: AsRef<std::path::Path>, S: std::hash::BuildHasher>(
+    paths: &[P],
+    vars: &std::collections::HashMap<String, String, S>,
+) -> Result<Template, crate::error::StampError> {
+    Template::from_files_or_dirs(paths, vars)
 }
 
 #[cfg(test)]
@@ -489,6 +599,7 @@ mod tests {
             only: vec!["amazon-ebs.example".to_string()],
             except: vec!["docker.ubuntu".to_string()],
             config: std::collections::HashMap::new(),
+            ..Default::default()
         };
         assert_eq!(provisioner.provisioner_type, "shell");
         assert_eq!(provisioner.only.len(), 1);
@@ -500,6 +611,7 @@ mod tests {
             only: vec!["amazon-ebs.example".to_string()],
             except: vec![],
             config: std::collections::HashMap::new(),
+            ..Default::default()
         };
         assert_eq!(post.post_processor_type, "manifest");
         assert!(post.keep_input_artifact);
@@ -511,6 +623,7 @@ mod tests {
             provisioners: vec![provisioner],
             error_cleanup_provisioners: vec![],
             post_processors: vec![post],
+            ..Default::default()
         };
         assert_eq!(build.name.as_deref(), Some("test-build"));
         assert_eq!(build.sources.len(), 1);
@@ -568,5 +681,138 @@ mod tests {
         if let Ok(empty_dir) = tempfile::tempdir() {
             assert!(load_templates(&[empty_dir.path()], &vars).is_err());
         }
+    }
+
+    #[test]
+    fn test_bento_multi_file_pre_merge() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dir = temp_dir.path();
+
+        let pkr_vars = dir.join("pkr-variables.pkr.hcl");
+        std::fs::write(
+            &pkr_vars,
+            r#"
+            variable "os_name" {
+                type = string
+                default = "ubuntu"
+            }
+            variable "os_arch" {
+                type = string
+                default = "x86_64"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let pkr_sources = dir.join("pkr-sources.pkr.hcl");
+        std::fs::write(
+            &pkr_sources,
+            r#"
+            locals {
+                vm_name = "${var.os_name}-${var.os_arch}"
+            }
+
+            source "qemu" "vm" {
+                vm_name = local.vm_name
+                memory = 2048
+            }
+            "#,
+        )
+        .unwrap();
+
+        let pkr_plugins = dir.join("pkr-plugins.pkr.hcl");
+        std::fs::write(
+            &pkr_plugins,
+            r#"
+            packer {
+                required_version = ">= 1.7.0"
+                required_plugins {
+                    qemu = {
+                        version = "~> 1.0"
+                        source = "github.com/hashicorp/qemu"
+                    }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+
+        let pkr_builder = dir.join("pkr-builder.pkr.hcl");
+        std::fs::write(
+            &pkr_builder,
+            r#"
+            build {
+                sources = ["source.qemu.vm"]
+                provisioner "shell" {
+                    inline = ["echo 'hello from bento'"]
+                }
+            }
+            "#,
+        )
+        .unwrap();
+
+        let vars = std::collections::HashMap::new();
+        let tmpl = Template::from_files_or_dirs(&[dir], &vars).unwrap();
+
+        assert_eq!(tmpl.variables.len(), 2);
+        assert!(tmpl.variables.contains_key("os_name"));
+        assert!(tmpl.variables.contains_key("os_arch"));
+        assert_eq!(tmpl.locals.len(), 1);
+        assert!(tmpl.locals.contains_key("vm_name"));
+        assert_eq!(tmpl.builders.len(), 1);
+        assert_eq!(tmpl.builders[0].builder_type, "qemu");
+        assert_eq!(tmpl.builders[0].name, "vm");
+        assert_eq!(tmpl.builds.len(), 1);
+        assert_eq!(tmpl.builds[0].sources, vec!["source.qemu.vm"]);
+        assert_eq!(tmpl.builds[0].provisioners.len(), 1);
+        assert_eq!(tmpl.builds[0].provisioners[0].provisioner_type, "shell");
+        assert!(tmpl.packer.is_some());
+        assert_eq!(
+            tmpl.packer.as_ref().unwrap().required_version.as_deref(),
+            Some(">= 1.7.0")
+        );
+        assert_eq!(tmpl.required_plugins.len(), 1);
+        assert_eq!(
+            tmpl.required_plugins.get("qemu").unwrap().source,
+            "github.com/hashicorp/qemu"
+        );
+        assert_eq!(tmpl.root_path.as_deref(), Some(dir));
+    }
+
+    #[test]
+    fn test_duplicate_definition_diagnostics_forwarding() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dir = temp_dir.path();
+
+        let f1 = dir.join("file1.pkr.hcl");
+        std::fs::write(
+            &f1,
+            r#"
+            variable "dup_var" {
+                default = "first"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let f2 = dir.join("file2.pkr.hcl");
+        std::fs::write(
+            &f2,
+            r#"
+            variable "dup_var" {
+                default = "second"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let vars = std::collections::HashMap::new();
+        let res = Template::from_files_or_dirs(&[dir], &vars);
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(
+            matches!(err, crate::error::StampError::Parse(ref msg) if msg.contains("Variable 'dup_var' defined multiple times")),
+            "Expected duplicate variable error, got {err:?}"
+        );
     }
 }

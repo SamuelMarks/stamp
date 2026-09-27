@@ -90,7 +90,13 @@ pub async fn handle_signals() {
 /// # Errors
 /// Returns `StampError` if the CLI command execution fails.
 pub async fn main() -> Result<(), StampError> {
-    let cli = Cli::parse();
+    let args = stamp::normalize_go_flags(std::env::args());
+    let cli = match Cli::try_parse_from(args) {
+        Ok(c) => c,
+        Err(e) => {
+            e.exit();
+        }
+    };
     let is_tty = std::io::stdout().is_terminal();
     run_cli(cli, is_tty, true).await
 }

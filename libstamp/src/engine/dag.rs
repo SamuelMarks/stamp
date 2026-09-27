@@ -45,7 +45,12 @@ pub fn resolve_dag(template: &Template) -> Result<Vec<EvalNode>, StampError> {
 
     for (name, expr_str) in &template.locals {
         let node = EvalNode::Local(name.clone());
-        let deps = extract_dependencies_from_str(expr_str);
+        let mut deps = extract_dependencies_from_str(expr_str);
+        if let Some(expr) = template.local_expressions.get(name) {
+            extract_from_expr(expr, &mut deps);
+        }
+        deps.sort_by_key(|a| a.to_string());
+        deps.dedup();
         graph.insert(node, deps);
     }
 
@@ -55,6 +60,8 @@ pub fn resolve_dag(template: &Template) -> Result<Vec<EvalNode>, StampError> {
         for expr_str in ds.config.values() {
             deps.extend(extract_dependencies_from_str(expr_str));
         }
+        deps.sort_by_key(|a| a.to_string());
+        deps.dedup();
         graph.insert(node, deps);
     }
 
@@ -64,9 +71,14 @@ pub fn resolve_dag(template: &Template) -> Result<Vec<EvalNode>, StampError> {
         for expr_str in b.config.values() {
             deps.extend(extract_dependencies_from_str(expr_str));
         }
+        for expr in b.expressions.values() {
+            extract_from_expr(expr, &mut deps);
+        }
         for dep_name in &b.depends_on {
             deps.push(EvalNode::Builder(dep_name.clone()));
         }
+        deps.sort_by_key(|a| a.to_string());
+        deps.dedup();
         graph.insert(node, deps);
     }
 
@@ -74,7 +86,8 @@ pub fn resolve_dag(template: &Template) -> Result<Vec<EvalNode>, StampError> {
     let mut visiting = HashSet::new();
     let mut visited = HashSet::new();
 
-    let nodes: Vec<EvalNode> = graph.keys().cloned().collect();
+    let mut nodes: Vec<EvalNode> = graph.keys().cloned().collect();
+    nodes.sort_by_key(|a| a.to_string());
     for node in nodes {
         visit(&node, &graph, &mut visiting, &mut visited, &mut sorted)?;
     }
@@ -382,6 +395,7 @@ mod tests {
             config: [("k".to_string(), "local.bar".to_string())]
                 .into_iter()
                 .collect(),
+            ..Default::default()
         });
         tmpl.builders.push(crate::template::BuilderConfig {
             builder_type: "null".to_string(),
@@ -390,12 +404,14 @@ mod tests {
                 .into_iter()
                 .collect(),
             depends_on: vec!["dep_b".to_string()],
+            ..Default::default()
         });
         tmpl.builders.push(crate::template::BuilderConfig {
             builder_type: "null".to_string(),
             name: "dep_b".to_string(),
             config: HashMap::new(),
             depends_on: vec![],
+            ..Default::default()
         });
 
         tmpl.locals

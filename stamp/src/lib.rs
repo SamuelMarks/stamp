@@ -37,8 +37,57 @@ pub enum PluginCommand {
     },
 }
 
+/// Normalizes command-line arguments from Go-style single-dash flags (`-flag`, `-flag=val`)
+/// into standard double-dash long flags (`--flag`, `--flag=val`) compatible with `clap`.
+///
+/// Leaves single-character short flags (e.g. `-v`, `-h`), numeric literals (e.g. `-1`),
+/// double-dash flags (`--flag`), and positional arguments intact.
+#[must_use]
+pub fn normalize_go_flags<I, T>(args: I) -> Vec<String>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<String>,
+{
+    args.into_iter()
+        .enumerate()
+        .map(|(idx, arg)| {
+            let s: String = arg.into();
+            if idx == 0 {
+                return s;
+            }
+            if s.starts_with('-') && !s.starts_with("--") && s.len() > 2 {
+                let candidate = s.trim_start_matches('-');
+                let flag_name = candidate.split('=').next().unwrap_or(candidate);
+                if !flag_name.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                    return format!("-{s}");
+                }
+            }
+            s
+        })
+        .collect()
+}
+
+/// Parses CLI arguments from an arbitrary iterator of strings after Go-style flag normalization.
+///
+/// # Errors
+/// Returns `clap::Error` if parsing fails.
+pub fn parse_cli_from<I, T>(args: I) -> Result<Cli, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<String>,
+{
+    let normalized = normalize_go_flags(args);
+    Cli::try_parse_from(normalized)
+}
+
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(
+    name = "Packer",
+    author,
+    version = "v1.11.2 (Stamp drop-in replacement)",
+    about = "Stamp image builder and Packer drop-in replacement",
+    long_about = None
+)]
 /// Main CLI struct
 pub struct Cli {
     /// Enable machine-readable output formats (e.g., CSV or JSON) for automation scripts.
@@ -95,6 +144,10 @@ pub enum Commands {
         #[arg(long)]
         /// Build only the specified builds
         only: Option<String>,
+
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        /// Control whether concurrent source targets run in parallel (default: true)
+        parallel: Option<bool>,
 
         #[arg(long)]
         /// Number of builds to run in parallel
@@ -274,6 +327,92 @@ pub enum Commands {
     },
 }
 
+/// Dispatches CLI commands and handles special flags.
+///
+/// # Arguments
+/// * `cli` - The parsed command-line interface arguments.
+/// * `is_tty` - Flag indicating if stdout is attached to an interactive terminal.
+/// * `spawn_signals` - Flag indicating if OS signal traps should be spawned.
+///
+/// # Errors
+/// Returns `StampError` if command execution fails.
+pub async fn run_cli(cli: Cli, is_tty: bool, spawn_signals: bool) -> Result<(), StampError> {
+    let _ = libstamp::utils::init_packer_logging();
+
+    if cli.autocomplete_install {
+        return handle_autocomplete_install();
+    }
+    if cli.autocomplete_uninstall {
+        return handle_autocomplete_uninstall();
+    }
+
+    if spawn_signals {
+        tokio::spawn(handle_signals());
+    }
+
+    execute_command(&cli.command, cli.machine_readable, is_tty).await
+}
+
+/// Listens for termination and interruption signals asynchronously.
+pub async fn handle_signals() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigterm = signal(SignalKind::terminate()).ok();
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!(
+                    "\n==> Signal received (SIGINT). Waiting for cleanup to complete... Press Ctrl+C again for immediate abort."
+                );
+            }
+            () = async {
+                if let Some(ref mut term) = sigterm {
+                    term.recv().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                eprintln!(
+                    "\n==> Termination signal received (SIGTERM). Waiting for cleanup to complete..."
+                );
+            }
+        }
+        if tokio::signal::ctrl_c().await.is_ok() {
+            eprintln!("\n==> Immediate abort requested. Exiting.");
+            std::process::exit(1);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            eprintln!(
+                "\n==> Signal received. Waiting for cleanup to complete... Press Ctrl+C again for immediate abort."
+            );
+            if tokio::signal::ctrl_c().await.is_ok() {
+                eprintln!("\n==> Immediate abort requested. Exiting.");
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+/// Top-level execution entrypoint parsing command line arguments and running the CLI.
+///
+/// # Errors
+/// Returns `StampError` if execution fails.
+pub async fn run() -> Result<(), StampError> {
+    use std::io::IsTerminal;
+    let args = normalize_go_flags(std::env::args());
+    let cli = match Cli::try_parse_from(args) {
+        Ok(c) => c,
+        Err(e) => {
+            e.exit();
+        }
+    };
+    let is_tty = std::io::stdout().is_terminal();
+    run_cli(cli, is_tty, true).await
+}
+
 /// Execute the core CLI logic mapped from parsed commands.
 ///
 /// # Errors
@@ -306,6 +445,7 @@ pub async fn execute_command(
             force,
             ignore_prerelease_plugins,
             on_error,
+            parallel,
             parallel_builds,
             skip_enforcement,
             timestamp_ui,
@@ -423,7 +563,10 @@ pub async fn execute_command(
                     }
                     _ => libstamp::engine::packer::OnErrorStrategy::Cleanup,
                 },
-                parallel_builds: *parallel_builds,
+                parallel_builds: match parallel {
+                    Some(false) => Some(1),
+                    _ => *parallel_builds,
+                },
                 pacing_delay: std::env::var("PACKER_BUILDER_PACING_MS")
                     .ok()
                     .and_then(|s| s.parse::<u64>().ok())
@@ -438,7 +581,8 @@ pub async fn execute_command(
                 } else {
                     libstamp::engine::packer::FeatureState::Disabled
                 },
-                use_sequential_evaluation: if *use_sequential_evaluation {
+                use_sequential_evaluation: if *use_sequential_evaluation || *parallel == Some(false)
+                {
                     libstamp::engine::packer::FeatureState::Enabled
                 } else {
                     libstamp::engine::packer::FeatureState::Disabled
@@ -554,11 +698,11 @@ pub async fn execute_command(
             }
         }
         Commands::Fix { template, validate } => {
-            println!("Fixing template: {template}");
             let config = libstamp::engine::fix::FixConfig {
                 validate: *validate,
             };
-            libstamp::engine::fix::fix_template(template, &config)?;
+            let fixed = libstamp::engine::fix::fix_template(template, &config)?;
+            print!("{fixed}");
         }
         Commands::Fmt {
             template,
