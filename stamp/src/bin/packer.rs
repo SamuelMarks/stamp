@@ -20,3 +20,24 @@ use libstamp::error::StampError;
 pub async fn main() -> Result<(), StampError> {
     stamp::run().await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Tests the packer binary execution entry point with mock args.
+    #[tokio::test]
+    async fn test_packer_main() -> Result<(), StampError> {
+        let cli = stamp::Cli {
+            command: Some(stamp::Commands::Version {
+                check_updates: false,
+                v: false,
+                machine_readable: true,
+            }),
+            machine_readable: true,
+            autocomplete_install: false,
+            autocomplete_uninstall: false,
+        };
+        stamp::run_cli(cli, false, false).await
+    }
+}

@@ -39,6 +39,3 @@ unused_async_trait_impl = "allow"
 default_constructed_unit_structs = "allow"
 manual_assert_eq = "allow"
 manual_let_else = "allow"
-
-[patch."https://github.com/SamuelMarks/hashicorp-configuration-language-rs.git"]
-hashicorp-configuration-language-rs = { path = "../hashicorp-configuration-language-rs" }
