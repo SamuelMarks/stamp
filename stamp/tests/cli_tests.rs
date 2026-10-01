@@ -10,7 +10,10 @@ use stamp::{Cli, Commands, normalize_go_flags, parse_cli_from};
 #[test]
 fn test_cli_definition_and_version_flag() {
     let args = ["stamp", "--version"];
-    let err = Cli::try_parse_from(args).unwrap_err();
+    let err = match Cli::try_parse_from(args) {
+        Ok(_) => panic!("Expected error"),
+        Err(e) => e,
+    };
     assert_eq!(err.kind(), ErrorKind::DisplayVersion);
     let output = err.to_string();
     assert!(
@@ -27,7 +30,10 @@ fn test_cli_definition_and_version_flag() {
 #[test]
 fn test_single_dash_version_flag() {
     let args = ["packer", "-version"];
-    let err = parse_cli_from(args).unwrap_err();
+    let err = match parse_cli_from(args) {
+        Ok(_) => panic!("Expected error"),
+        Err(e) => e,
+    };
     assert_eq!(err.kind(), ErrorKind::DisplayVersion);
     let output = err.to_string();
     assert!(output.contains("Packer v1.11.2"));
@@ -79,7 +85,10 @@ fn test_go_style_flags_build() {
         "packer_templates",
     ];
 
-    let cli = parse_cli_from(args).expect("Failed to parse Go-style build flags");
+    let cli = match parse_cli_from(args) {
+        Ok(r) => r,
+        Err(e) => panic!("Failed to parse Go-style build flags: {e}"),
+    };
     match cli.command {
         Some(Commands::Build {
             template,
@@ -126,7 +135,10 @@ fn test_go_style_flags_subcommands() {
         "-var-file=vars.pkrvars.hcl",
         "template.pkr.hcl",
     ];
-    let val_cli = parse_cli_from(val_args).expect("Failed to parse validate command");
+    let val_cli = match parse_cli_from(val_args) {
+        Ok(r) => r,
+        Err(e) => panic!("Failed to parse validate command: {e}"),
+    };
     match val_cli.command {
         Some(Commands::Validate {
             syntax_only,
@@ -143,7 +155,10 @@ fn test_go_style_flags_subcommands() {
 
     // Init
     let init_args = ["packer", "init", "-upgrade", "-force", "packer_templates"];
-    let init_cli = parse_cli_from(init_args).expect("Failed to parse init command");
+    let init_cli = match parse_cli_from(init_args) {
+        Ok(r) => r,
+        Err(e) => panic!("Failed to parse init command: {e}"),
+    };
     match init_cli.command {
         Some(Commands::Init {
             upgrade,
@@ -159,7 +174,10 @@ fn test_go_style_flags_subcommands() {
 
     // Fix
     let fix_args = ["packer", "fix", "-validate", "template.json"];
-    let fix_cli = parse_cli_from(fix_args).expect("Failed to parse fix command");
+    let fix_cli = match parse_cli_from(fix_args) {
+        Ok(r) => r,
+        Err(e) => panic!("Failed to parse fix command: {e}"),
+    };
     match fix_cli.command {
         Some(Commands::Fix { validate, template }) => {
             assert!(validate);

@@ -1429,9 +1429,9 @@ mod tests_err {
     }
 
     struct MockHook {
-        pre_called: std::sync::atomic::AtomicBool,
-        post_called: std::sync::atomic::AtomicBool,
-        err_called: std::sync::atomic::AtomicBool,
+        pre: std::sync::atomic::AtomicBool,
+        post: std::sync::atomic::AtomicBool,
+        err: std::sync::atomic::AtomicBool,
     }
 
     #[async_trait::async_trait]
@@ -1441,8 +1441,7 @@ mod tests_err {
             _step_name: &str,
             _state: &mut StateBag,
         ) -> Result<(), crate::error::StampError> {
-            self.pre_called
-                .store(true, std::sync::atomic::Ordering::SeqCst);
+            self.pre.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
         async fn post_step(
@@ -1450,8 +1449,7 @@ mod tests_err {
             _step_name: &str,
             _state: &mut StateBag,
         ) -> Result<(), crate::error::StampError> {
-            self.post_called
-                .store(true, std::sync::atomic::Ordering::SeqCst);
+            self.post.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
         async fn step_error(
@@ -1460,8 +1458,7 @@ mod tests_err {
             _error: &crate::error::StampError,
             _state: &mut StateBag,
         ) {
-            self.err_called
-                .store(true, std::sync::atomic::Ordering::SeqCst);
+            self.err.store(true, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -1480,33 +1477,33 @@ mod tests_err {
     #[tokio::test]
     async fn test_step_hooks_success() {
         let hook = Arc::new(MockHook {
-            pre_called: std::sync::atomic::AtomicBool::new(false),
-            post_called: std::sync::atomic::AtomicBool::new(false),
-            err_called: std::sync::atomic::AtomicBool::new(false),
+            pre: std::sync::atomic::AtomicBool::new(false),
+            post: std::sync::atomic::AtomicBool::new(false),
+            err: std::sync::atomic::AtomicBool::new(false),
         });
         let mut runner = Runner::new(vec![Box::new(SuccessStep)]).with_step_hook(hook.clone());
         let mut state = StateBag::new();
         let res = runner.run(&mut state).await;
         assert!(res.is_ok());
-        assert!(hook.pre_called.load(std::sync::atomic::Ordering::SeqCst));
-        assert!(hook.post_called.load(std::sync::atomic::Ordering::SeqCst));
-        assert!(!hook.err_called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(hook.pre.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(hook.post.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!hook.err.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[tokio::test]
     async fn test_step_hooks_failure() {
         let hook = Arc::new(MockHook {
-            pre_called: std::sync::atomic::AtomicBool::new(false),
-            post_called: std::sync::atomic::AtomicBool::new(false),
-            err_called: std::sync::atomic::AtomicBool::new(false),
+            pre: std::sync::atomic::AtomicBool::new(false),
+            post: std::sync::atomic::AtomicBool::new(false),
+            err: std::sync::atomic::AtomicBool::new(false),
         });
         let mut runner = Runner::new(vec![Box::new(ErrorStep)]).with_step_hook(hook.clone());
         let mut state = StateBag::new();
         let res = runner.run(&mut state).await;
         assert!(res.is_err());
-        assert!(hook.pre_called.load(std::sync::atomic::Ordering::SeqCst));
-        assert!(!hook.post_called.load(std::sync::atomic::Ordering::SeqCst));
-        assert!(hook.err_called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(hook.pre.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!hook.post.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(hook.err.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[tokio::test]

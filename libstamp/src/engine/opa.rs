@@ -431,6 +431,7 @@ impl OpaEvaluator {
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
 
@@ -710,7 +711,7 @@ mod tests {
         assert!(artifacts[0].state("test").is_none());
         assert!(artifacts[0].destroy().is_ok());
         let input = OpaEvaluator::prepare_input(&tmpl, &artifacts);
-        assert!(input["artifacts"].as_array().unwrap().len() == 1);
+        assert_eq!(input["artifacts"].as_array().map(|a| a.len()), Some(1));
 
         // 1. Disallowed builder type check
         let mut b = crate::template::BuilderConfig::default();
@@ -778,20 +779,24 @@ mod tests {
         let _guard = crate::utils::ENV_MUTEX
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let temp_dir = tempfile::tempdir().unwrap();
+        let temp_dir =
+            tempfile::tempdir().unwrap_or_else(|e| panic!("Failed to create tempdir: {e}"));
         let bin_dir = temp_dir.path().join("bin");
-        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir_all(&bin_dir)
+            .unwrap_or_else(|e| panic!("Failed to create bin dir: {e}"));
         let opa_script = bin_dir.join("opa");
 
         // Shell script that acts as `opa eval`
         let script_content = r#"#!/bin/sh
 printf '%s\n' '{"result":[{"expressions":[{"value":["violation message"]},{"value":false},{"value":42}]}]}'
 "#;
-        std::fs::write(&opa_script, script_content).unwrap();
+        std::fs::write(&opa_script, script_content)
+            .unwrap_or_else(|e| panic!("Failed to write script: {e}"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&opa_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&opa_script, std::fs::Permissions::from_mode(0o755))
+                .unwrap_or_else(|e| panic!("Failed to set permissions: {e}"));
         }
 
         let orig_path = std::env::var("PATH").unwrap_or_default();
@@ -799,7 +804,8 @@ printf '%s\n' '{"result":[{"expressions":[{"value":["violation message"]},{"valu
         unsafe { std::env::set_var("PATH", &new_path) };
 
         let policy_file = temp_dir.path().join("policy.rego");
-        std::fs::write(&policy_file, "package main").unwrap();
+        std::fs::write(&policy_file, "package main")
+            .unwrap_or_else(|e| panic!("Failed to write policy: {e}"));
 
         let config = OpaConfig {
             policy_paths: vec![OpaPolicyPath(policy_file)],
@@ -813,11 +819,13 @@ printf '%s\n' '{"result":[{"expressions":[{"value":["violation message"]},{"valu
         let script_fail = r#"#!/bin/sh
 exit 2
 "#;
-        std::fs::write(&opa_script, script_fail).unwrap();
+        std::fs::write(&opa_script, script_fail)
+            .unwrap_or_else(|e| panic!("Failed to write script fail: {e}"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&opa_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&opa_script, std::fs::Permissions::from_mode(0o755))
+                .unwrap_or_else(|e| panic!("Failed to set permissions: {e}"));
         }
         let res_fail = eval.evaluate_template(&Template::default(), &[]).await;
         assert!(res_fail.is_err());

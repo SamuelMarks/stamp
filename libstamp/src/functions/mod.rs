@@ -236,6 +236,7 @@ pub fn packer_functions() -> Vec<Function> {
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
 

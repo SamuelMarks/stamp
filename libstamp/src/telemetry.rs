@@ -265,6 +265,7 @@ pub async fn check_for_updates(current_version: &str) -> Result<Option<Version>,
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
 

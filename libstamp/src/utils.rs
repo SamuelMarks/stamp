@@ -368,6 +368,7 @@ pub fn init_packer_logging() -> Result<Option<String>, crate::error::StampError>
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
 

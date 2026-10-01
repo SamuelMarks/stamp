@@ -62,12 +62,12 @@ mod tests {
             image_name: "ubuntu".to_string(),
         };
         assert_eq!(config.clone(), config);
-        assert_eq!(format!("{config:?}"), format!("{:?}", config));
+        assert_eq!(format!("{config:?}"), format!("{config:?}"));
 
         let def_config = LxcConfig::default();
         assert_eq!(def_config.output_name, "");
         let builder = LxcBuilder::new(config);
-        assert_eq!(format!("{:?}", builder), format!("{:?}", builder));
+        assert_eq!(format!("{builder:?}"), format!("{builder:?}"));
     }
     use super::*;
     #[tokio::test]

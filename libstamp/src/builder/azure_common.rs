@@ -118,12 +118,12 @@ struct CreateRgBody<'a> {
 pub async fn get_azure_token(auth: &AzureAuthMethod) -> Result<String, StampError> {
     #[cfg(test)]
     {
-        return Ok(match auth {
+        Ok(match auth {
             AzureAuthMethod::ServicePrincipal { .. } => "mock-azure-sp-token".to_string(),
             AzureAuthMethod::ClientCertificate { .. } => "mock-azure-cert-token".to_string(),
             AzureAuthMethod::ManagedIdentity => "mock-azure-msi-token".to_string(),
             AzureAuthMethod::AzureCli => "mock-azure-cli-token".to_string(),
-        });
+        })
     }
 
     #[cfg(not(test))]
