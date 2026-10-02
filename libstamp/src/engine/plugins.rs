@@ -326,15 +326,38 @@ impl PluginRegistry {
 
     /// Recursive helper to scan directory.
     fn scan_dir_recursive(&mut self, dir: &Path, remaining_depth: usize) -> Result<(), StampError> {
-        if !dir.exists() || !dir.is_dir() || remaining_depth == 0 {
+        if remaining_depth == 0 {
             return Ok(());
         }
 
-        for entry in std::fs::read_dir(dir).map_err(StampError::Io)? {
-            let entry = entry.map_err(StampError::Io)?;
+        let read_dir_res = std::fs::read_dir(dir);
+        let entries = match read_dir_res {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                if !dir.is_dir() {
+                    return Ok(());
+                }
+                return Err(StampError::Io(e));
+            }
+        };
+
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(StampError::Io(e)),
+            };
             let path = entry.path();
             if path.is_dir() {
-                self.scan_dir_recursive(&path, remaining_depth - 1)?;
+                if let Err(e) = self.scan_dir_recursive(&path, remaining_depth - 1) {
+                    if let StampError::Io(ref io_err) = e {
+                        if io_err.kind() == std::io::ErrorKind::NotFound {
+                            continue;
+                        }
+                    }
+                    return Err(e);
+                }
             } else if path.is_file()
                 && let Some(name) = path.file_name().and_then(|n| n.to_str())
                 && name.starts_with("packer-plugin-")
