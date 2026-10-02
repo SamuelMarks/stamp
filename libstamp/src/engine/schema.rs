@@ -581,7 +581,7 @@ mod tests {
         for t in types {
             let cloned = t.clone();
             assert_eq!(t, cloned);
-            assert!(!format!("{t:?}").is_empty());
+            assert_ne!(format!("{t:?}"), "");
         }
     }
 }

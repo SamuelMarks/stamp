@@ -1685,7 +1685,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let shell = detect_shell();
-        assert!(!shell.is_empty());
+        assert_ne!(shell, "");
 
         let bash_profile = resolve_shell_profile("bash");
         assert!(bash_profile.is_some());

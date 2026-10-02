@@ -641,7 +641,7 @@ mod tests {
             .await
             .map_err(|e| StampError::Execution(e.to_string()))?
             .into_inner();
-        assert!(prep.errors.is_empty());
+        assert_eq!(prep.errors, Vec::<String>::new());
 
         let run = svc
             .run(tonic::Request::new(libstamp::r#gen::packer::RunRequest {
@@ -672,7 +672,7 @@ mod tests {
             .await
             .map_err(|e| StampError::Execution(e.to_string()))?
             .into_inner();
-        assert!(!prep_fail.errors.is_empty());
+        assert_ne!(prep_fail.errors, Vec::<String>::new());
 
         let run_fail = fail_svc
             .run(tonic::Request::new(libstamp::r#gen::packer::RunRequest {
@@ -699,7 +699,7 @@ mod tests {
             .await
             .map_err(|e| StampError::Execution(e.to_string()))?
             .into_inner();
-        assert!(prep.errors.is_empty());
+        assert_eq!(prep.errors, Vec::<String>::new());
 
         let prov = svc
             .provision(tonic::Request::new(
@@ -749,7 +749,7 @@ mod tests {
             .await
             .map_err(|e| StampError::Execution(e.to_string()))?
             .into_inner();
-        assert!(conf.errors.is_empty());
+        assert_eq!(conf.errors, Vec::<String>::new());
 
         let pp = svc
             .post_process(tonic::Request::new(
@@ -795,7 +795,7 @@ mod tests {
             .await
             .map_err(|e| StampError::Execution(e.to_string()))?
             .into_inner();
-        assert!(exec.errors.is_empty());
+        assert_eq!(exec.errors, Vec::<String>::new());
         let val: serde_json::Value = serde_json::from_slice(&exec.output)
             .map_err(|e| StampError::Execution(e.to_string()))?;
         assert_eq!(val["key"], "val");
@@ -809,7 +809,7 @@ mod tests {
             .await
             .map_err(|e| StampError::Execution(e.to_string()))?
             .into_inner();
-        assert!(!exec_fail.errors.is_empty());
+        assert_ne!(exec_fail.errors, Vec::<String>::new());
 
         Ok(())
     }
