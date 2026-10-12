@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Template auto-fix engine for upgrading deprecated builder and provisioner attributes.
 
 use crate::error::StampError;
@@ -191,7 +190,6 @@ pub fn fix_template(template_path: &str, config: &FixConfig) -> Result<String, S
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::all, clippy::pedantic)]
 mod tests {
     use super::*;

@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `shell_local` post-processor.
 
 use crate::error::StampError;

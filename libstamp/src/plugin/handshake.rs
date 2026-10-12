@@ -353,6 +353,45 @@ mod tests {
     }
 
     #[test]
+    fn test_display_coverage() {
+        assert_eq!(format!("{}", NetworkType::Tcp), "tcp");
+        assert_eq!(format!("{}", Protocol::Grpc), "grpc");
+
+        let mut min_var = None;
+        let mut max_var = None;
+
+        // This is safe if run serially or if we just want coverage
+        unsafe {
+            min_var = std::env::var(crate::plugin::handshake::PACKER_PLUGIN_MIN_PORT_ENV).ok();
+            max_var = std::env::var(crate::plugin::handshake::PACKER_PLUGIN_MAX_PORT_ENV).ok();
+
+            std::env::set_var(crate::plugin::handshake::PACKER_PLUGIN_MIN_PORT_ENV, "abc");
+            std::env::set_var(crate::plugin::handshake::PACKER_PLUGIN_MAX_PORT_ENV, "def");
+        }
+        let res = crate::plugin::handshake::get_bounded_port_range();
+        assert!(res.is_err());
+
+        unsafe {
+            std::env::set_var(crate::plugin::handshake::PACKER_PLUGIN_MIN_PORT_ENV, "1000");
+            std::env::set_var(crate::plugin::handshake::PACKER_PLUGIN_MAX_PORT_ENV, "def");
+        }
+        let res2 = crate::plugin::handshake::get_bounded_port_range();
+        assert!(res2.is_err());
+
+        unsafe {
+            if let Some(v) = min_var {
+                std::env::set_var(crate::plugin::handshake::PACKER_PLUGIN_MIN_PORT_ENV, v);
+            } else {
+                std::env::remove_var(crate::plugin::handshake::PACKER_PLUGIN_MIN_PORT_ENV);
+            }
+            if let Some(v) = max_var {
+                std::env::set_var(crate::plugin::handshake::PACKER_PLUGIN_MAX_PORT_ENV, v);
+            } else {
+                std::env::remove_var(crate::plugin::handshake::PACKER_PLUGIN_MAX_PORT_ENV);
+            }
+        }
+    }
+    #[test]
     fn test_protocol_display_and_parse() {
         assert_eq!(Protocol::Grpc.as_str(), "grpc");
         assert_eq!(Protocol::NetRpc.as_str(), "net/rpc");

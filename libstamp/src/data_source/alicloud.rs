@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! `alicloud_image` data source implementation.
 
 use crate::data_source::DataSource;

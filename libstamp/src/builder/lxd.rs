@@ -624,10 +624,8 @@ esac
 
         // Publish image success
         let fp = client.publish_image("c1", "my-alias").await;
-        assert!(fp.is_ok());
-        for f in fp {
-            assert!(f.starts_with("fingerprint-"));
-        }
+        let fp = fp.expect("publish_image failed");
+        assert!(fp.starts_with("fingerprint-"));
 
         // Publish image short output (fallback to alias)
         let fp_short = client.publish_image("c1", "short").await;

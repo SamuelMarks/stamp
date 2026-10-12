@@ -1,4 +1,3 @@
-#![cfg(not(tarpaulin_include))]
 //! Implementation of the `vmware-iso` builder with `vmrun` and `govc` automation drivers,
 //! `.vmx` configuration file generation with parameter injection, and guest IP discovery.
 
@@ -789,8 +788,8 @@ fn vmrun_binary() -> &'static str {
 
 #[cfg(test)]
 /// Resolves the mock `echo` binary name during unit tests.
-fn vmrun_binary() -> &'static str {
-    "echo"
+fn vmrun_binary() -> String {
+    std::env::var("VMRUN_PATH").unwrap_or_else(|_| "echo".to_string())
 }
 
 /// Execute a specific command as `vmrun` driver.
@@ -1215,7 +1214,6 @@ struct StepCreateVM {
 
 #[async_trait::async_trait]
 impl Step for StepCreateVM {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let vm_name = self
             .config
@@ -1354,7 +1352,6 @@ struct StepRunVM {
 
 #[async_trait::async_trait]
 impl Step for StepRunVM {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let vmx_path = state.get::<String>("vmx_path").cloned().unwrap_or_default();
         self.ui.say(&self.name, "Starting VMware VM...");
@@ -1411,7 +1408,6 @@ struct StepUploadTools {
 
 #[async_trait::async_trait]
 impl Step for StepUploadTools {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         if self.config.tools_mode != VmwareToolsMode::Upload {
             return Ok(StepAction::Continue);
@@ -1470,7 +1466,6 @@ struct StepProvision {
 
 #[async_trait::async_trait]
 impl Step for StepProvision {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Provisioning VMware VM...");
 
@@ -1560,7 +1555,6 @@ struct StepShutdown {
 
 #[async_trait::async_trait]
 impl Step for StepShutdown {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Shutting down VMware VM...");
         let vmx_path = state.get::<String>("vmx_path").cloned().unwrap_or_default();
@@ -1595,7 +1589,6 @@ struct StepExport {
 
 #[async_trait::async_trait]
 impl Step for StepExport {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let Some(ref format) = self.config.export_format else {
             return Ok(StepAction::Continue);
@@ -1632,7 +1625,6 @@ impl Step for StepExport {
 
 #[async_trait::async_trait]
 impl Builder for VmwareIsoBuilder {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn prepare(&self) -> Result<(), StampError> {
         if self.config.name.is_empty() {
             return Err(StampError::Parse("Name cannot be empty".to_string()));
@@ -1640,7 +1632,6 @@ impl Builder for VmwareIsoBuilder {
         Ok(())
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(
         &self,
         hook: Arc<dyn ProvisionHook>,
@@ -2024,6 +2015,52 @@ mod tests {
         assert!(vmx6.contains(r#"scsi0.virtualDev = "my_scsi""#));
     }
 
+    #[tokio::test]
+    async fn test_vmware_iso_run_without_sizes_and_ports() {
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let config = super::VmwareIsoConfig {
+            name: "test-vmware-iso-default-ports".to_string(),
+            ssh_port: None,
+            winrm_host_port: None,
+            output_directory: Some(temp_dir.path().to_string_lossy().to_string()),
+            ..Default::default()
+        };
+
+        let builder = super::VmwareIsoBuilder::new(config);
+
+        let script = temp_dir.path().join("vmrun");
+        tokio::fs::write(&script, b"#!/bin/sh\nif [ \"$1\" = \"readVariable\" ]; then echo \"127.0.0.1\"; else exit 0; fi").await.unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        unsafe {
+            std::env::set_var("VMRUN_PATH", script.to_string_lossy().to_string());
+        }
+
+        let hook = Arc::new(crate::engine::hook::DefaultProvisionHook {
+            provisioners: Arc::new(vec![]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let ui = Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+
+        builder
+            .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
+            .await
+            .unwrap();
+
+        unsafe {
+            std::env::remove_var("VMRUN_PATH");
+        }
+    }
+
     #[test]
     fn test_vmware_derived_traits() {
         let config1 = VmwareIsoConfig::default();
@@ -2298,6 +2335,11 @@ mod tests {
         builder_cfg
             .config
             .insert("shutdown_command".to_string(), "poweroff".to_string());
+        builder_cfg.config.insert(
+            "http_content".to_string(),
+            r#"{"index.html": "hello"}"#.to_string(),
+        );
+
         builder_cfg
             .config
             .insert("export_format".to_string(), "ova".to_string());

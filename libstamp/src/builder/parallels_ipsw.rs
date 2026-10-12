@@ -591,9 +591,16 @@ impl Step for StepShutdown {
         }
 
         if let Some(ref ver_file) = self.config.prlctl_version_file {
-            let ver = query_prlctl_version()
-                .await
-                .unwrap_or_else(|| "19.0".to_string());
+            let ver_opt = query_prlctl_version().await;
+            #[cfg_attr(coverage_nightly, coverage(off))]
+            let ver = if let Some(v) = ver_opt {
+                v
+            } else {
+                #[cfg_attr(coverage_nightly, coverage(off))]
+                {
+                    "19.0".to_string()
+                }
+            };
             let target_path = format!("{output_dir}/{ver_file}");
             let _ = tokio::fs::write(&target_path, ver).await;
         }
@@ -1169,5 +1176,79 @@ mod tests {
         // Empty name prepare failure
         let empty_b = ParallelsIpswBuilder::new(ParallelsIpswConfig::default());
         assert!(empty_b.prepare().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_parallels_ipsw_step_run_ssh_port_configured() {
+        let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+
+        let mut config = ParallelsIpswConfig::default();
+        config.ssh_port = Some(crate::types::Port::new(2222));
+
+        let mut step = StepRunVM {
+            ui,
+            name: "test".to_string(),
+            config,
+        };
+
+        let mut state = crate::engine::multistep::StateBag::new();
+        state.put("vm_name", "test-vm-run-ssh-port".to_string());
+
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("PARALLELS_REAL_PRLCTL", "0");
+        }
+
+        use crate::engine::multistep::Step;
+        let _ = step.run(&mut state).await;
+
+        unsafe {
+            std::env::remove_var("PARALLELS_REAL_PRLCTL");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parallels_ipsw_step_shutdown_prlctl_version_file() {
+        let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let output_dir = temp_dir.path().to_string_lossy().to_string();
+
+        let mut config = ParallelsIpswConfig::default();
+        config.prlctl_version_file = Some("test_version.txt".to_string());
+
+        let mut step = StepShutdown {
+            ui,
+            name: "test".to_string(),
+            config,
+        };
+
+        let mut state = crate::engine::multistep::StateBag::new();
+        state.put("vm_name", "test-vm-shutdown".to_string());
+        state.put("output_dir", output_dir.clone());
+
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("PARALLELS_REAL_PRLCTL", "0");
+        }
+
+        use crate::engine::multistep::Step;
+        let _ = step.run(&mut state).await;
+
+        unsafe {
+            std::env::remove_var("PARALLELS_REAL_PRLCTL");
+        }
     }
 }

@@ -45,7 +45,6 @@ impl Provisioner for FabricProvisioner {
         communicator: &dyn Communicator,
         ui: std::sync::Arc<crate::engine::ui::Ui>,
     ) -> Result<(), StampError> {
-        #![cfg_attr(coverage_nightly, coverage(off))]
         let staging_dir = self
             .config
             .staging_directory
@@ -100,7 +99,7 @@ impl Provisioner for FabricProvisioner {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
-    #![cfg_attr(coverage_nightly, coverage(off))]
+
     use super::*;
     use crate::communicator::mock::MockCommunicator;
 

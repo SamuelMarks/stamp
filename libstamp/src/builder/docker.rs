@@ -383,7 +383,6 @@ struct StepFlattenContainer {
 
 #[async_trait::async_trait]
 impl Step for StepFlattenContainer {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         if !self.config.flatten {
             return Ok(StepAction::Continue);
@@ -444,7 +443,6 @@ struct StepPushContainer {
 
 #[async_trait::async_trait]
 impl Step for StepPushContainer {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let Some(ref repo) = self.config.repository else {
             return Ok(StepAction::Continue);
@@ -634,7 +632,6 @@ Do you want to clean up? [y/N]: ",
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;

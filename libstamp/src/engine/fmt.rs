@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Canonical HCL2 formatter delegating to `hashicorp_configuration_language_rs`.
 
 use std::fmt::Write as _;
@@ -39,7 +38,6 @@ pub fn generate_diff(old: &str, new: &str) -> String {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;

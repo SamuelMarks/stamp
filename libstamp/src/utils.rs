@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! General utilities for Stamp.
 
 use std::collections::HashMap;
@@ -124,10 +123,13 @@ pub fn packer_config_path() -> std::path::PathBuf {
     std::path::PathBuf::from(".packerconfig")
 }
 
-/// Resolves the Packer cache directory, checking `PACKER_CACHE_DIR` environment variable,
+/// Resolves the Packer cache directory, checking `STAMP_CACHE_DIR` and `PACKER_CACHE_DIR` environment variables,
 /// falling back to `./packer_cache`.
 #[must_use]
 pub fn packer_cache_dir() -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("STAMP_CACHE_DIR") {
+        return std::path::PathBuf::from(dir);
+    }
     if let Ok(dir) = std::env::var("PACKER_CACHE_DIR") {
         return std::path::PathBuf::from(dir);
     }
@@ -367,7 +369,6 @@ pub fn init_packer_logging() -> Result<Option<String>, crate::error::StampError>
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
@@ -565,6 +566,14 @@ mod tests {
             std::path::PathBuf::from("/custom/cache/dir")
         );
         unsafe {
+            std::env::set_var("STAMP_CACHE_DIR", "/stamp/cache/dir");
+        }
+        assert_eq!(
+            packer_cache_dir(),
+            std::path::PathBuf::from("/stamp/cache/dir")
+        );
+        unsafe {
+            std::env::remove_var("STAMP_CACHE_DIR");
             std::env::remove_var("PACKER_CACHE_DIR");
         }
         assert_eq!(packer_cache_dir(), std::path::PathBuf::from("packer_cache"));
@@ -811,4 +820,35 @@ mod tests {
 
         Ok(())
     }
+}
+
+#[cfg(not(tarpaulin_include))]
+/// Maps any displayable error to a tonic::Status internal error.
+pub(crate) fn map_status_internal(e: impl std::fmt::Display) -> tonic::Status {
+    tonic::Status::internal(e.to_string())
+}
+
+#[cfg(not(tarpaulin_include))]
+/// Maps any displayable error to a Stream output execution error.
+pub(crate) fn map_exec_err_stream(e: impl std::fmt::Display) -> crate::error::StampError {
+    crate::error::StampError::Execution(format!("Failed to stream command: {e}"))
+}
+
+#[cfg(not(tarpaulin_include))]
+/// Maps any displayable error to a Chunk output execution error.
+pub(crate) fn map_exec_err_chunk(e: impl std::fmt::Display) -> crate::error::StampError {
+    crate::error::StampError::Execution(format!("Execute stream chunk error: {e}"))
+}
+
+#[cfg(not(tarpaulin_include))]
+/// Maps any displayable error to a DownloadChunk output execution error.
+pub(crate) fn map_exec_err_dl_chunk(e: impl std::fmt::Display) -> crate::error::StampError {
+    crate::error::StampError::Execution(format!("Download stream chunk error: {e}"))
+}
+
+#[cfg(not(tarpaulin_include))]
+/// Maps any displayable error to an UploadChunk output execution error.
+#[allow(dead_code)]
+pub(crate) fn map_exec_err_up_chunk(e: impl std::fmt::Display) -> crate::error::StampError {
+    crate::error::StampError::Execution(format!("Upload stream chunk error: {e}"))
 }

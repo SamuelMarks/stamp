@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Shared strong types, filesystem generators, and drivers for Virtualization builders.
 //!
 //! Provides in-memory FAT12 Virtual Floppy Disk (VFD) generation, ISO9660 / Cloud-Init
@@ -803,23 +802,16 @@ impl Iso9660Disk {
             } else {
                 let id_bytes = encode_ucs2be(&dir.name);
                 let len = id_bytes.len() as u8;
-                let pad = usize::from(len % 2 == 1);
 
                 path_table_l_joliet.extend_from_slice(&[len, 0]);
                 path_table_l_joliet.extend_from_slice(&extent.to_le_bytes());
                 path_table_l_joliet.extend_from_slice(&parent.to_le_bytes());
                 path_table_l_joliet.extend_from_slice(&id_bytes);
-                if pad > 0 {
-                    path_table_l_joliet.push(0);
-                }
 
                 path_table_m_joliet.extend_from_slice(&[len, 0]);
                 path_table_m_joliet.extend_from_slice(&extent.to_be_bytes());
                 path_table_m_joliet.extend_from_slice(&parent.to_be_bytes());
                 path_table_m_joliet.extend_from_slice(&id_bytes);
-                if pad > 0 {
-                    path_table_m_joliet.push(0);
-                }
             }
         }
 
@@ -1525,7 +1517,7 @@ impl KeyboardLayout {
 ///
 /// # Errors
 /// Returns `StampError::Execution` or `StampError::Io` if connection or typing fails.
-#[cfg_attr(coverage_nightly, coverage(off))]
+#[cfg(not(tarpaulin_include))]
 pub async fn send_spice_boot_command(
     spice_addr: &str,
     password: Option<&str>,
@@ -1559,7 +1551,7 @@ pub async fn send_spice_boot_command(
 ///
 /// # Errors
 /// Returns `StampError::Execution` or `StampError::Io` if connection or typing fails.
-#[cfg_attr(coverage_nightly, coverage(off))]
+#[cfg(not(tarpaulin_include))]
 pub async fn send_vnc_boot_command(
     vnc_addr: &str,
     password: Option<&str>,
@@ -1705,17 +1697,11 @@ pub async fn send_vnc_boot_command(
 ///
 /// # Errors
 /// Returns `StampError::Execution` or `StampError::Io` if keystroke delivery fails.
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn send_apple_virtualization_boot_command(
-    vm_name: &str,
+    _vm_name: &str,
     actions: &[BootAction],
     key_interval: Option<Duration>,
 ) -> Result<(), StampError> {
-    if cfg!(test) {
-        let _ = (vm_name, actions, key_interval);
-        return Ok(());
-    }
-
     let interval = key_interval.unwrap_or(Duration::from_millis(50));
     for action in actions {
         match action {
@@ -1746,11 +1732,13 @@ pub async fn send_apple_virtualization_boot_command(
 
                 if let Some(event) = code_or_char {
                     let script = format!("tell application \"System Events\" to {event}");
-                    let _ = tokio::process::Command::new("osascript")
-                        .arg("-e")
-                        .arg(&script)
-                        .status()
-                        .await;
+                    if !cfg!(test) {
+                        let _ = tokio::process::Command::new("osascript")
+                            .arg("-e")
+                            .arg(&script)
+                            .status()
+                            .await;
+                    }
                 }
                 tokio::time::sleep(interval).await;
             }
@@ -1764,7 +1752,6 @@ pub async fn send_apple_virtualization_boot_command(
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
@@ -2325,5 +2312,63 @@ ethernets: {}
         let dest = temp_dir.path().join("cidata_no_net.iso");
         let res = generate_cloud_init_cidata_iso(b"inst", b"user", None, &dest).await;
         assert!(res.is_ok());
+    }
+}
+
+#[cfg(test)]
+mod tests_extra {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn test_virtualization_boot_command_extra() {
+        let tokens = vec![
+            "<fakekey>".to_string(),
+            "<leftshiftoff>".to_string(),
+            "<rightshifton>".to_string(),
+            "<rightshiftoff>".to_string(),
+        ];
+        let actions = BootCommandParser::parse(&tokens, None, None, None);
+        assert!(!actions.is_empty());
+        assert_eq!(KeyboardLayout::Fr.translate_char('Z'), 'W' as u32);
+        assert_eq!(KeyboardLayout::Fr.translate_char('p'), 'p' as u32);
+    }
+
+    #[tokio::test]
+    async fn test_apple_virtualization_boot_command() {
+        let actions = vec![
+            BootAction::Wait(Duration::from_millis(1)),
+            BootAction::Key(0xFF0D),
+            BootAction::Key(0xFF09),
+            BootAction::Key(0xFF1B),
+            BootAction::Key(0xFF08),
+            BootAction::Key(0x0020),
+            BootAction::Key(0xFF52),
+            BootAction::Key(0xFF54),
+            BootAction::Key(0xFF51),
+            BootAction::Key(0xFF53),
+            BootAction::Key('a' as u32),
+            BootAction::Key(0xFFFF),
+            BootAction::KeyDown(0xFFE1),
+        ];
+        let _ = send_apple_virtualization_boot_command(
+            "test",
+            &actions,
+            Some(Duration::from_millis(1)),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_iso_builder_nested_dirs() -> Result<(), StampError> {
+        let temp_dir = tempfile::tempdir().map_err(StampError::Io)?;
+        let iso_path = temp_dir.path().join("test_nested.iso");
+        let mut iso = Iso9660Disk::new("NESTED");
+        iso.add_file("deeply/nested/dir/file.txt", b"deep")?;
+        iso.add_file("/absolute/path/file.txt", b"abs")?;
+        iso.add_file("double//slash/file.txt", b"double")?;
+        iso.write_to_file(&iso_path).await?;
+        assert!(iso_path.exists());
+        Ok(())
     }
 }

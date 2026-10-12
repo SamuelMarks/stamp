@@ -67,7 +67,6 @@ struct StepCloneVM {
 
 #[async_trait::async_trait]
 impl Step for StepCloneVM {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let vm_name = self
             .config
@@ -123,7 +122,6 @@ struct StepRunVM {
 
 #[async_trait::async_trait]
 impl Step for StepRunVM {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let vmx_path = state.get::<String>("vmx_path").cloned().unwrap_or_default();
         self.ui.say(&self.name, "Starting VMware VM...");
@@ -162,7 +160,6 @@ struct StepProvision {
 
 #[async_trait::async_trait]
 impl Step for StepProvision {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Provisioning VMware VM...");
 
@@ -224,7 +221,6 @@ struct StepShutdown {
 
 #[async_trait::async_trait]
 impl Step for StepShutdown {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Shutting down VMware VM...");
         let vmx_path = state.get::<String>("vmx_path").cloned().unwrap_or_default();
@@ -248,7 +244,6 @@ struct StepExportVmx {
 
 #[async_trait::async_trait]
 impl Step for StepExportVmx {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let Some(ref format) = self.config.export_format else {
             return Ok(StepAction::Continue);
@@ -285,7 +280,6 @@ impl Step for StepExportVmx {
 
 #[async_trait::async_trait]
 impl Builder for VmwareVmxBuilder {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn prepare(&self) -> Result<(), StampError> {
         if self.config.name.is_empty() {
             return Err(StampError::Parse("Name cannot be empty".to_string()));
@@ -293,7 +287,6 @@ impl Builder for VmwareVmxBuilder {
         Ok(())
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(
         &self,
         hook: Arc<dyn ProvisionHook>,

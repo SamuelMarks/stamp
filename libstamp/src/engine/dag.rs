@@ -1,5 +1,5 @@
 #![cfg(not(tarpaulin_include))]
-#![cfg_attr(coverage_nightly, coverage(off))]
+
 //! DAG resolution for evaluating templates in the correct dependency order.
 
 use crate::error::StampError;
@@ -350,7 +350,6 @@ pub fn resolve_builder_execution_tiers(
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::all, clippy::pedantic)]
 mod tests {
     use super::*;
@@ -365,6 +364,48 @@ mod tests {
         let mut set = HashSet::new();
         set.insert(node1.clone());
         assert!(set.contains(&node2));
+    }
+
+    #[test]
+    fn test_dag_coverage_extra_2() {
+        use hashicorp_configuration_language_rs::ast::expr::Expression;
+        use hashicorp_configuration_language_rs::number::Number;
+        use hashicorp_configuration_language_rs::span::Span;
+
+        let mut tmpl = Template::default();
+        tmpl.variables
+            .insert("v1".to_string(), crate::template::VariableConfig::default());
+
+        let mut parser = Parser::new("var.v1 + 2");
+        let expr = parser.parse_expression().unwrap();
+
+        tmpl.locals
+            .insert("my_local".to_string(), "var.v1 + 2".to_string());
+        tmpl.local_expressions
+            .insert("my_local".to_string(), expr.clone());
+
+        let mut b = crate::template::BuilderConfig::default();
+        b.name = "my_builder".to_string();
+        b.expressions.insert("k".to_string(), expr.clone());
+        tmpl.builders.push(b);
+
+        let sorted = resolve_dag(&tmpl).unwrap();
+        assert!(sorted.len() >= 2);
+
+        // test extract_dependencies_from_str fallback
+        let deps = extract_dependencies_from_str("this is not valid hcl {");
+        assert!(deps.is_empty());
+
+        let deps2 = extract_dependencies_from_str("${var.v1}");
+        assert!(!deps2.is_empty());
+
+        // test fallback on extract_from_expr
+        let mut deps_out = Vec::new();
+        extract_from_expr(
+            &Expression::Number(Number::from(42), Span::default()),
+            &mut deps_out,
+        );
+        assert!(deps_out.is_empty());
     }
 
     #[test]

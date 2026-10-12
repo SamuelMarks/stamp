@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Out-of-process plugin supervisor and lifecycle manager.
 //!
 //! Handles subprocess execution with environment isolation, process group assignment,
@@ -510,7 +509,6 @@ impl PluginSupervisor {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;

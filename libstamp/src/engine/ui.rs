@@ -1,5 +1,5 @@
 #![cfg(not(tarpaulin_include))]
-#![cfg_attr(coverage_nightly, coverage(off))]
+
 //! UI Module for standard and machine-readable output.
 
 use crate::engine::packer::FeatureState;
@@ -177,7 +177,6 @@ impl Ui {
     /// Ask a question interactively.
     /// # Errors
     /// Returns an error if reading from stdin fails.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn ask(&self, target: &str, message: &str) -> Result<String, std::io::Error> {
         use std::io::Write;
 
@@ -313,7 +312,6 @@ impl Ui {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
 

@@ -87,7 +87,6 @@ impl Provisioner for ChefClientProvisioner {
         comm: &dyn Communicator,
         ui: std::sync::Arc<crate::engine::ui::Ui>,
     ) -> Result<(), StampError> {
-        #![cfg_attr(coverage_nightly, coverage(off))]
         if self.config.server_url.is_empty() {
             return Err(StampError::Provisioner(
                 "server_url is required".to_string(),

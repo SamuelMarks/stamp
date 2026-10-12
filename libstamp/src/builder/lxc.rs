@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! LXC builder.
 use crate::builder::Builder;
 use crate::error::StampError;
@@ -54,7 +53,7 @@ impl Builder for LxcBuilder {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    #![cfg_attr(coverage_nightly, coverage(off))]
+
     #[test]
     fn test_derived_traits() {
         let config = LxcConfig {

@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Built-in asynchronous HTTP micro-server for serving `http_directory` contents
 //! (e.g. kickstart, preseed, autounattend, and cloud-init configurations) and
 //! dynamic in-memory content from `http_content`.
@@ -428,7 +427,6 @@ impl crate::engine::multistep::Step for StepHttpServer {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::all, clippy::pedantic, for_loops_over_fallibles)]
 mod tests {
     use super::*;
@@ -748,5 +746,86 @@ Host: localhost
             .with_port_range(8000, 8080);
         assert_eq!(cfg.port_range, (8000, 8080));
         assert!(cfg.content.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_http_server_ui_logging() {
+        use std::sync::Arc;
+        let ui = Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let test_file = temp_dir.path().join("test.txt");
+        tokio::fs::write(&test_file, b"hello world").await.unwrap();
+
+        let mut content_map = std::collections::HashMap::new();
+        content_map.insert("mem.txt".to_string(), b"mem content".to_vec());
+
+        let config = HttpServerConfig {
+            dir: Some(temp_dir.path().to_path_buf()),
+            content: Some(content_map),
+            bind_address: Some("127.0.0.1".to_string()),
+            port_range: (0, 0),
+        };
+
+        let server = start_http_server_advanced(&config, Some(ui), Some("test".to_string()))
+            .await
+            .unwrap();
+        let port = server.port;
+        let client = reqwest::Client::new();
+
+        // request mem.txt
+        let _ = client
+            .get(format!("http://127.0.0.1:{port}/mem.txt"))
+            .send()
+            .await;
+        // request test.txt
+        let _ = client
+            .get(format!("http://127.0.0.1:{port}/test.txt"))
+            .send()
+            .await;
+
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_step_start_http_server_no_config() {
+        use crate::engine::multistep::Step;
+        let config = HttpServerConfig {
+            dir: None,
+            content: None,
+            ..Default::default()
+        };
+        let mut step = StepHttpServer {
+            ui: Some(std::sync::Arc::new(crate::engine::ui::Ui::new(
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+            ))),
+            name: "test".to_string(),
+            config,
+        };
+
+        let mut state = crate::engine::multistep::StateBag::new();
+        let res = step.run(&mut state).await;
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_http_server_drop() {
+        let config = HttpServerConfig {
+            dir: None,
+            content: None,
+            bind_address: Some("127.0.0.1".to_string()),
+            port_range: (0, 0),
+        };
+        let server = start_http_server_advanced(&config, None, None)
+            .await
+            .unwrap();
+        // Just let it drop
+        drop(server);
     }
 }

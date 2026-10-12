@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Chroot communicator implementation.
 //!
 //! Executes commands and performs file operations directly within a local Linux
@@ -128,7 +127,9 @@ impl ChrootMountGuard {
         for &m in mounts {
             let target = root.join(m);
             if !target.exists() {
-                std::fs::create_dir_all(&target).map_err(StampError::Io)?;
+                if let Err(e) = std::fs::create_dir_all(&target) {
+                    return Err(StampError::Io(e));
+                }
             }
             mounted.push(m.to_string());
         }
@@ -173,7 +174,6 @@ impl Drop for ChrootMountGuard {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
@@ -192,7 +192,7 @@ mod tests {
         let res = comm
             .execute(&Command::new("ls -la".to_string()))
             .await
-            .unwrap_or_else(|e| panic!("{e}"));
+            .expect("execute");
         assert_eq!(res.exit_code, 0);
         assert!(res.stdout.contains("sudo chroot /mnt/chroot ls -la"));
 
@@ -200,26 +200,26 @@ mod tests {
         let res2 = comm_unwrapped
             .execute(&Command::new("whoami".to_string()))
             .await
-            .unwrap_or_else(|e| panic!("{e}"));
+            .expect("execute");
         assert_eq!(res2.exit_code, 0);
         assert!(res2.stdout.contains("chroot: whoami"));
 
         let fail_res = comm
             .execute(&Command::new("fail".to_string()))
             .await
-            .unwrap_or_else(|e| panic!("{e}"));
+            .expect("execute fail");
         assert_eq!(fail_res.exit_code, 1);
     }
 
     #[tokio::test]
     async fn test_chroot_communicator_upload_download() {
-        let tmp_dir = tempfile::tempdir().unwrap();
+        let tmp_dir = tempfile::tempdir().expect("tempdir");
         let comm = ChrootCommunicator::new(tmp_dir.path());
 
         let local_src = tmp_dir.path().join("local.txt");
         tokio::fs::write(&local_src, b"chroot test payload")
             .await
-            .unwrap();
+            .expect("write");
 
         let remote_dest = FilePath::new(PathBuf::from("/etc/test.txt"));
         assert!(
@@ -230,7 +230,7 @@ mod tests {
 
         let uploaded_path = comm.resolve_path(&remote_dest.0);
         assert!(uploaded_path.exists());
-        let content = tokio::fs::read(&uploaded_path).await.unwrap();
+        let content = tokio::fs::read(&uploaded_path).await.expect("read");
         assert_eq!(content, b"chroot test payload");
 
         let download_dest = tmp_dir.path().join("downloaded.txt");
@@ -261,7 +261,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_chroot_communicator_errors() {
-        let tmp_dir = tempfile::tempdir().unwrap();
+        let tmp_dir = tempfile::tempdir().expect("tempdir");
         let comm = ChrootCommunicator::new(tmp_dir.path());
 
         // 1. Upload missing local file
@@ -277,9 +277,9 @@ mod tests {
 
     #[test]
     fn test_chroot_mount_guard() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let mut guard =
-            ChrootMountGuard::mount(tmp_dir.path(), ChrootMountGuard::DEFAULT_MOUNTS).unwrap();
+        let tmp_dir = tempfile::tempdir().expect("tempdir");
+        let mut guard = ChrootMountGuard::mount(tmp_dir.path(), ChrootMountGuard::DEFAULT_MOUNTS)
+            .expect("mount guard");
         assert_eq!(guard.mounted_paths().len(), 4);
         assert!(tmp_dir.path().join("proc").exists());
         assert!(tmp_dir.path().join("sys").exists());
@@ -288,5 +288,23 @@ mod tests {
 
         assert!(guard.unmount().is_ok());
         assert_eq!(guard.mounted_paths().len(), 0);
+
+        // Test mount when directories already exist
+        let mut guard_existing =
+            ChrootMountGuard::mount(tmp_dir.path(), &["proc"]).expect("mount existing");
+        assert_eq!(guard_existing.mounted_paths().len(), 1);
+        assert!(guard_existing.unmount().is_ok());
+
+        // Test unmount when mounted directory was removed
+        let mut guard_missing =
+            ChrootMountGuard::mount(tmp_dir.path(), &["removed_dir"]).expect("mount removed");
+        std::fs::remove_dir(tmp_dir.path().join("removed_dir")).expect("remove dir");
+        assert!(guard_missing.unmount().is_ok());
+
+        // Test mount error when target cannot be created as a directory
+        let blocker = tmp_dir.path().join("blocker_file");
+        std::fs::write(&blocker, b"file content").expect("write blocker");
+        let err_res = ChrootMountGuard::mount(tmp_dir.path(), &["blocker_file/sub"]);
+        assert!(err_res.is_err());
     }
 }

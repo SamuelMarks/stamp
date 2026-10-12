@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `vault-secret` data source.
 //!
 //! Fetches dynamic secrets and KV values from `HashiCorp` Vault.

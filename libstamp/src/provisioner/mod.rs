@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Provisioners for modifying machine images.
 
 use crate::communicator::Communicator;
@@ -143,7 +142,6 @@ pub fn create_provisioner(config: &ProvisionerConfig) -> Result<Box<dyn Provisio
 pub mod go_plugin;
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;

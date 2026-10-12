@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! `file` / `local_file` data source implementation for reading local filesystem files.
 
 use crate::data_source::DataSource;

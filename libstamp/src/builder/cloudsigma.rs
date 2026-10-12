@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `cloudsigma` builder for `CloudSigma` API 2.0.
 //!
 //! Provides a REST client for `CloudSigma` (`https://{region}.cloudsigma.com/api/2.0/`),
@@ -560,7 +559,6 @@ impl Builder for CloudSigmaBuilder {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::pedantic, clippy::all, for_loops_over_fallibles)]
 mod tests {
     use super::*;

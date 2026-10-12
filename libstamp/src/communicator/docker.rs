@@ -1,4 +1,3 @@
-#![cfg(not(tarpaulin_include))]
 //! Native Docker communicator implementation supporting direct container execution
 //! via the Docker Engine API (`/containers/{id}/exec`), multiplexed stream decoding,
 //! and archive streaming (`/containers/{id}/archive`) for file upload and download.
@@ -296,7 +295,6 @@ impl DockerCommunicator {
     }
 
     /// Execute a command using the Docker Engine API over a UNIX domain socket.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn execute_api_unix(
         &self,
         socket_path: &Path,
@@ -462,7 +460,6 @@ impl DockerCommunicator {
     }
 
     /// Upload files using Docker archive streaming over UNIX domain socket.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn upload_archive_unix(
         &self,
         socket_path: &Path,
@@ -521,7 +518,6 @@ impl DockerCommunicator {
     }
 
     /// Download files using Docker archive streaming over UNIX domain socket.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn download_archive_unix(
         &self,
         socket_path: &Path,
@@ -568,7 +564,6 @@ impl DockerCommunicator {
     }
 
     /// CLI fallback execution for `docker exec`.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn execute_cli(&self, cmd: &Command) -> Result<CommandResult, StampError> {
         let mut args = vec!["exec".to_string(), "-i".to_string()];
         if self.config.tty {
@@ -596,7 +591,6 @@ impl DockerCommunicator {
     }
 
     /// CLI fallback file upload using `docker cp`.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn upload_cli(
         &self,
         local_path: &FilePath,
@@ -624,7 +618,6 @@ impl DockerCommunicator {
     }
 
     /// CLI fallback file download using `docker cp`.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn download_cli(
         &self,
         remote_path: &FilePath,
@@ -654,7 +647,6 @@ impl DockerCommunicator {
 
 #[async_trait]
 impl Communicator for DockerCommunicator {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     #[cfg(not(tarpaulin_include))]
     async fn execute(&self, cmd: &Command) -> Result<CommandResult, StampError> {
         if self.config.container_id.as_str() == "invalid_container" {
@@ -682,7 +674,6 @@ impl Communicator for DockerCommunicator {
         }
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     #[cfg(not(tarpaulin_include))]
     async fn upload(
         &self,
@@ -713,7 +704,6 @@ impl Communicator for DockerCommunicator {
         }
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     #[cfg(not(tarpaulin_include))]
     async fn download(
         &self,
@@ -746,7 +736,6 @@ impl Communicator for DockerCommunicator {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;

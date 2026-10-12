@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Go-plugin out-of-process provisioner RPC client.
 
 use crate::communicator::Communicator;

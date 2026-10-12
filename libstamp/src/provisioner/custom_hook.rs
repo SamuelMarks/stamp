@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! `custom-hook` provisioner.
 
 use crate::error::StampError;
@@ -49,7 +48,7 @@ impl Provisioner for CustomHookProvisioner {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
-    #![cfg_attr(coverage_nightly, coverage(off))]
+
     use super::*;
 
     #[test]

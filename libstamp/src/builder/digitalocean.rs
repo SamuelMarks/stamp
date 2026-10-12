@@ -176,7 +176,6 @@ struct StepCreateSshKey {
 
 #[async_trait::async_trait]
 impl Step for StepCreateSshKey {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Registering temporary SSH key...");
 
@@ -286,7 +285,6 @@ struct StepCreateDroplet {
 
 #[async_trait::async_trait]
 impl Step for StepCreateDroplet {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let droplet_name = format!("stamp-droplet-{}", uuid::Uuid::new_v4().simple());
         let region_str = self
@@ -426,7 +424,6 @@ struct StepProvision {
 
 #[async_trait::async_trait]
 impl Step for StepProvision {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Provisioning Droplet...");
 
@@ -496,7 +493,6 @@ struct StepPowerOffDroplet {
 
 #[async_trait::async_trait]
 impl Step for StepPowerOffDroplet {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let droplet_id = match state.get::<u64>("droplet_id") {
             Some(id) => *id,
@@ -557,7 +553,6 @@ struct StepSnapshotDroplet {
 
 #[async_trait::async_trait]
 impl Step for StepSnapshotDroplet {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let droplet_id = match state.get::<u64>("droplet_id") {
             Some(id) => *id,
@@ -671,7 +666,6 @@ struct StepTransferSnapshot {
 
 #[async_trait::async_trait]
 impl Step for StepTransferSnapshot {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let regions = self.config.resolve_regions();
         if regions.is_empty() {
@@ -723,7 +717,6 @@ impl Step for StepTransferSnapshot {
 
 #[async_trait::async_trait]
 impl Builder for DigitalOceanBuilder {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn prepare(&self) -> Result<(), StampError> {
         if self.config.name.is_empty() {
             return Err(StampError::Parse("Name cannot be empty".to_string()));
@@ -831,7 +824,6 @@ Do you want to clean up? [y/N]: ",
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::pedantic, clippy::all, for_loops_over_fallibles)]
 mod tests {
     use super::*;

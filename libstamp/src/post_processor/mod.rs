@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Post-processors for transforming build artifacts.
 
 use crate::error::StampError;
@@ -45,14 +44,8 @@ pub trait PostProcessor: Send + Sync {
 
 /// `alicloud_import` post-processor.
 pub mod alicloud_import;
-/// `amazon_ami_management` post-processor.
-pub mod amazon_ami_management;
-/// `amazon_import` post-processor.
-pub mod amazon_import;
 /// `artifactory` post-processor.
 pub mod artifactory;
-/// `azure_arm` post-processor.
-pub mod azure_arm;
 /// `checksum` post-processor.
 pub mod checksum;
 /// `compress` post-processor.
@@ -69,8 +62,6 @@ pub mod docker_push;
 pub mod docker_save;
 /// `docker_tag` post-processor.
 pub mod docker_tag;
-/// `googlecompute_export` post-processor.
-pub mod googlecompute_export;
 /// `hcp` post-processor.
 pub mod hcp;
 /// `manifest` post-processor.
@@ -109,19 +100,8 @@ pub fn create_post_processor(
         "alicloud-import" => Ok(Box::new(alicloud_import::AlicloudImportPostProcessor::new(
             alicloud_import::AlicloudImportConfig::default(),
         ))),
-        "amazon-ami-management" => Ok(Box::new(
-            amazon_ami_management::AmazonAmiManagementPostProcessor::new(
-                amazon_ami_management::AmazonAmiManagementConfig::default(),
-            ),
-        )),
-        "amazon-import" => Ok(Box::new(amazon_import::AmazonImportPostProcessor::new(
-            amazon_import::AmazonImportConfig::default(),
-        ))),
         "artifactory" => Ok(Box::new(artifactory::ArtifactoryPostProcessor::new(
             artifactory::ArtifactoryConfig::default(),
-        ))),
-        "azure-arm" | "azure-image" => Ok(Box::new(azure_arm::AzureArmPostProcessor::new(
-            azure_arm::AzureArmPostProcessorConfig::default(),
         ))),
         "checksum" => Ok(Box::new(checksum::ChecksumPostProcessor::new(
             checksum::ChecksumConfig::default(),
@@ -149,11 +129,6 @@ pub fn create_post_processor(
         "docker-tag" => Ok(Box::new(docker_tag::DockerTagPostProcessor::new(
             docker_tag::DockerTagConfig::default(),
         ))),
-        "googlecompute-export" => Ok(Box::new(
-            googlecompute_export::GooglecomputeExportPostProcessor::new(
-                googlecompute_export::GooglecomputeExportConfig::default(),
-            ),
-        )),
         "hcp" => Ok(Box::new(hcp::HcpPostProcessor::new(
             hcp::HcpPostProcessorConfig {
                 keep_input_artifact: false,
@@ -206,7 +181,6 @@ pub fn create_post_processor(
 pub mod go_plugin;
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
@@ -215,11 +189,7 @@ mod tests {
     fn test_create_post_processor_known() {
         let types = vec![
             "alicloud-import",
-            "amazon-ami-management",
-            "amazon-import",
             "artifactory",
-            "azure-arm",
-            "azure-image",
             "checksum",
             "compress",
             "digitalocean-import",
@@ -228,7 +198,6 @@ mod tests {
             "docker-push",
             "docker-save",
             "docker-tag",
-            "googlecompute-export",
             "hcp",
             "manifest",
             "shell-local",

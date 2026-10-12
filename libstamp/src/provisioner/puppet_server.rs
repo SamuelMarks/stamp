@@ -73,7 +73,6 @@ impl Provisioner for PuppetServerProvisioner {
         comm: &dyn Communicator,
         ui: std::sync::Arc<crate::engine::ui::Ui>,
     ) -> Result<(), StampError> {
-        #![cfg_attr(coverage_nightly, coverage(off))]
         let staging_dir = self
             .config
             .staging_directory

@@ -61,7 +61,6 @@ impl NullBuilder {
 #[async_trait::async_trait]
 impl Builder for NullBuilder {
     async fn prepare(&self) -> Result<(), StampError> {
-        #![cfg_attr(coverage_nightly, coverage(off))]
         if self.config.name.is_empty() {
             return Err(StampError::Parse("Name cannot be empty".to_string()));
         }
@@ -187,8 +186,8 @@ impl Builder for NullBuilder {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

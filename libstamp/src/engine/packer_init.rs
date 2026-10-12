@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Template initialization and plugin resolution (`stamp init`).
 
 use crate::error::StampError;
@@ -138,6 +137,26 @@ mod tests {
         assert!(init("nonexistent_file_xyz_123.hcl", false).await.is_err());
     }
 
+    #[test]
+    fn test_is_builtin_plugin() {
+        assert!(is_builtin_plugin("qemu"));
+        assert!(is_builtin_plugin("virtualbox"));
+        assert!(is_builtin_plugin("vmware"));
+        assert!(is_builtin_plugin("parallels"));
+        assert!(is_builtin_plugin("hyperv"));
+        assert!(is_builtin_plugin("utm"));
+        assert!(is_builtin_plugin("vagrant"));
+        assert!(is_builtin_plugin("windows-update"));
+        assert!(is_builtin_plugin("null"));
+        assert!(is_builtin_plugin("file"));
+        assert!(is_builtin_plugin("amazon"));
+        assert!(is_builtin_plugin("azure"));
+        assert!(is_builtin_plugin("googlecompute"));
+        assert!(is_builtin_plugin("docker"));
+        assert!(is_builtin_plugin("podman"));
+        assert!(!is_builtin_plugin("custom-plugin"));
+    }
+
     #[tokio::test]
     async fn test_init_hcl_template() -> Result<(), StampError> {
         let temp_dir = tempfile::tempdir().map_err(StampError::Io)?;
@@ -147,21 +166,55 @@ mod tests {
                 required_plugins {
                     mock_plug = {
                         version = ">= 1.0.0"
-                        source = "mock/amazon"
+                        source = "mock/custom_plugin"
+                    }
+                    empty_ver_plug = {
+                        version = ""
+                        source = "mock/custom"
+                    }
+                    builtin_plug = {
+                        version = "1.0.0"
+                        source = "docker"
                     }
                 }
             }
         "#;
         std::fs::write(&tmpl_path, hcl).map_err(StampError::Io)?;
+
+        // Test with PACKER_CONFIG_DIR env var to hit fallback and allow discover() to find it
+        unsafe {
+            std::env::set_var("PACKER_CONFIG_DIR", temp_dir.path());
+        }
+
         let opts = InitOptions {
             upgrade: false,
             force: false,
             skip_signature_verification: true,
-            target_dir: Some(temp_dir.path().to_path_buf()),
+            target_dir: None, // force fallback to env var
         };
         init_with_options(tmpl_path.to_str().unwrap_or_default(), &opts).await?;
-        // Run again with already installed plugin
-        init_with_options(tmpl_path.to_str().unwrap_or_default(), &opts).await?;
+
+        let opts2 = InitOptions {
+            upgrade: true,
+            force: true,
+            skip_signature_verification: true,
+            target_dir: None,
+        };
+        init_with_options(tmpl_path.to_str().unwrap_or_default(), &opts2).await?;
+
+        // Run yet again without force to hit the "already installed" branch
+        let opts3 = InitOptions {
+            upgrade: false,
+            force: false,
+            skip_signature_verification: true,
+            target_dir: None,
+        };
+        init_with_options(tmpl_path.to_str().unwrap_or_default(), &opts3).await?;
+
+        unsafe {
+            std::env::remove_var("PACKER_CONFIG_DIR");
+        }
+
         Ok(())
     }
 
@@ -174,7 +227,7 @@ mod tests {
                 "required_plugins": {
                     "mock_plug": {
                         "version": ">= 1.0.0",
-                        "source": "mock/amazon"
+                        "source": "mock/custom_plugin"
                     }
                 }
             }

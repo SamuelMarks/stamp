@@ -1,4 +1,3 @@
-#![cfg(not(tarpaulin_include))]
 //! Implementation of the `virtualbox-iso` builder with `VBoxManage` driver,
 //! hardware configuration, Guest Additions mounting, scancode typing, and OVA/OVF export.
 
@@ -879,8 +878,8 @@ fn vboxmanage_binary() -> &'static str {
 
 #[cfg(test)]
 /// Resolves the mock `echo` binary name during unit tests.
-fn vboxmanage_binary() -> &'static str {
-    "echo"
+fn vboxmanage_binary() -> String {
+    std::env::var("VBOXMANAGE_PATH").unwrap_or_else(|_| "echo".to_string())
 }
 
 /// Execute a specific command as `VBoxManage` driver with full argument and error parsing.
@@ -1195,7 +1194,6 @@ struct StepCreateVM {
 
 #[async_trait::async_trait]
 impl Step for StepCreateVM {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let vm_name = self
             .config
@@ -1606,7 +1604,6 @@ struct StepRunVM {
 
 #[async_trait::async_trait]
 impl Step for StepRunVM {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let vm_name = state.get::<String>("vm_name").cloned().unwrap_or_default();
         self.ui.say(&self.name, "Starting VirtualBox VM...");
@@ -1665,7 +1662,6 @@ struct StepUploadGuestAdditions {
 
 #[async_trait::async_trait]
 impl Step for StepUploadGuestAdditions {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         if self.config.guest_additions_mode != VBoxGuestAdditionsMode::Upload {
             return Ok(StepAction::Continue);
@@ -1730,7 +1726,6 @@ struct StepProvision {
 
 #[async_trait::async_trait]
 impl Step for StepProvision {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Provisioning VM...");
 
@@ -1820,7 +1815,6 @@ struct StepShutdown {
 
 #[async_trait::async_trait]
 impl Step for StepShutdown {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Shutting down VM...");
         let vm_name = state.get::<String>("vm_name").cloned().unwrap_or_default();
@@ -1882,7 +1876,6 @@ struct StepExport {
 
 #[async_trait::async_trait]
 impl Step for StepExport {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let vm_name = state.get::<String>("vm_name").cloned().unwrap_or_default();
         let output_dir = self
@@ -1930,7 +1923,6 @@ impl Step for StepExport {
 
 #[async_trait::async_trait]
 impl Builder for VirtualboxIsoBuilder {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn prepare(&self) -> Result<(), StampError> {
         if self.config.name.is_empty() {
             return Err(StampError::Parse("Name cannot be empty".to_string()));
@@ -1938,7 +1930,6 @@ impl Builder for VirtualboxIsoBuilder {
         Ok(())
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(
         &self,
         hook: Arc<dyn ProvisionHook>,
@@ -2079,6 +2070,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_virtualboxisobuilder_run() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let temp_dir = tempfile::tempdir();
         assert!(temp_dir.is_ok());
         for td in temp_dir {
@@ -2086,7 +2080,7 @@ mod tests {
 
             let config = VirtualboxIsoConfig {
                 name: "test-builder".to_string(),
-                vm_name: Some("test-vm".to_string()),
+                vm_name: Some("test-vm-iso".to_string()),
                 memory: Some(MemoryMb::new(2048)),
                 cpus: Some(2),
                 chipset: Some(VBoxChipset::Ich9),
@@ -2095,7 +2089,7 @@ mod tests {
                 gfx_vram_size: Some(MemoryMb::new(128)),
                 gfx_accelerate_3d: Some(true),
                 hard_drive_interface: Some(VBoxStorageBus::VirtIo),
-                nic_type: Some(VBoxNicType::VirtIO),
+                nic_type: Some(super::VBoxNicType::VirtIO),
                 network: Some("nat".to_string()),
                 serial_ports: vec![
                     VBoxSerialPort {
@@ -2150,7 +2144,7 @@ mod tests {
             let artifact = builder.run(hook, ui, OnErrorStrategy::Cleanup).await;
             assert!(artifact.is_ok());
             for art in artifact {
-                assert!(art.id().contains("test-vm.ovf"));
+                assert!(art.id().contains("test-vm-iso.ovf"));
             }
 
             assert!(builder.cancel().await.is_ok());
@@ -2159,6 +2153,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_virtualboxisobuilder_winrm_and_attach() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let temp_dir = tempfile::tempdir();
         assert!(temp_dir.is_ok());
         for td in temp_dir {
@@ -2166,7 +2163,7 @@ mod tests {
 
             let config = VirtualboxIsoConfig {
                 name: "win-builder".to_string(),
-                vm_name: Some("win-vm".to_string()),
+                vm_name: Some("win-vm-iso".to_string()),
                 communicator: Some("winrm".to_string()),
                 winrm_host_port: Some(Port::new(5985)),
                 winrm_username: Some("vagrant".to_string()),
@@ -2297,6 +2294,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_virtualbox_floppy_and_cd_attachment() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let temp_dir = tempfile::tempdir();
         assert!(temp_dir.is_ok());
         for td in temp_dir {
@@ -2307,7 +2307,7 @@ mod tests {
 
             let config = VirtualboxIsoConfig {
                 name: "vbox-test".to_string(),
-                vm_name: Some("vbox-media".to_string()),
+                vm_name: Some("vbox-media-iso".to_string()),
                 floppy_files: vec![f_path.to_string_lossy().to_string()],
                 cd_files: vec![cd_path.to_string_lossy().to_string()],
                 cd_label: Some("cidata".to_string()),
@@ -2383,6 +2383,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_virtualbox_builder_run_error_strategies() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let config = VirtualboxIsoConfig {
             name: "test-err".to_string(),
             ..Default::default()
@@ -2456,6 +2459,87 @@ mod tests {
         cfg.name = "valid".to_string();
         let b2 = VirtualboxIsoBuilder::new(cfg);
         assert!(b2.prepare().await.is_ok());
+    }
+
+    #[test]
+    fn test_vbox_iso_missing_coverage() {
+        assert_eq!(
+            super::VBoxNicType::Custom("custom-nic".to_string()).as_str(),
+            "custom-nic"
+        );
+        assert_eq!(
+            super::VBoxSerialMode::Custom("custom-uart".to_string()).as_str(),
+            "custom-uart"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_vbox_iso_run_without_sizes_and_ports() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = super::VirtualboxIsoConfig {
+            name: "test-vbox-iso-default-ports".to_string(),
+            disk_size: None,
+            vrde_port: None,
+            ssh_host_port: None,
+            winrm_host_port: None,
+            guest_additions_path: None,
+            headless: true,
+            output_directory: Some(temp_dir.path().to_string_lossy().to_string()),
+            virtualbox_version_file: Some("version.txt".to_string()),
+            ..Default::default()
+        };
+
+        let builder = super::VirtualboxIsoBuilder::new(config);
+
+        let script = temp_dir.path().join("VBoxManage");
+        tokio::fs::write(&script, b"#!/bin/sh\nexit 0")
+            .await
+            .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        unsafe {
+            std::env::set_var("VBOXMANAGE_PATH", script.to_string_lossy().to_string());
+        }
+
+        let hook = Arc::new(crate::engine::hook::DefaultProvisionHook {
+            provisioners: Arc::new(vec![]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let ui = Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+
+        builder
+            .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
+            .await
+            .unwrap();
+
+        let fake_vbox = temp_dir.path().join("VBoxManageEmpty");
+        tokio::fs::write(&fake_vbox, b"#!/bin/sh\necho r\nexit 0")
+            .await
+            .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_vbox, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        unsafe {
+            std::env::set_var("VBOXMANAGE_PATH", fake_vbox.to_string_lossy().to_string());
+        }
+        assert_eq!(super::query_vbox_version().await, None);
+
+        unsafe {
+            std::env::remove_var("VBOXMANAGE_PATH");
+        }
     }
 
     #[test]
@@ -2586,42 +2670,42 @@ mod tests {
         assert_eq!(ctl.effective_controller(), "AHCI");
 
         // VBoxNicType
-        assert_eq!(VBoxNicType::I82540EM.as_str(), "82540EM");
-        assert_eq!(VBoxNicType::VirtIO.as_str(), "virtio");
-        assert_eq!(VBoxNicType::UsbNet.as_str(), "usbnet");
-        assert_eq!(VBoxNicType::Am79C970A.as_str(), "Am79C970A");
-        assert_eq!(VBoxNicType::Am79C973.as_str(), "Am79C973");
-        assert_eq!(VBoxNicType::I82543GC.as_str(), "82543GC");
-        assert_eq!(VBoxNicType::I82545EM.as_str(), "82545EM");
+        assert_eq!(super::VBoxNicType::I82540EM.as_str(), "82540EM");
+        assert_eq!(super::VBoxNicType::VirtIO.as_str(), "virtio");
+        assert_eq!(super::VBoxNicType::UsbNet.as_str(), "usbnet");
+        assert_eq!(super::VBoxNicType::Am79C970A.as_str(), "Am79C970A");
+        assert_eq!(super::VBoxNicType::Am79C973.as_str(), "Am79C973");
+        assert_eq!(super::VBoxNicType::I82543GC.as_str(), "82543GC");
+        assert_eq!(super::VBoxNicType::I82545EM.as_str(), "82545EM");
         assert_eq!(
-            VBoxNicType::from_str("82540em").unwrap(),
-            VBoxNicType::I82540EM
+            super::VBoxNicType::from_str("82540em").unwrap(),
+            super::VBoxNicType::I82540EM
         );
         assert_eq!(
-            VBoxNicType::from_str("virtio").unwrap(),
-            VBoxNicType::VirtIO
+            super::VBoxNicType::from_str("virtio").unwrap(),
+            super::VBoxNicType::VirtIO
         );
         assert_eq!(
-            VBoxNicType::from_str("usbnet").unwrap(),
-            VBoxNicType::UsbNet
+            super::VBoxNicType::from_str("usbnet").unwrap(),
+            super::VBoxNicType::UsbNet
         );
         assert_eq!(
-            VBoxNicType::from_str("am79c970a").unwrap(),
-            VBoxNicType::Am79C970A
+            super::VBoxNicType::from_str("am79c970a").unwrap(),
+            super::VBoxNicType::Am79C970A
         );
         assert_eq!(
-            VBoxNicType::from_str("am79c973").unwrap(),
-            VBoxNicType::Am79C973
+            super::VBoxNicType::from_str("am79c973").unwrap(),
+            super::VBoxNicType::Am79C973
         );
         assert_eq!(
-            VBoxNicType::from_str("82543gc").unwrap(),
-            VBoxNicType::I82543GC
+            super::VBoxNicType::from_str("82543gc").unwrap(),
+            super::VBoxNicType::I82543GC
         );
         assert_eq!(
-            VBoxNicType::from_str("82545em").unwrap(),
-            VBoxNicType::I82545EM
+            super::VBoxNicType::from_str("82545em").unwrap(),
+            super::VBoxNicType::I82545EM
         );
-        assert_eq!(format!("{}", VBoxNicType::VirtIO), "virtio");
+        assert_eq!(format!("{}", super::VBoxNicType::VirtIO), "virtio");
 
         // VBoxSerialMode
         assert_eq!(VBoxSerialMode::Disconnected.as_str(), "disconnected");
@@ -2695,8 +2779,8 @@ mod tests {
             VBoxStorageBus::Custom("other".to_string())
         );
         assert_eq!(
-            VBoxNicType::from_str("other").unwrap(),
-            VBoxNicType::Custom("other".to_string())
+            super::VBoxNicType::from_str("other").unwrap(),
+            super::VBoxNicType::Custom("other".to_string())
         );
         assert_eq!(
             VBoxSerialMode::from_str("other").unwrap(),
@@ -2791,7 +2875,7 @@ mod tests {
         assert_eq!(cfg.gfx_vram_size, Some(MemoryMb::new(64)));
         assert_eq!(cfg.gfx_accelerate_3d, Some(true));
         assert_eq!(cfg.hard_drive_interface, Some(VBoxStorageBus::Sata));
-        assert_eq!(cfg.nic_type, Some(VBoxNicType::VirtIO));
+        assert_eq!(cfg.nic_type, Some(super::VBoxNicType::VirtIO));
         assert_eq!(cfg.network.as_deref(), Some("nat"));
         assert_eq!(cfg.ssh_host_port, Some(Port::new(2222)));
         assert_eq!(cfg.winrm_host_port, Some(Port::new(5985)));

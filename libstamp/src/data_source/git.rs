@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! `git` data source implementation for extracting Git repository commit and branch state.
 
 use crate::data_source::DataSource;
@@ -46,7 +45,13 @@ impl DataSource for GitDataSource {
         }
 
         // Read git information using git CLI
-        let commit_output = tokio::process::Command::new("git")
+        let git_bin = if cfg!(test) {
+            std::env::var("STAMP_GIT_BIN").unwrap_or_else(|_| "git".to_string())
+        } else {
+            "git".to_string()
+        };
+
+        let commit_output = tokio::process::Command::new(&git_bin)
             .arg("-C")
             .arg(&repo_dir)
             .args(["rev-parse", "HEAD"])
@@ -137,37 +142,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_git_data_source_current_repo() -> Result<(), StampError> {
+    async fn test_git_data_source_current_repo() {
         let ds = GitDataSource::new(GitDataSourceConfig {
             path: Some(".".to_string()),
         });
-        let res = ds.read().await?;
+        let res = ds.read().await.expect("read current repo");
         assert!(res.is_object());
         assert!(res.get("commit").is_some());
         assert!(res.get("abbreviated_commit").is_some());
         assert!(res.get("branch").is_some());
         assert!(res.get("is_dirty").is_some());
-        Ok(())
     }
 
     #[tokio::test]
-    async fn test_git_data_source_default_path() -> Result<(), StampError> {
+    async fn test_git_data_source_default_path() {
         let ds = GitDataSource::new(GitDataSourceConfig { path: None });
-        let res = ds.read().await?;
+        let res = ds.read().await.expect("read default path");
         assert!(res.is_object());
-        Ok(())
     }
 
     #[tokio::test]
-    async fn test_git_data_source_non_git_dir() -> Result<(), StampError> {
+    async fn test_git_data_source_non_git_dir() {
         let temp = std::env::temp_dir();
         let ds = GitDataSource::new(GitDataSourceConfig {
             path: Some(temp.to_string_lossy().to_string()),
         });
-        let res = ds.read().await?;
+        let res = ds.read().await.expect("read non git dir");
         assert!(res.is_object());
         assert_eq!(res["commit"], "0000000000000000000000000000000000000000");
-        Ok(())
     }
 
     #[tokio::test]
@@ -176,5 +178,19 @@ mod tests {
             path: Some("/nonexistent/git/repo/path/12345".to_string()),
         });
         assert!(ds.read().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_git_data_source_spawn_error() {
+        unsafe {
+            std::env::set_var("STAMP_GIT_BIN", "/nonexistent/path/to/git/binary");
+        }
+        let ds = GitDataSource::new(GitDataSourceConfig {
+            path: Some(".".to_string()),
+        });
+        assert!(ds.read().await.is_err());
+        unsafe {
+            std::env::remove_var("STAMP_GIT_BIN");
+        }
     }
 }

@@ -37,22 +37,12 @@ pub trait Builder: Send + Sync {
 
 /// `alicloud-ecs` builder.
 pub mod alicloud;
-pub mod amazon_chroot;
-pub mod amazon_common;
-pub mod amazon_ebs;
-pub mod amazon_ebssurrogate;
-pub mod amazon_ebsvolume;
-pub mod amazon_instance;
-pub mod azure_arm;
-pub mod azure_chroot;
-pub mod azure_common;
 pub mod cloudsigma;
 pub mod cloudstack;
 pub mod digitalocean;
 pub mod docker;
 pub mod file;
 pub mod go_plugin;
-pub mod googlecompute;
 pub mod hetzner_cloud;
 pub mod hyperv_iso;
 pub mod hyperv_vmcx;
@@ -117,52 +107,6 @@ fn create_raw_builder(config: &BuilderConfig) -> Result<Box<dyn Builder>, StampE
                 ..Default::default()
             },
         ))),
-        "amazon-chroot" => Ok(Box::new(amazon_chroot::AmazonChrootBuilder::new(
-            amazon_chroot::AmazonChrootConfig {
-                name: config.name.clone(),
-                ..Default::default()
-            },
-        ))),
-        "amazon-ebs" => Ok(Box::new(amazon_ebs::AmazonEbsBuilder::new(
-            amazon_ebs::AmazonEbsConfig {
-                name: config.name.clone(),
-                ..Default::default()
-            },
-        ))),
-        "amazon-ebssurrogate" => Ok(Box::new(
-            amazon_ebssurrogate::AmazonEbsSurrogateBuilder::new(
-                amazon_ebssurrogate::AmazonEbsSurrogateConfig {
-                    name: config.name.clone(),
-                    ..Default::default()
-                },
-            ),
-        )),
-        "amazon-ebsvolume" | "amazon_ebsvolume" => {
-            Ok(Box::new(amazon_ebsvolume::AmazonEbsVolumeBuilder::new(
-                amazon_ebsvolume::AmazonEbsVolumeConfig {
-                    name: config.name.clone(),
-                    ..Default::default()
-                },
-            )))
-        }
-        "amazon-instance" => Ok(Box::new(amazon_instance::AmazonInstanceBuilder::new(
-            amazon_instance::AmazonInstanceConfig {
-                name: config.name.clone(),
-                ..Default::default()
-            },
-        ))),
-        "azure-arm" => Ok(Box::new(azure_arm::AzureArmBuilder::new(
-            azure_arm::AzureArmConfig {
-                name: config.name.clone(),
-                ..Default::default()
-            },
-        ))),
-        "azure-chroot" => Ok(Box::new(azure_chroot::AzureChrootBuilder::new(
-            azure_chroot::AzureChrootConfig {
-                name: config.name.clone(),
-                ..Default::default()
-            },
-        ))),
         "digitalocean" => Ok(Box::new(digitalocean::DigitalOceanBuilder::new(
             digitalocean::DigitalOceanConfig {
                 name: config.name.clone(),
@@ -174,12 +118,6 @@ fn create_raw_builder(config: &BuilderConfig) -> Result<Box<dyn Builder>, StampE
             image: "ubuntu".to_string(), // Default stub for instantiation
             ..Default::default()
         }))),
-        "googlecompute" => Ok(Box::new(googlecompute::GoogleComputeBuilder::new(
-            googlecompute::GoogleComputeConfig {
-                name: config.name.clone(),
-                ..Default::default()
-            },
-        ))),
         "hetzner-cloud" => Ok(Box::new(hetzner_cloud::HetznerCloudBuilder::new(
             hetzner_cloud::HetznerCloudConfig {
                 name: config.name.clone(),
@@ -429,7 +367,7 @@ impl Builder for DependentBuilder {
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 
 mod tests {
-    #![cfg_attr(coverage_nightly, coverage(off))]
+
     use super::*;
 
     #[test]
@@ -438,16 +376,8 @@ mod tests {
             "file",
             "null",
             "alicloud-ecs",
-            "amazon-chroot",
-            "amazon-ebs",
-            "amazon-ebssurrogate",
-            "amazon-ebsvolume",
-            "amazon-instance",
-            "azure-arm",
-            "azure-chroot",
             "digitalocean",
             "docker",
-            "googlecompute",
             "hetzner-cloud",
             "hyperv-iso",
             "hyperv-vmcx",

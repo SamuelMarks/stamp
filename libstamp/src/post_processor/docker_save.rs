@@ -95,9 +95,7 @@ impl PostProcessor for DockerSavePostProcessor {
                 .arg(&target_ref)
                 .output()
                 .await
-                .map_err(|e| {
-                    StampError::Provisioner(format!("Failed to execute docker save: {e}"))
-                })?;
+                .map_err(StampError::Io)?;
 
             if !output.status.success() {
                 return Err(StampError::Provisioner(format!(
@@ -118,9 +116,7 @@ impl PostProcessor for DockerSavePostProcessor {
                 .arg(&target_ref)
                 .status()
                 .await
-                .map_err(|e| {
-                    StampError::Provisioner(format!("Failed to execute docker save: {e}"))
-                })?;
+                .map_err(StampError::Io)?;
 
             if !status.success() && !cfg!(test) {
                 return Err(StampError::Provisioner(format!(

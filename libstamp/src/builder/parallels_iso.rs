@@ -1,4 +1,3 @@
-#![cfg(not(tarpaulin_include))]
 //! Implementation of the `parallels-iso` builder with full `prlctl` automation driver,
 //! hardware customization, media attachment, Parallels Tools handling, and provisioning.
 
@@ -512,12 +511,8 @@ pub async fn execute_prlctl_commands(
 pub async fn query_prlctl_version() -> Option<String> {
     let output = run_prlctl(&["--version"]).await.ok()?;
     let line = output.lines().next()?.trim();
-    let ver = line.split_whitespace().last()?.trim();
-    if ver.is_empty() {
-        None
-    } else {
-        Some(ver.to_string())
-    }
+    let ver = line.split_whitespace().last()?;
+    Some(ver.to_string())
 }
 
 /// Execute a `prlctl` command with arguments.
@@ -526,19 +521,19 @@ pub async fn query_prlctl_version() -> Option<String> {
 ///
 /// Returns `StampError::Builder` if `prlctl` fails.
 pub async fn run_prlctl(args: &[&str]) -> Result<String, StampError> {
-    run_prlctl_with_cmd(prlctl_binary(), args).await
+    run_prlctl_with_cmd(&prlctl_binary(), args).await
 }
 
 #[cfg(not(test))]
 /// Resolves the default `prlctl` binary name for production execution.
-fn prlctl_binary() -> &'static str {
-    "prlctl"
+fn prlctl_binary() -> String {
+    "prlctl".to_string()
 }
 
 #[cfg(test)]
 /// Resolves the mock `echo` binary name during unit tests.
-fn prlctl_binary() -> &'static str {
-    "echo"
+fn prlctl_binary() -> String {
+    std::env::var("MOCK_PRLCTL_CMD").unwrap_or_else(|_| "echo".to_string())
 }
 
 /// Execute a specific command as `prlctl` driver.
@@ -575,7 +570,7 @@ pub async fn run_prlctl_with_cmd(cmd: &str, args: &[&str]) -> Result<String, Sta
 ///
 /// Returns `StampError::Builder` if discovery fails.
 pub async fn discover_parallels_guest_ip(vm_name: &str) -> Result<String, StampError> {
-    discover_parallels_guest_ip_with_cmd(prlctl_binary(), vm_name).await
+    discover_parallels_guest_ip_with_cmd(&prlctl_binary(), vm_name).await
 }
 
 /// Discovers the guest IP address using a specific command runner.
@@ -590,11 +585,12 @@ pub async fn discover_parallels_guest_ip_with_cmd(
     let output = run_prlctl_with_cmd(cmd, &["list", "-f", vm_name]).await?;
     for line in output.lines() {
         if line.contains("ip_configured=") || line.contains("ip=") {
-            if let Some(ip_part) = line.split('=').nth(1) {
-                let ip = ip_part.trim().trim_matches('"');
-                if !ip.is_empty() && ip != "-" {
-                    return Ok(ip.to_string());
-                }
+            let mut parts = line.split('=');
+            parts.next(); // skip key
+            let ip_part = parts.next().unwrap_or("");
+            let ip = ip_part.trim().trim_matches('"');
+            if !ip.is_empty() && ip != "-" {
+                return Ok(ip.to_string());
             }
         }
     }
@@ -629,7 +625,6 @@ struct StepCreateVM {
 
 #[async_trait::async_trait]
 impl Step for StepCreateVM {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let vm_name = self
             .config
@@ -800,7 +795,6 @@ struct StepRunVM {
 
 #[async_trait::async_trait]
 impl Step for StepRunVM {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let vm_name = state.get::<String>("vm_name").cloned().unwrap_or_default();
         self.ui.say(&self.name, "Starting Parallels VM...");
@@ -856,7 +850,6 @@ struct StepUploadTools {
 
 #[async_trait::async_trait]
 impl Step for StepUploadTools {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         if self.config.parallels_tools_mode != ParallelsToolsMode::Upload {
             return Ok(StepAction::Continue);
@@ -904,7 +897,6 @@ struct StepProvision {
 
 #[async_trait::async_trait]
 impl Step for StepProvision {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Provisioning Parallels VM...");
 
@@ -994,7 +986,6 @@ struct StepShutdown {
 
 #[async_trait::async_trait]
 impl Step for StepShutdown {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Shutting down Parallels VM...");
         let vm_name = state.get::<String>("vm_name").cloned().unwrap_or_default();
@@ -1056,7 +1047,6 @@ struct StepExport {
 
 #[async_trait::async_trait]
 impl Step for StepExport {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let vm_name = state.get::<String>("vm_name").cloned().unwrap_or_default();
         let output_dir = self
@@ -1082,7 +1072,6 @@ impl Step for StepExport {
 
 #[async_trait::async_trait]
 impl Builder for ParallelsIsoBuilder {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn prepare(&self) -> Result<(), StampError> {
         if self.config.name.is_empty() {
             return Err(StampError::Parse("Name cannot be empty".to_string()));
@@ -1090,7 +1079,6 @@ impl Builder for ParallelsIsoBuilder {
         Ok(())
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(
         &self,
         hook: Arc<dyn ProvisionHook>,
@@ -1253,31 +1241,31 @@ mod tests {
         assert_eq!(format!("{}", ParallelsToolsFlavor::Lin), "lin");
 
         assert_eq!(
-            ParallelsToolsFlavor::from_str("lin").unwrap(),
+            ParallelsToolsFlavor::from_str("lin").expect("test"),
             ParallelsToolsFlavor::Lin
         );
         assert_eq!(
-            ParallelsToolsFlavor::from_str("win").unwrap(),
+            ParallelsToolsFlavor::from_str("win").expect("test"),
             ParallelsToolsFlavor::Win
         );
         assert_eq!(
-            ParallelsToolsFlavor::from_str("mac").unwrap(),
+            ParallelsToolsFlavor::from_str("mac").expect("test"),
             ParallelsToolsFlavor::Mac
         );
         assert_eq!(
-            ParallelsToolsFlavor::from_str("win-arm").unwrap(),
+            ParallelsToolsFlavor::from_str("win-arm").expect("test"),
             ParallelsToolsFlavor::WinArm
         );
         assert_eq!(
-            ParallelsToolsFlavor::from_str("lin-arm").unwrap(),
+            ParallelsToolsFlavor::from_str("lin-arm").expect("test"),
             ParallelsToolsFlavor::LinArm
         );
         assert_eq!(
-            ParallelsToolsFlavor::from_str("mac-arm").unwrap(),
+            ParallelsToolsFlavor::from_str("mac-arm").expect("test"),
             ParallelsToolsFlavor::MacArm
         );
         assert_eq!(
-            ParallelsToolsFlavor::from_str("other").unwrap(),
+            ParallelsToolsFlavor::from_str("other").expect("test"),
             ParallelsToolsFlavor::Custom("other".to_string())
         );
 
@@ -1288,15 +1276,15 @@ mod tests {
         assert_eq!(format!("{}", ParallelsToolsMode::Attach), "attach");
 
         assert_eq!(
-            ParallelsToolsMode::from_str("attach").unwrap(),
+            ParallelsToolsMode::from_str("attach").expect("test"),
             ParallelsToolsMode::Attach
         );
         assert_eq!(
-            ParallelsToolsMode::from_str("upload").unwrap(),
+            ParallelsToolsMode::from_str("upload").expect("test"),
             ParallelsToolsMode::Upload
         );
         assert_eq!(
-            ParallelsToolsMode::from_str("disable").unwrap(),
+            ParallelsToolsMode::from_str("disable").expect("test"),
             ParallelsToolsMode::Disable
         );
     }
@@ -1346,7 +1334,7 @@ mod tests {
             r#"[["set", "{{ .Name }}", "--3d-accelerate", "off"]]"#.to_string(),
         );
 
-        let cfg = ParallelsIsoConfig::from_builder_config(&builder_cfg).unwrap();
+        let cfg = ParallelsIsoConfig::from_builder_config(&builder_cfg).expect("test");
         assert_eq!(cfg.name, "bento-parallels");
         assert_eq!(cfg.guest_os_type.as_deref(), Some("ubuntu"));
         assert_eq!(cfg.distribution.as_deref(), Some("ubuntu-22.04"));
@@ -1385,7 +1373,7 @@ mod tests {
         builder_hcl
             .expressions
             .insert("prlctl".to_string(), tuple_expr);
-        let cfg_hcl = ParallelsIsoConfig::from_builder_config(&builder_hcl).unwrap();
+        let cfg_hcl = ParallelsIsoConfig::from_builder_config(&builder_hcl).expect("test");
         assert_eq!(cfg_hcl.prlctl.len(), 2);
     }
 
@@ -1561,7 +1549,7 @@ mod tests {
 
             // discover_parallels_guest_ip
             assert_eq!(
-                discover_parallels_guest_ip("test-vm").await.unwrap(),
+                discover_parallels_guest_ip("test-vm").await.expect("test"),
                 "127.0.0.1"
             );
 
@@ -1580,7 +1568,7 @@ echo 'ip_configured=10.211.55.3'
             }
             let ip_sh =
                 discover_parallels_guest_ip_with_cmd(&script.to_string_lossy(), "test-vm").await;
-            assert_eq!(ip_sh.unwrap(), "10.211.55.3");
+            assert_eq!(ip_sh.expect("test"), "10.211.55.3");
 
             // StepShutdown with shutdown_command and prlctl_post
             let ui = Arc::new(Ui::new(
@@ -1691,7 +1679,7 @@ echo 'ip_configured=10.211.55.3'
             let ip_dash =
                 discover_parallels_guest_ip_with_cmd(&script_dash.to_string_lossy(), "test-vm")
                     .await;
-            assert_eq!(ip_dash.unwrap(), "127.0.0.1");
+            assert_eq!(ip_dash.expect("test"), "127.0.0.1");
         }
     }
 
@@ -1770,5 +1758,242 @@ echo 'ip_configured=10.211.55.3'
         cfg.name = "valid".to_string();
         let b2 = ParallelsIsoBuilder::new(cfg);
         assert!(b2.prepare().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_parallels_missing_coverage() {
+        let mut builder_cfg = crate::template::BuilderConfig {
+            builder_type: "parallels-iso".to_string(),
+            name: "test-missing".to_string(),
+            ..Default::default()
+        };
+        builder_cfg.config.insert(
+            "http_content".to_string(),
+            "{\"/test.html\": \"hello\"}".to_string(),
+        );
+        builder_cfg
+            .config
+            .insert("http_port_min".to_string(), "8080".to_string());
+        builder_cfg
+            .config
+            .insert("http_port_max".to_string(), "8081".to_string());
+        let cfg = ParallelsIsoConfig::from_builder_config(&builder_cfg).expect("test");
+        assert_eq!(
+            cfg.http_content.get("/test.html").map(String::as_str),
+            Some("hello")
+        );
+        assert_eq!(cfg.http_port_min, Some(8080));
+        assert_eq!(cfg.http_port_max, Some(8081));
+
+        let td = tempfile::tempdir().expect("test");
+        let fake_prl = td.path().join("prlctl");
+        std::fs::write(&fake_prl, b"#!/bin/sh\n").expect("test");
+        unsafe {
+            std::env::set_var("PRLCTL_PATH", fake_prl.to_string_lossy().to_string());
+        }
+        assert_eq!(find_prlctl_binary(), fake_prl);
+        unsafe {
+            std::env::remove_var("PRLCTL_PATH");
+        }
+
+        let fake_tools = td.path().join("tools.iso");
+        std::fs::write(&fake_tools, b"ISO").expect("test");
+        unsafe {
+            std::env::set_var(
+                "PARALLELS_TOOLS_ISO",
+                fake_tools.to_string_lossy().to_string(),
+            );
+        }
+        assert_eq!(discover_parallels_tools_iso(None), Some(fake_tools.clone()));
+        unsafe {
+            std::env::remove_var("PARALLELS_TOOLS_ISO");
+        }
+
+        let script = td.path().join("fake_prlctl.sh");
+        std::fs::write(&script, b"#!/bin/sh\necho 'ip_configured=10.211.55.3'\n").expect("test");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                .expect("test");
+        }
+        let ip_sh =
+            discover_parallels_guest_ip_with_cmd(&script.to_string_lossy(), "test-vm").await;
+        assert_eq!(ip_sh.expect("test"), "10.211.55.3");
+
+        let script2 = td.path().join("fake_prlctl2.sh");
+        std::fs::write(&script2, b"#!/bin/sh\necho 'ip=10.211.55.4'\n").expect("test");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script2, std::fs::Permissions::from_mode(0o755))
+                .expect("test");
+        }
+        let ip_sh2 =
+            discover_parallels_guest_ip_with_cmd(&script2.to_string_lossy(), "test-vm").await;
+        assert_eq!(ip_sh2.expect("test"), "10.211.55.4");
+
+        let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+        let mut step_run = StepRunVM {
+            ui: ui.clone(),
+            name: "run-test".to_string(),
+            config: ParallelsIsoConfig {
+                ssh_port: Some(crate::types::Port::new(2222)),
+                winrm_host_port: Some(crate::types::Port::new(5555)),
+                ..Default::default()
+            },
+        };
+        let mut state = crate::engine::multistep::StateBag::new();
+        state.put("vm_name", "test-vm".to_string());
+        let res = step_run.run(&mut state).await;
+        println!("RUN RES {:?}", res);
+        assert_eq!(state.get::<u16>("ssh_port").copied(), Some(2222));
+        assert_eq!(state.get::<u16>("winrm_port").copied(), Some(5555));
+    }
+
+    #[tokio::test]
+    async fn test_parallels_more_missing_branches() {
+        let td = tempfile::tempdir().expect("test");
+
+        unsafe {
+            std::env::set_var(
+                "PRLCTL_PATH",
+                td.path().join("non_exist").to_string_lossy().to_string(),
+            );
+        }
+        let _ = find_prlctl_binary();
+        unsafe {
+            std::env::remove_var("PRLCTL_PATH");
+        }
+
+        unsafe {
+            std::env::set_var(
+                "PARALLELS_TOOLS_ISO",
+                td.path()
+                    .join("non_exist_iso")
+                    .to_string_lossy()
+                    .to_string(),
+            );
+        }
+        let _ = discover_parallels_tools_iso(None);
+        unsafe {
+            std::env::remove_var("PARALLELS_TOOLS_ISO");
+        }
+
+        let script_ip = td.path().join("fake_prlctl_ip.sh");
+        std::fs::write(&script_ip, b"#!/bin/sh\necho 'ip_configured=-'\n").expect("test");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_ip, std::fs::Permissions::from_mode(0o755))
+                .expect("test");
+        }
+        let ip_dash =
+            discover_parallels_guest_ip_with_cmd(&script_ip.to_string_lossy(), "test-vm").await;
+        assert_eq!(ip_dash.expect("test"), "127.0.0.1");
+
+        // mock prlctl for version check
+        let script_ver = td.path().join("fake_prlctl_ver.sh");
+        std::fs::write(&script_ver, b"#!/bin/sh\necho ' '\n").expect("test");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_ver, std::fs::Permissions::from_mode(0o755))
+                .expect("test");
+        }
+        unsafe {
+            std::env::set_var("MOCK_PRLCTL_CMD", script_ver.to_string_lossy().to_string());
+        }
+        let ver = query_prlctl_version().await;
+        assert_eq!(ver, None);
+
+        let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+        let mut step_shutdown = StepShutdown {
+            ui: ui.clone(),
+            name: "shut".to_string(),
+            config: ParallelsIsoConfig {
+                prlctl_version_file: Some(".prl_ver2".to_string()),
+                output_directory: Some(td.path().to_string_lossy().to_string()),
+                ..Default::default()
+            },
+        };
+        let mut state = crate::engine::multistep::StateBag::new();
+        state.put("vm_name", "test-vm".to_string());
+        let _ = step_shutdown.run(&mut state).await;
+        let p = td.path().join(".prl_ver2");
+        assert!(p.exists());
+        let ver2 = std::fs::read_to_string(&p).expect("test");
+        assert_eq!(ver2, "19.0");
+
+        let script_ip3 = td.path().join("fake_prlctl_ip3.sh");
+        std::fs::write(&script_ip3, b"#!/bin/sh\necho 'ip_configured='\n").expect("test");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_ip3, std::fs::Permissions::from_mode(0o755))
+                .expect("test");
+        }
+        let ip_empty =
+            discover_parallels_guest_ip_with_cmd(&script_ip3.to_string_lossy(), "test-vm").await;
+        assert_eq!(ip_empty.expect("test"), "127.0.0.1");
+
+        unsafe {
+            std::env::remove_var("MOCK_PRLCTL_CMD");
+        }
+    }
+
+    #[test]
+    fn test_parallels_parse_string_list_json() {
+        let list = parse_string_list(r#"["a", "b"]"#);
+        assert_eq!(list, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_parallels_parse_string_list_comma() {
+        let list = parse_string_list("a, b, c, ''");
+        assert_eq!(list, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_parallels_parse_nested_string_list_flat() {
+        let s = r#"["a", "b"]"#.to_string();
+        let list = parse_nested_string_list(Some(&s), None);
+        assert_eq!(list, vec![vec!["a", "b"]]);
+    }
+
+    #[tokio::test]
+    async fn test_parallels_run_prlctl_with_cmd_failure_and_empty() {
+        let _ = execute_prlctl_commands(&[vec![]], "vm", Some("ver"), Some("dir")).await;
+
+        let td = tempfile::tempdir().expect("test");
+        let script = td.path().join("fail.sh");
+        std::fs::write(&script, b"#!/bin/sh\nexit 1\n").expect("test");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                .expect("test");
+        }
+        let res = run_prlctl_with_cmd(&script.to_string_lossy(), &[]).await;
+        assert!(res.is_err());
+
+        let script2 = td.path().join("fail2.sh");
+        std::fs::write(&script2, b"#!/bin/sh\necho 'err' >&2\nexit 2\n").expect("test");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script2, std::fs::Permissions::from_mode(0o755))
+                .expect("test");
+        }
+        let res2 = run_prlctl_with_cmd(&script2.to_string_lossy(), &[]).await;
+        assert!(res2.is_err());
     }
 }

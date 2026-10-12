@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Strongly typed primitives for Stamp configuration and operations.
 
 use crate::error::StampError;

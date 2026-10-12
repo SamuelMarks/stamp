@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! `HashiCorp` Cloud Platform (HCP) Packer Registry client and build workflow.
 //!
 //! Provides API integration for managing HCP Packer buckets, build iterations,
@@ -824,7 +823,6 @@ fn parse_artifact_metadata(builder_id: &str, artifact_id: &str) -> (String, Stri
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::all, clippy::pedantic)]
 mod tests {
     use super::*;

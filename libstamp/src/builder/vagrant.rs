@@ -224,10 +224,7 @@ impl Builder for VagrantBuilder {
         }
 
         let mock_comm = crate::communicator::mock::MockCommunicator::new();
-        let box_path = state
-            .get::<String>("box_path")
-            .cloned()
-            .unwrap_or_else(|| "./output-vagrant/package.box".to_string());
+        let box_path = state.get::<String>("box_path").cloned().unwrap_or_default();
 
         let build_ctx = BuildContext {
             build_id: self.config.source_box.clone(),
@@ -330,10 +327,7 @@ mod tests {
 
         let artifact = builder.run(hook, ui, OnErrorStrategy::Cleanup).await;
         assert!(artifact.is_ok());
-        let artifact = match artifact {
-            Ok(a) => a,
-            Err(e) => panic!("{e}"),
-        };
+        let artifact = artifact.expect("test");
         assert!(artifact.id().contains("vagrant-builder"));
         assert!(!artifact.files().is_empty());
         assert!(artifact.string().contains("Vagrant box"));

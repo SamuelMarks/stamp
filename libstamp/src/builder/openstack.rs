@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `openstack` builder supporting Keystone v2/v3 authentication,
 //! Nova compute instances, floating IP association, and Glance image creation.
 
@@ -615,7 +614,6 @@ Do you want to clean up? [y/N]: ",
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::pedantic,

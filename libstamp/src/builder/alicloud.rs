@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `alicloud-ecs` builder using the Alibaba Cloud ECS API.
 
 use crate::builder::Builder;
@@ -120,7 +119,6 @@ struct StepCreateNetwork {
 
 #[async_trait::async_trait]
 impl Step for StepCreateNetwork {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let vpc_id = if let Some(ref v) = self.config.vpc_id {
             v.clone()
@@ -200,7 +198,6 @@ struct StepCreateEcsInstance {
 
 #[async_trait::async_trait]
 impl Step for StepCreateEcsInstance {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let instance_id = format!("i-{}", uuid::Uuid::new_v4().simple());
         self.ui.say(
@@ -283,7 +280,6 @@ struct StepProvision {
 
 #[async_trait::async_trait]
 impl Step for StepProvision {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Provisioning ECS instance...");
 
@@ -351,7 +347,6 @@ struct StepStopInstance {
 
 #[async_trait::async_trait]
 impl Step for StepStopInstance {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let instance_id = state
             .get::<String>("instance_id")
@@ -380,7 +375,6 @@ struct StepCreateImage {
 
 #[async_trait::async_trait]
 impl Step for StepCreateImage {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let instance_id = state
             .get::<String>("instance_id")
@@ -515,7 +509,6 @@ Do you want to clean up? [y/N]: ",
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::pedantic,
@@ -588,6 +581,9 @@ mod tests {
             image_id: "img-123".to_string(),
             instance_type: "ecs.t1.small".to_string(),
             image_name: Some("my-image".to_string()),
+            vpc_id: Some("vpc-custom".to_string()),
+            vswitch_id: Some("vsw-custom".to_string()),
+            security_group_id: Some("sg-custom".to_string()),
             ..Default::default()
         });
         let hook: std::sync::Arc<dyn crate::engine::hook::ProvisionHook> =
@@ -701,6 +697,13 @@ mod tests {
         state.put("vpc_id", "vpc-1".to_string());
         step_net.cleanup(&state).await;
 
+        // Cleanup with partial state (true but missing ids)
+        let mut partial_state = StateBag::new();
+        partial_state.put("is_temp_sg", true);
+        partial_state.put("is_temp_vswitch", true);
+        partial_state.put("is_temp_vpc", true);
+        step_net.cleanup(&partial_state).await;
+
         // Cleanup with empty state (false branches)
         let empty_state = StateBag::new();
         step_net.cleanup(&empty_state).await;
@@ -723,13 +726,25 @@ mod tests {
             ui: ui.clone(),
             name: "test".to_string(),
             config: config.clone(),
-            hook,
+            hook: hook.clone(),
         };
         let mut prov_state = StateBag::new();
         let prov_action = step_prov.run(&mut prov_state).await;
         assert!(prov_action.is_ok());
 
-        // StepCreateImage run without image_name
+        // StepProvision run with instance_ip and custom ssh_username
+        let mut custom_config = config.clone();
+        custom_config.ssh_username = Some("custom_user".to_string());
+        let mut step_prov_custom = StepProvision {
+            ui: ui.clone(),
+            name: "test".to_string(),
+            config: custom_config,
+            hook: hook.clone(),
+        };
+        prov_state.put("instance_ip", "1.2.3.4".to_string());
+        let _ = step_prov_custom.run(&mut prov_state).await;
+
+        // StepCreateImage run without image_name (fallback branch)
         let mut step_img = StepCreateImage {
             ui,
             name: "test".to_string(),
@@ -749,7 +764,57 @@ mod tests {
         assert_eq!(config.clone(), config);
         assert_eq!(format!("{config:?}"), format!("{config:?}"));
 
-        let builder = AlicloudEcsBuilder::new(config);
+        let builder = AlicloudEcsBuilder::new(config.clone());
         assert_eq!(format!("{builder:?}"), format!("{builder:?}"));
+        let _builder_cloned = builder.clone();
+
+        let ui = Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+        let step1 = StepCreateNetwork {
+            ui: ui.clone(),
+            name: "n".into(),
+            config: config.clone(),
+        };
+        let _ = step1.clone();
+        let _ = format!("{step1:?}");
+
+        let step2 = StepCreateEcsInstance {
+            ui: ui.clone(),
+            name: "n".into(),
+            config: config.clone(),
+        };
+        let _ = step2.clone();
+        let _ = format!("{step2:?}");
+
+        let hook: Arc<dyn ProvisionHook> = Arc::new(crate::engine::hook::DefaultProvisionHook {
+            provisioners: Arc::new(vec![]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let step3 = StepProvision {
+            ui: ui.clone(),
+            name: "n".into(),
+            config: config.clone(),
+            hook: hook.clone(),
+        };
+        let _ = step3.clone();
+
+        let step4 = StepStopInstance {
+            ui: ui.clone(),
+            name: "n".into(),
+            config: config.clone(),
+        };
+        let _ = step4.clone();
+        let _ = format!("{step4:?}");
+
+        let step5 = StepCreateImage {
+            ui: ui.clone(),
+            name: "n".into(),
+            config: config.clone(),
+        };
+        let _ = step5.clone();
+        let _ = format!("{step5:?}");
     }
 }

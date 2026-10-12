@@ -1,5 +1,5 @@
 #![cfg(not(tarpaulin_include))]
-#![cfg_attr(coverage_nightly, coverage(off))]
+
 //! HCL parser for Packer templates.
 
 use crate::error::StampError;
@@ -586,7 +586,6 @@ pub fn parse_hcl<S: ::std::hash::BuildHasher>(
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;

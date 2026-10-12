@@ -215,7 +215,6 @@ impl Provisioner for BreakpointProvisioner {
         comm: &dyn Communicator,
         ui: std::sync::Arc<crate::engine::ui::Ui>,
     ) -> Result<(), StampError> {
-        #![cfg_attr(coverage_nightly, coverage(off))]
         if self.config.disable || ui.machine_readable.is_enabled() {
             ui.say(
                 "breakpoint",

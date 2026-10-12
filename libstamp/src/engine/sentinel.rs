@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Sentinel Policy evaluation hooks and import exporter for Stamp templates.
 //!
 //! Evaluates Stamp templates, planned builds, and produced machine image artifacts

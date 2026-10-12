@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! JSON parser for legacy Packer templates.
 
 use crate::error::StampError;
@@ -205,7 +204,6 @@ pub fn parse_json<S: ::std::hash::BuildHasher>(
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;

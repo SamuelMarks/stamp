@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `VMware` vSphere ISO (`vsphere-iso`) and Clone (`vsphere-clone`) builders.
 //!
 //! Provides a full vSphere REST and SOAP (govmomi parity) client abstraction for vCenter and `ESXi`,
@@ -1401,7 +1400,6 @@ impl Builder for VsphereCloneBuilder {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::pedantic, clippy::all, for_loops_over_fallibles)]
 mod tests {
     use super::*;

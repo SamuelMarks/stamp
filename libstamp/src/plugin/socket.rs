@@ -182,6 +182,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_bind_bounded_tcp_listener_default() -> Result<(), StampError> {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::remove_var(PACKER_PLUGIN_MIN_PORT_ENV);
             std::env::remove_var(PACKER_PLUGIN_MAX_PORT_ENV);
@@ -194,6 +197,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_bind_bounded_tcp_listener_bounded() -> Result<(), StampError> {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // Reserve an arbitrary free port range
         let temp = TcpListener::bind("127.0.0.1:0")
             .await

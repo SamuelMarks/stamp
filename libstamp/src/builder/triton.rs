@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `triton` builder for Joyent Triton `CloudAPI`.
 //!
 //! Provides a full REST client for Triton `CloudAPI` with HTTP signature authentication,

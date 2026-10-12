@@ -229,7 +229,6 @@ impl Provisioner for WindowsShellProvisioner {
         comm: &dyn Communicator,
         ui: std::sync::Arc<crate::engine::ui::Ui>,
     ) -> Result<(), StampError> {
-        #![cfg_attr(coverage_nightly, coverage(off))]
         let mut has_executed = false;
         let default_valid_codes = vec![0];
         let valid_codes = self

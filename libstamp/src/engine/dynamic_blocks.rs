@@ -1,5 +1,5 @@
 #![cfg(not(tarpaulin_include))]
-#![cfg_attr(coverage_nightly, coverage(off))]
+
 //! Dynamic Block Expander delegating directly to `hashicorp_configuration_language_rs`.
 
 use crate::error::StampError;
@@ -26,7 +26,6 @@ pub fn expand_dynamic_blocks(body: &mut Body, ctx: &Context) -> Result<(), Stamp
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;

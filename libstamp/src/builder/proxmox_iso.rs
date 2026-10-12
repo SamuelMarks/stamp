@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `proxmox-iso` builder with Proxmox VE REST API client,
 //! ticket and API token authentication, ISO and cloud-init drive creation, and template conversion (`qm template`).
 
@@ -159,7 +158,6 @@ struct StepCreateVM {
 
 #[async_trait::async_trait]
 impl Step for StepCreateVM {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let node = self.config.node.as_deref().unwrap_or("pve");
         let vmid = self.config.vm_id.unwrap_or(999);
@@ -286,7 +284,6 @@ struct StepStartVM {
 
 #[async_trait::async_trait]
 impl Step for StepStartVM {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let vmid = state.get::<u32>("vm_id").copied().unwrap_or(999);
         let node = state
@@ -342,7 +339,6 @@ struct StepProvision {
 
 #[async_trait::async_trait]
 impl Step for StepProvision {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Provisioning Proxmox VM...");
 
@@ -405,7 +401,6 @@ struct StepConvertToTemplate {
 
 #[async_trait::async_trait]
 impl Step for StepConvertToTemplate {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let vmid = state.get::<u32>("vm_id").copied().unwrap_or(999);
         let node = state
@@ -460,7 +455,6 @@ impl Step for StepConvertToTemplate {
 
 #[async_trait::async_trait]
 impl Builder for ProxmoxIsoBuilder {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn prepare(&self) -> Result<(), StampError> {
         if self.config.name.is_empty() {
             return Err(StampError::Parse("Name cannot be empty".to_string()));
@@ -468,7 +462,6 @@ impl Builder for ProxmoxIsoBuilder {
         Ok(())
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(
         &self,
         hook: Arc<dyn ProvisionHook>,

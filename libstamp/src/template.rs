@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Unified template model for Stamp.
 //!
 //! This module defines the `Template` struct and its components, which form the
@@ -450,7 +449,6 @@ pub fn load_templates<P: AsRef<std::path::Path>, S: std::hash::BuildHasher>(
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;

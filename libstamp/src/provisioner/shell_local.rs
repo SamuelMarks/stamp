@@ -1,5 +1,5 @@
 #![cfg(not(tarpaulin_include))]
-#![cfg_attr(coverage_nightly, coverage(off))]
+
 //! Implementation of the `shell-local` provisioner.
 
 use crate::communicator::Communicator;
@@ -57,7 +57,6 @@ impl Provisioner for ShellLocalProvisioner {
         _comm: &dyn Communicator,
         ui: std::sync::Arc<crate::engine::ui::Ui>,
     ) -> Result<(), StampError> {
-        #![cfg_attr(coverage_nightly, coverage(off))]
         let mut has_executed = false;
         let envs = self.parse_env_vars();
 

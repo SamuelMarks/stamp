@@ -39,3 +39,7 @@ unused_async_trait_impl = "allow"
 default_constructed_unit_structs = "allow"
 manual_assert_eq = "allow"
 manual_let_else = "allow"
+
+[profile.dev.package."*"]
+debug = 0
+opt-level = 1

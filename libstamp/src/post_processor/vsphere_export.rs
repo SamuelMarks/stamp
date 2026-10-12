@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! `vsphere-export` post-processor.
 
 use crate::error::StampError;

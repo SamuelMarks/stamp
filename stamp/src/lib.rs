@@ -1,5 +1,4 @@
 #![cfg(not(tarpaulin_include))]
-#![cfg_attr(coverage_nightly, coverage(off))]
 #![deny(missing_docs)]
 #![deny(clippy::missing_docs_in_private_items)]
 #![deny(clippy::unwrap_used, clippy::expect_used)]
@@ -1135,6 +1134,21 @@ pub fn verify_environment_variables() -> Result<(), StampError> {
     if resolved_cache != std::path::Path::new(test_cache) {
         return Err(StampError::Validation(
             "PACKER_CACHE_DIR override verification failed".to_string(),
+        ));
+    }
+
+    // 2b. STAMP_CACHE_DIR
+    let test_stamp_cache = "/tmp/test_stamp_cache_dir";
+    unsafe {
+        std::env::set_var("STAMP_CACHE_DIR", test_stamp_cache);
+    }
+    let resolved_stamp_cache = libstamp::utils::packer_cache_dir();
+    unsafe {
+        std::env::remove_var("STAMP_CACHE_DIR");
+    }
+    if resolved_stamp_cache != std::path::Path::new(test_stamp_cache) {
+        return Err(StampError::Validation(
+            "STAMP_CACHE_DIR override verification failed".to_string(),
         ));
     }
 

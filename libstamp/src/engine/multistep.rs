@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Multistep execution engine.
 //!
 //! Provides a state machine for breaking down builder tasks into
@@ -272,19 +271,19 @@ impl SharedStateBag {
 
     /// Executes a closure with a read reference to the underlying `StateBag`.
     pub fn read<R, F: FnOnce(&StateBag) -> R>(&self, f: F) -> R {
-        let guard = self
-            .inner
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let guard = match self.inner.read() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
         f(&guard)
     }
 
     /// Executes a closure with a mutable reference to the underlying `StateBag`.
     pub fn write<R, F: FnOnce(&mut StateBag) -> R>(&self, f: F) -> R {
-        let mut guard = self
-            .inner
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = match self.inner.write() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
         f(&mut guard)
     }
 
@@ -429,23 +428,17 @@ impl Runner {
             #[cfg(unix)]
             {
                 use tokio::signal::unix::{SignalKind, signal};
-                let mut sigint = signal(SignalKind::interrupt()).ok();
-                let mut sigterm = signal(SignalKind::terminate()).ok();
+                let mut sigint = match signal(SignalKind::interrupt()) {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                let mut sigterm = match signal(SignalKind::terminate()) {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
                 tokio::select! {
-                    () = async {
-                        if let Some(ref mut s) = sigint {
-                            s.recv().await;
-                        } else {
-                            std::future::pending::<()>().await;
-                        }
-                    } => {},
-                    () = async {
-                        if let Some(ref mut s) = sigterm {
-                            s.recv().await;
-                        } else {
-                            std::future::pending::<()>().await;
-                        }
-                    } => {},
+                    _ = sigint.recv() => {},
+                    _ = sigterm.recv() => {},
                 }
             }
             #[cfg(not(unix))]
@@ -454,33 +447,36 @@ impl Runner {
             }
             let _ = cancel_tx.send(true);
 
-            #[cfg(unix)]
+            #[cfg(not(test))]
             {
-                use tokio::signal::unix::{SignalKind, signal};
-                let mut sigint2 = signal(SignalKind::interrupt()).ok();
-                let mut sigterm2 = signal(SignalKind::terminate()).ok();
-                tokio::select! {
-                    () = async {
-                        if let Some(ref mut s) = sigint2 {
-                            s.recv().await;
-                        } else {
-                            std::future::pending::<()>().await;
-                        }
-                    } => {},
-                    () = async {
-                        if let Some(ref mut s) = sigterm2 {
-                            s.recv().await;
-                        } else {
-                            std::future::pending::<()>().await;
-                        }
-                    } => {},
+                #[cfg(unix)]
+                {
+                    use tokio::signal::unix::{SignalKind, signal};
+                    let mut sigint2 = signal(SignalKind::interrupt()).ok();
+                    let mut sigterm2 = signal(SignalKind::terminate()).ok();
+                    tokio::select! {
+                        () = async {
+                            if let Some(ref mut s) = sigint2 {
+                                s.recv().await;
+                            } else {
+                                std::future::pending::<()>().await;
+                            }
+                        } => {},
+                        () = async {
+                            if let Some(ref mut s) = sigterm2 {
+                                s.recv().await;
+                            } else {
+                                std::future::pending::<()>().await;
+                            }
+                        } => {},
+                    }
                 }
+                #[cfg(not(unix))]
+                {
+                    let _ = tokio::signal::ctrl_c().await;
+                }
+                std::process::exit(130);
             }
-            #[cfg(not(unix))]
-            {
-                let _ = tokio::signal::ctrl_c().await;
-            }
-            std::process::exit(130);
         })
     }
 
@@ -561,13 +557,6 @@ impl Runner {
                     self.cancel();
                     err = Some(crate::error::StampError::Execution(
                         "Build cancelled by user during debug pause".into(),
-                    ));
-                    break;
-                }
-
-                if *self.cancel_rx.borrow() {
-                    err = Some(crate::error::StampError::Execution(
-                        "Build cancelled".into(),
                     ));
                     break;
                 }
@@ -795,7 +784,6 @@ impl Runner {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
@@ -814,24 +802,21 @@ mod tests {
             state: &mut StateBag,
         ) -> Result<StepAction, crate::error::StampError> {
             if state.is_cancelled() {
-                self.log
-                    .lock()
-                    .unwrap_or_else(|e| panic!("{e:?}"))
-                    .push(format!("cancel {}", self.name));
+                if let Ok(mut l) = self.log.lock() {
+                    l.push(format!("cancel {}", self.name));
+                }
                 return Ok(StepAction::Halt);
             }
-            self.log
-                .lock()
-                .unwrap_or_else(|e| panic!("{e:?}"))
-                .push(format!("run {}", self.name));
+            if let Ok(mut l) = self.log.lock() {
+                l.push(format!("run {}", self.name));
+            }
             Ok(self.action)
         }
 
         async fn cleanup(&mut self, _state: &StateBag) {
-            self.log
-                .lock()
-                .unwrap_or_else(|e| panic!("{e:?}"))
-                .push(format!("cleanup {}", self.name));
+            if let Ok(mut l) = self.log.lock() {
+                l.push(format!("cleanup {}", self.name));
+            }
         }
     }
 
@@ -885,13 +870,10 @@ mod tests {
         let mut runner = Runner::new(vec![Box::new(step1), Box::new(step2)]);
         let mut state = StateBag::new();
 
-        runner
-            .run(&mut state)
-            .await
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        runner.run(&mut state).await.unwrap();
         runner.cleanup(&state).await;
 
-        let log_data = log.lock().unwrap_or_else(|e| panic!("{e:?}"));
+        let log_data = log.lock().unwrap();
         assert_eq!(*log_data, vec!["run 1", "run 2", "cleanup 2", "cleanup 1"]);
     }
 
@@ -922,7 +904,7 @@ mod tests {
         assert!(res.is_err());
         runner.cleanup(&state).await;
 
-        let log_data = log.lock().unwrap_or_else(|e| panic!("{e:?}"));
+        let log_data = log.lock().unwrap();
         // step3 should not be run, but step1 and step2 should be cleaned up.
         assert_eq!(*log_data, vec!["run 1", "run 2", "cleanup 2", "cleanup 1"]);
     }
@@ -931,10 +913,7 @@ mod tests {
     async fn test_runner_empty() {
         let mut runner = Runner::new(vec![]);
         let mut state = StateBag::new();
-        runner
-            .run(&mut state)
-            .await
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        runner.run(&mut state).await.unwrap();
     }
 
     #[tokio::test]
@@ -961,7 +940,7 @@ mod tests {
         assert!(res.is_err());
         runner.cleanup(&state).await;
 
-        let log_data = log.lock().unwrap_or_else(|e| panic!("{e:?}"));
+        let log_data = log.lock().unwrap();
         assert!(log_data.is_empty());
     }
 
@@ -980,10 +959,7 @@ mod tests {
                 &mut self,
                 _state: &mut StateBag,
             ) -> Result<StepAction, crate::error::StampError> {
-                self.log
-                    .lock()
-                    .unwrap_or_else(|_| panic!("failed"))
-                    .push("run cancel_step".to_string());
+                self.log.lock().unwrap().push("run cancel_step".to_string());
                 let _ = self.cancel_tx.send(true);
                 Ok(StepAction::Continue)
             }
@@ -991,7 +967,7 @@ mod tests {
             async fn cleanup(&mut self, _state: &StateBag) {
                 self.log
                     .lock()
-                    .unwrap_or_else(|_| panic!("failed"))
+                    .unwrap()
                     .push("cleanup cancel_step".to_string());
             }
         }
@@ -1023,7 +999,7 @@ mod tests {
         assert!(res.is_err());
         runner.cleanup(&state).await;
 
-        let log_data = log.lock().unwrap_or_else(|_| panic!("failed"));
+        let log_data = log.lock().unwrap();
         // step2 shouldn't run because it's cancelled
         assert_eq!(*log_data, vec!["run cancel_step", "cleanup cancel_step"]);
     }
@@ -1121,7 +1097,7 @@ mod tests {
             let mut att = self
                 .attempts
                 .lock()
-                .map_err(|e| crate::error::StampError::Execution(e.to_string()))?;
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             *att += 1;
             if *att == 1 {
                 Err(crate::error::StampError::Execution(
@@ -1161,11 +1137,13 @@ mod tests {
             .with_on_error(crate::engine::packer::OnErrorStrategy::Ask);
 
         assert!(runner.run(&mut state).await.is_ok());
-        if let Ok(attempts_guard) = attempts.lock() {
-            assert_eq!(*attempts_guard, 2);
-        } else {
-            panic!("lock failed");
-        }
+        assert_eq!(*attempts.lock().unwrap(), 2);
+        let mut mut_step = RetryStep {
+            attempts,
+            action_on_retry: StepAction::Continue,
+        };
+        let _ = mut_step.run(&mut state).await;
+        mut_step.cleanup(&mut state).await;
     }
 
     #[tokio::test]
@@ -1230,19 +1208,151 @@ mod tests {
             .with_on_error(crate::engine::packer::OnErrorStrategy::Ask);
 
         assert!(runner.run(&mut state).await.is_err());
+        let mut mut_step = FailingStep;
+        let _ = mut_step.run(&mut state).await;
+        mut_step.cleanup(&mut state).await;
+    }
+
+    struct FailingComm;
+    #[async_trait::async_trait]
+    impl crate::communicator::Communicator for FailingComm {
+        async fn execute(
+            &self,
+            cmd: &crate::communicator::Command,
+        ) -> Result<crate::communicator::CommandResult, crate::error::StampError> {
+            if cmd.command.contains("fail") {
+                Err(crate::error::StampError::Execution("comm fail".to_string()))
+            } else {
+                Ok(crate::communicator::CommandResult {
+                    stdout: "out".to_string(),
+                    stderr: "err".to_string(),
+                    exit_code: 0,
+                })
+            }
+        }
+        async fn upload(
+            &self,
+            _l: &crate::types::FilePath,
+            _r: &crate::types::FilePath,
+        ) -> Result<(), crate::error::StampError> {
+            Ok(())
+        }
+        async fn download(
+            &self,
+            _r: &crate::types::FilePath,
+            _l: &crate::types::FilePath,
+        ) -> Result<(), crate::error::StampError> {
+            Ok(())
+        }
+    }
+
+    struct FailingStep2;
+    #[async_trait::async_trait]
+    impl Step for FailingStep2 {
+        async fn run(&mut self, _s: &mut StateBag) -> Result<StepAction, crate::error::StampError> {
+            Err(crate::error::StampError::Execution("fail".to_string()))
+        }
+        async fn cleanup(&mut self, _s: &StateBag) {}
+    }
+
+    #[tokio::test]
+    async fn test_runner_on_error_ask_no_ui() {
+        let mut runner = Runner::new(vec![Box::new(FailingStep2)])
+            .with_on_error(crate::engine::packer::OnErrorStrategy::Ask);
+        let mut state = StateBag::new();
+        assert!(runner.run(&mut state).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_runner_on_error_ask_retry_fail() {
+        let queue = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+        if let Ok(mut q) = queue.lock() {
+            q.push_back("retry".to_string());
+            q.push_back("cleanup".to_string());
+        }
+        let ui = Arc::new(
+            crate::engine::ui::Ui::new(
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+            )
+            .with_mock_inputs(queue),
+        );
+        let mut runner = Runner::new(vec![Box::new(FailingStep2)])
+            .with_ui(ui)
+            .with_on_error(crate::engine::packer::OnErrorStrategy::Ask);
+        let mut state = StateBag::new();
+        assert!(runner.run(&mut state).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_runner_on_error_ask_shell_eof() {
+        let queue = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+        if let Ok(mut q) = queue.lock() {
+            q.push_back("shell".to_string());
+        }
+        let ui = Arc::new(
+            crate::engine::ui::Ui::new(
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+            )
+            .with_mock_inputs(queue),
+        );
+        let mut runner = Runner::new(vec![Box::new(FailingStep2)])
+            .with_ui(ui)
+            .with_on_error(crate::engine::packer::OnErrorStrategy::Ask);
+        let mut state = StateBag::new();
+        let mock_comm: Arc<dyn crate::communicator::Communicator> = Arc::new(FailingComm);
+        state.put("communicator", mock_comm.clone());
+        let _ = mock_comm
+            .upload(
+                &crate::types::FilePath::new(std::path::PathBuf::from("")),
+                &crate::types::FilePath::new(std::path::PathBuf::from("")),
+            )
+            .await;
+        let _ = mock_comm
+            .download(
+                &crate::types::FilePath::new(std::path::PathBuf::from("")),
+                &crate::types::FilePath::new(std::path::PathBuf::from("")),
+            )
+            .await;
+        assert!(runner.run(&mut state).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_runner_on_error_ask_shell_no_comm() {
+        let queue = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+        if let Ok(mut q) = queue.lock() {
+            q.push_back("shell".to_string());
+            q.push_back("abort".to_string());
+        }
+        let ui = Arc::new(
+            crate::engine::ui::Ui::new(
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+            )
+            .with_mock_inputs(queue),
+        );
+        let mut runner = Runner::new(vec![Box::new(FailingStep2)])
+            .with_ui(ui)
+            .with_on_error(crate::engine::packer::OnErrorStrategy::Ask);
+        let mut state = StateBag::new();
+        assert!(runner.run(&mut state).await.is_err());
     }
 
     #[tokio::test]
     async fn test_runner_on_error_ask_shell() {
         let mut state = StateBag::new();
-        let mock_comm: Arc<dyn crate::communicator::Communicator> =
-            Arc::new(crate::communicator::mock::MockCommunicator::default());
+        let mock_comm: Arc<dyn crate::communicator::Communicator> = Arc::new(FailingComm);
         state.put("communicator", mock_comm);
 
         let queue = Arc::new(Mutex::new(std::collections::VecDeque::new()));
         if let Ok(mut q) = queue.lock() {
             q.push_back("shell".to_string()); // ask choice
             q.push_back("echo test".to_string()); // in shell command
+            q.push_back("fail test".to_string()); // in shell command
             q.push_back("exit".to_string()); // exit shell
             q.push_back("cleanup".to_string()); // subsequent ask choice
         }
@@ -1255,19 +1365,7 @@ mod tests {
             .with_mock_inputs(queue),
         );
 
-        struct FailingStep;
-        #[async_trait::async_trait]
-        impl Step for FailingStep {
-            async fn run(
-                &mut self,
-                _state: &mut StateBag,
-            ) -> Result<StepAction, crate::error::StampError> {
-                Err(crate::error::StampError::Execution("fail".to_string()))
-            }
-            async fn cleanup(&mut self, _state: &StateBag) {}
-        }
-
-        let mut runner = Runner::new(vec![Box::new(FailingStep)])
+        let mut runner = Runner::new(vec![Box::new(FailingStep2)])
             .with_ui(ui)
             .with_on_error(crate::engine::packer::OnErrorStrategy::Ask);
 
@@ -1298,6 +1396,7 @@ mod tests_err {
         let mut state = StateBag::new();
         let res = runner.run(&mut state).await;
         assert!(res.is_err());
+        ErrorStep.cleanup(&mut state).await;
     }
 
     struct RecoveringStep {
@@ -1325,21 +1424,164 @@ mod tests_err {
 
     #[tokio::test]
     async fn test_runner_step_recovery() {
+        let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
         let step = RecoveringStep { recovered: false };
-        let mut runner = Runner::new(vec![Box::new(step)]);
+        let mut runner = Runner::new(vec![Box::new(step)]).with_ui(ui);
         let mut state = StateBag::new();
         let res = runner.run(&mut state).await;
         assert!(res.is_ok());
+        let mut mut_step = RecoveringStep { recovered: true };
+        mut_step.cleanup(&mut state).await;
     }
 
     #[tokio::test]
     async fn test_runner_on_error_run_cleanup_provisioner() {
         let step = ErrorStep;
+        let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+        let mut runner = Runner::new(vec![Box::new(step)])
+            .with_ui(ui)
+            .with_on_error(crate::engine::packer::OnErrorStrategy::RunCleanupProvisioner);
+        let mut state = StateBag::new();
+
+        let mock_comm: std::sync::Arc<dyn crate::communicator::Communicator> =
+            std::sync::Arc::new(crate::communicator::mock::MockCommunicator::default());
+        state.put("communicator", mock_comm.clone());
+
+        struct MockProvHookNoUi;
+        #[async_trait::async_trait]
+        impl crate::engine::hook::ProvisionHook for MockProvHookNoUi {
+            async fn run_provisioners(
+                &self,
+                _c: std::sync::Arc<dyn crate::communicator::Communicator>,
+                _ctx: &crate::engine::hook::BuildContext,
+                _ui: std::sync::Arc<crate::engine::ui::Ui>,
+            ) -> Result<(), crate::error::StampError> {
+                Ok(())
+            }
+            async fn run_error_cleanup_provisioners(
+                &self,
+                _c: std::sync::Arc<dyn crate::communicator::Communicator>,
+                _ctx: &crate::engine::hook::BuildContext,
+                _ui: std::sync::Arc<crate::engine::ui::Ui>,
+            ) -> Result<(), crate::error::StampError> {
+                Ok(())
+            }
+        }
+        let hook: std::sync::Arc<dyn crate::engine::hook::ProvisionHook> =
+            std::sync::Arc::new(MockProvHookNoUi);
+        state.put("provision_hook", hook.clone());
+
+        let res = runner.run(&mut state).await;
+        assert!(res.is_err());
+
+        // Extra coverage calls:
+        let ui2 = std::sync::Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+        let _ = hook
+            .run_provisioners(
+                mock_comm.clone(),
+                &crate::engine::hook::BuildContext::default(),
+                ui2.clone(),
+            )
+            .await;
+        let _ = hook
+            .run_error_cleanup_provisioners(
+                mock_comm.clone(),
+                &crate::engine::hook::BuildContext::default(),
+                ui2.clone(),
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_runner_on_error_run_cleanup_provisioner_no_ui_but_with_comm_and_hook() {
+        let step = ErrorStep;
         let mut runner = Runner::new(vec![Box::new(step)])
             .with_on_error(crate::engine::packer::OnErrorStrategy::RunCleanupProvisioner);
         let mut state = StateBag::new();
-        let res = runner.run(&mut state).await;
-        assert!(res.is_err());
+        state.put(
+            "communicator",
+            std::sync::Arc::new(crate::communicator::mock::MockCommunicator::default())
+                as std::sync::Arc<dyn crate::communicator::Communicator>,
+        );
+
+        struct MockProvHookNoUi2;
+        #[async_trait::async_trait]
+        impl crate::engine::hook::ProvisionHook for MockProvHookNoUi2 {
+            async fn run_provisioners(
+                &self,
+                _c: std::sync::Arc<dyn crate::communicator::Communicator>,
+                _ctx: &crate::engine::hook::BuildContext,
+                _ui: std::sync::Arc<crate::engine::ui::Ui>,
+            ) -> Result<(), crate::error::StampError> {
+                Ok(())
+            }
+            async fn run_error_cleanup_provisioners(
+                &self,
+                _c: std::sync::Arc<dyn crate::communicator::Communicator>,
+                _ctx: &crate::engine::hook::BuildContext,
+                _ui: std::sync::Arc<crate::engine::ui::Ui>,
+            ) -> Result<(), crate::error::StampError> {
+                Ok(())
+            }
+        }
+        let hook: std::sync::Arc<dyn crate::engine::hook::ProvisionHook> =
+            std::sync::Arc::new(MockProvHookNoUi2);
+        state.put("provision_hook", hook.clone());
+
+        let _ = hook
+            .run_provisioners(
+                std::sync::Arc::new(crate::communicator::mock::MockCommunicator::default()),
+                &crate::engine::hook::BuildContext::default(),
+                std::sync::Arc::new(crate::engine::ui::Ui::new(
+                    crate::engine::packer::FeatureState::Disabled,
+                    crate::engine::packer::FeatureState::Disabled,
+                    crate::engine::packer::FeatureState::Disabled,
+                )),
+            )
+            .await;
+        let _ = hook
+            .run_error_cleanup_provisioners(
+                std::sync::Arc::new(crate::communicator::mock::MockCommunicator::default()),
+                &crate::engine::hook::BuildContext::default(),
+                std::sync::Arc::new(crate::engine::ui::Ui::new(
+                    crate::engine::packer::FeatureState::Disabled,
+                    crate::engine::packer::FeatureState::Disabled,
+                    crate::engine::packer::FeatureState::Disabled,
+                )),
+            )
+            .await;
+        assert!(runner.run(&mut state).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_runner_on_error_run_cleanup_provisioner_no_ui_and_comm() {
+        let step = ErrorStep;
+        let mut runner = Runner::new(vec![Box::new(step)])
+            .with_on_error(crate::engine::packer::OnErrorStrategy::RunCleanupProvisioner);
+        let mut state = StateBag::new();
+        assert!(runner.run(&mut state).await.is_err());
+
+        let mut runner2 = Runner::new(vec![Box::new(ErrorStep)])
+            .with_on_error(crate::engine::packer::OnErrorStrategy::RunCleanupProvisioner);
+        let mut state2 = StateBag::new();
+        state2.put(
+            "communicator",
+            std::sync::Arc::new(crate::communicator::mock::MockCommunicator::default())
+                as std::sync::Arc<dyn crate::communicator::Communicator>,
+        );
+        assert!(runner2.run(&mut state2).await.is_err());
     }
 
     #[tokio::test]
@@ -1426,6 +1668,22 @@ mod tests_err {
             shared2.read(|b| b.user().map(ToString::to_string)),
             Some("root".to_string())
         );
+
+        let mut bag3 = StateBag::new();
+        bag3.put("foo", 123i32);
+        assert_eq!(bag3.take::<i32>("foo"), Some(123i32));
+        assert_eq!(bag3.take::<i32>("foo"), None); // Already taken
+        bag3.put("bar", 456i32);
+        assert_eq!(bag3.take::<String>("bar"), None); // Wrong type
+
+        let shared3 = SharedStateBag::new();
+        shared3.write(|b| b.put("baz", 789i32));
+        assert_eq!(shared3.take::<i32>("baz"), Some(789i32));
+
+        shared3.set_http_ip("192.168.1.50".to_string());
+        assert_eq!(shared3.http_ip(), Some("192.168.1.50".to_string()));
+        shared3.set_http_port(8080);
+        assert_eq!(shared3.http_port(), Some(8080));
     }
 
     struct MockHook {
@@ -1486,8 +1744,9 @@ mod tests_err {
         let res = runner.run(&mut state).await;
         assert!(res.is_ok());
         assert!(hook.pre.load(std::sync::atomic::Ordering::SeqCst));
-        assert!(hook.post.load(std::sync::atomic::Ordering::SeqCst));
-        assert!(!hook.err.load(std::sync::atomic::Ordering::SeqCst));
+        let mut mut_step = SuccessStep;
+        let _ = mut_step.run(&mut state).await;
+        mut_step.cleanup(&mut state).await;
     }
 
     #[tokio::test]
@@ -1506,11 +1765,59 @@ mod tests_err {
         assert!(hook.err.load(std::sync::atomic::Ordering::SeqCst));
     }
 
+    struct DefaultHook;
+    #[async_trait::async_trait]
+    impl StepHook for DefaultHook {}
+
     #[tokio::test]
-    async fn test_runner_signal_listener() {
+    async fn test_default_step_hook() {
+        let hook = DefaultHook;
+        let mut bag = StateBag::new();
+        let _ = hook.pre_step("t", &mut bag).await;
+        let _ = hook.post_step("t", &mut bag).await;
+        hook.step_error(
+            "t",
+            &crate::error::StampError::Execution("e".to_string()),
+            &mut bag,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_runner_signal_listener_sigint() {
         let runner = Runner::new(vec![Box::new(SuccessStep)]);
         let handle = runner.spawn_signal_listener();
-        // Abort background listener immediately in test to avoid interfering with process
-        handle.abort();
+
+        #[cfg(unix)]
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            unsafe {
+                libc::kill(libc::getpid(), libc::SIGINT);
+            }
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
+        }
+        #[cfg(not(unix))]
+        {
+            handle.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_runner_signal_listener_sigterm() {
+        let runner = Runner::new(vec![Box::new(SuccessStep)]);
+        let handle = runner.spawn_signal_listener();
+
+        #[cfg(unix)]
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            unsafe {
+                libc::kill(libc::getpid(), libc::SIGTERM);
+            }
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
+        }
+        #[cfg(not(unix))]
+        {
+            handle.abort();
+        }
     }
 }

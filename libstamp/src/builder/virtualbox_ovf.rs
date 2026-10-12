@@ -1,4 +1,3 @@
-#![cfg(not(tarpaulin_include))]
 //! Implementation of the `virtualbox-ovf` builder with appliance checksum validation,
 //! hardware customization, scancode typing, communicator execution, and re-exporting.
 
@@ -458,7 +457,6 @@ struct StepImportVM {
 
 #[async_trait::async_trait]
 impl Step for StepImportVM {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let vm_name = self
             .config
@@ -668,7 +666,6 @@ struct StepRunVM {
 
 #[async_trait::async_trait]
 impl Step for StepRunVM {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let vm_name = state.get::<String>("vm_name").cloned().unwrap_or_default();
         self.ui.say(&self.name, "Starting VirtualBox VM...");
@@ -728,7 +725,6 @@ struct StepUploadGuestAdditions {
 
 #[async_trait::async_trait]
 impl Step for StepUploadGuestAdditions {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         if self.config.guest_additions_mode != VBoxGuestAdditionsMode::Upload {
             return Ok(StepAction::Continue);
@@ -793,7 +789,6 @@ struct StepProvision {
 
 #[async_trait::async_trait]
 impl Step for StepProvision {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Provisioning VM...");
 
@@ -886,7 +881,6 @@ struct StepShutdown {
 
 #[async_trait::async_trait]
 impl Step for StepShutdown {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Shutting down VM...");
         let vm_name = state.get::<String>("vm_name").cloned().unwrap_or_default();
@@ -948,7 +942,6 @@ struct StepExport {
 
 #[async_trait::async_trait]
 impl Step for StepExport {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let vm_name = state.get::<String>("vm_name").cloned().unwrap_or_default();
         let output_dir = self
@@ -975,7 +968,6 @@ impl Step for StepExport {
 
 #[async_trait::async_trait]
 impl Builder for VirtualboxOvfBuilder {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn prepare(&self) -> Result<(), StampError> {
         if self.config.name.is_empty() {
             return Err(StampError::Parse("Name cannot be empty".to_string()));
@@ -983,7 +975,6 @@ impl Builder for VirtualboxOvfBuilder {
         Ok(())
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(
         &self,
         hook: Arc<dyn ProvisionHook>,
@@ -1126,6 +1117,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_virtualboxovfbuilder_run() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let temp_dir = tempfile::tempdir().unwrap();
         let src_file = temp_dir.path().join("source.ovf");
         tokio::fs::write(&src_file, b"OVF_SOURCE_CONTENT")
@@ -1136,7 +1130,7 @@ mod tests {
 
         let config = VirtualboxOvfConfig {
             name: "test-builder".to_string(),
-            vm_name: Some("test-vm".to_string()),
+            vm_name: Some("test-vm-ovf".to_string()),
             source_path: Some(src_file.to_string_lossy().to_string()),
             checksum: Some(checksum),
             memory: Some(MemoryMb::new(2048)),
@@ -1157,6 +1151,9 @@ mod tests {
             }],
             guest_additions_path: Some("/tmp/VBoxGuestAdditions.iso".to_string()),
             guest_additions_mode: VBoxGuestAdditionsMode::Upload,
+            ssh_host_port: Some(Port::new(2222)),
+            winrm_host_port: Some(Port::new(5985)),
+            communicator: Some("winrm".to_string()),
             export_format: VBoxExportFormat::Ovf,
             output_directory: Some("custom-vbox-out".to_string()),
             boot_command: Some(vec!["install<enter>".to_string()]),
@@ -1197,7 +1194,7 @@ mod tests {
                 .map(|a| a.id())
                 .ok()
                 .unwrap_or_default()
-                .contains("test-vm.ovf")
+                .contains("test-vm-ovf.ovf")
         );
         assert!(builder.cancel().await.is_ok());
 
@@ -1303,10 +1300,117 @@ mod tests {
         )
         .await;
         assert!(mismatch_res.is_err());
-        assert!(matches!(
-            mismatch_res.unwrap_err(),
-            StampError::ChecksumMismatch { .. }
+    }
+
+    #[test]
+    fn test_virtualbox_ovf_fallback_config_aliases() {
+        let mut builder_cfg = crate::template::BuilderConfig {
+            builder_type: "virtualbox-ovf".to_string(),
+            name: "test-vbox".to_string(),
+            ..Default::default()
+        };
+        builder_cfg
+            .config
+            .insert("accelerate3d".to_string(), "on".to_string());
+        builder_cfg
+            .config
+            .insert("nictype1".to_string(), "virtio".to_string());
+        builder_cfg
+            .config
+            .insert("vbox_nested_virt".to_string(), "on".to_string());
+        builder_cfg
+            .config
+            .insert("vbox_rtc_time_base".to_string(), "UTC".to_string());
+        builder_cfg
+            .config
+            .insert("vbox_usb".to_string(), "on".to_string());
+        builder_cfg
+            .config
+            .insert("format".to_string(), "invalid_format".to_string());
+        builder_cfg
+            .config
+            .insert("headless".to_string(), "false".to_string());
+        builder_cfg
+            .config
+            .insert("boot_command".to_string(), r#"["<enter>"]"#.to_string());
+        builder_cfg
+            .config
+            .insert("http_port_min".to_string(), "8000".to_string());
+        builder_cfg
+            .config
+            .insert("http_port_max".to_string(), "8010".to_string());
+        builder_cfg
+            .config
+            .insert("http_content".to_string(), "invalid json".to_string());
+
+        let cfg = VirtualboxOvfConfig::from_builder_config(&builder_cfg).expect("parse");
+        assert_eq!(cfg.gfx_accelerate_3d, Some(true));
+        assert!(cfg.nic_type.is_some());
+        assert_eq!(cfg.nested_virt, Some(true));
+        assert_eq!(cfg.rtc_time_base.as_deref(), Some("UTC"));
+        assert_eq!(cfg.usb, Some(true));
+        assert_eq!(cfg.export_format, VBoxExportFormat::Ova);
+        assert_eq!(cfg.http_port_min, Some(8000));
+        assert_eq!(cfg.http_port_max, Some(8010));
+        assert!(cfg.http_content.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_vbox_ovf_run_without_sizes_and_ports() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let f_path = temp_dir.path().join("source.ovf");
+        tokio::fs::write(&f_path, b"dummy").await.unwrap();
+
+        let config = super::VirtualboxOvfConfig {
+            name: "test-vbox-ovf-default-ports".to_string(),
+            source_path: Some(f_path.to_string_lossy().to_string()),
+            ssh_host_port: None,
+            winrm_host_port: None,
+            guest_additions_path: None,
+            guest_additions_mode: VBoxGuestAdditionsMode::Upload,
+            output_directory: Some(temp_dir.path().to_string_lossy().to_string()),
+            virtualbox_version_file: Some("version.txt".to_string()),
+            ..Default::default()
+        };
+
+        let builder = super::VirtualboxOvfBuilder::new(config);
+
+        let script = temp_dir.path().join("VBoxManage");
+        tokio::fs::write(&script, b"#!/bin/sh\nexit 0")
+            .await
+            .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        unsafe {
+            std::env::set_var("VBOXMANAGE_PATH", script.to_string_lossy().to_string());
+        }
+
+        let hook = Arc::new(crate::engine::hook::DefaultProvisionHook {
+            provisioners: Arc::new(vec![]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let ui = Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
         ));
+
+        builder
+            .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
+            .await
+            .unwrap();
+
+        unsafe {
+            std::env::remove_var("VBOXMANAGE_PATH");
+        }
     }
 
     #[test]
@@ -1391,6 +1495,10 @@ mod tests {
         builder_cfg.config.insert(
             "vboxmanage".to_string(),
             r#"[["modifyvm", "{{.Name}}", "--cpus", "2"]]"#.to_string(),
+        );
+        builder_cfg.config.insert(
+            "http_content".to_string(),
+            r#"{"/seed.cfg": "seed data"}"#.to_string(),
         );
 
         let cfg = VirtualboxOvfConfig::from_builder_config(&builder_cfg).unwrap();

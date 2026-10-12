@@ -190,7 +190,6 @@ impl Provisioner for WindowsRestartProvisioner {
         comm: &dyn Communicator,
         ui: std::sync::Arc<crate::engine::ui::Ui>,
     ) -> Result<(), StampError> {
-        #![cfg_attr(coverage_nightly, coverage(off))]
         if self.config.check_registry {
             ui.say("windows-restart", "Checking for pending Windows reboot...");
             match Self::check_pending_reboot(comm).await {

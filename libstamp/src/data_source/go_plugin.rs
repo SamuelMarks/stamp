@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Go-plugin out-of-process data source RPC client.
 
 use crate::data_source::DataSource;
@@ -101,7 +100,9 @@ mod tests {
     use crate::r#gen::packer::datasource_server::{Datasource as DatasourceRpc, DatasourceServer};
     use tonic::{Request, Response, Status};
 
-    struct MockDatasourceService;
+    struct MockDatasourceService {
+        mode: String,
+    }
 
     #[tonic::async_trait]
     impl DatasourceRpc for MockDatasourceService {
@@ -109,8 +110,23 @@ mod tests {
             &self,
             _request: Request<ExecuteRequest>,
         ) -> Result<Response<ExecuteResponse>, Status> {
+            if self.mode == "error" {
+                return Err(Status::internal("Internal mock error"));
+            }
+            if self.mode == "invalid_json" {
+                return Ok(Response::new(ExecuteResponse {
+                    output: b"not json".to_vec(),
+                    errors: vec![],
+                }));
+            }
+            if self.mode == "resp_error" {
+                return Ok(Response::new(ExecuteResponse {
+                    output: b"{}".to_vec(),
+                    errors: vec!["some internal plugin error".to_string()],
+                }));
+            }
             let output = serde_json::json!({ "result": "mock_data", "active": true });
-            let output_bytes = serde_json::to_vec(&output).unwrap();
+            let output_bytes = serde_json::to_vec(&output).unwrap_or_default();
             Ok(Response::new(ExecuteResponse {
                 output: output_bytes,
                 errors: vec![],
@@ -118,23 +134,31 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_go_plugin_data_source_rpc() -> Result<(), StampError> {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let local_addr = listener.local_addr().unwrap();
+    async fn spawn_mock_server(mode: &str) -> Result<String, StampError> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let local_addr = listener.local_addr()?;
+        let svc = MockDatasourceService {
+            mode: mode.to_string(),
+        };
 
         tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(DatasourceServer::new(MockDatasourceService))
+            let _ = tonic::transport::Server::builder()
+                .add_service(DatasourceServer::new(svc))
                 .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-                .await
-                .unwrap();
+                .await;
         });
+
+        Ok(local_addr.to_string())
+    }
+
+    #[tokio::test]
+    async fn test_go_plugin_data_source_rpc() -> Result<(), StampError> {
+        let addr = spawn_mock_server("normal").await?;
 
         let config = GoPluginDataSourceConfig {
             source_type: "custom".to_string(),
             plugin_path: "".to_string(),
-            endpoint: Some(local_addr.to_string()),
+            endpoint: Some(addr),
         };
         let ds = GoPluginDataSource::new(config);
         let val = ds.read().await?;
@@ -143,6 +167,51 @@ mod tests {
             Some("mock_data")
         );
         assert_eq!(val.get("active").and_then(|v| v.as_bool()), Some(true));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_go_plugin_http_branch_and_errors() -> Result<(), StampError> {
+        // HTTP prefix branch
+        let addr = spawn_mock_server("normal").await?;
+        let config = GoPluginDataSourceConfig {
+            source_type: "custom".to_string(),
+            plugin_path: "".to_string(),
+            endpoint: Some(format!("http://{addr}")),
+        };
+        let ds = GoPluginDataSource::new(config);
+        assert!(ds.read().await.is_ok());
+
+        // Error branch
+        let addr_err = spawn_mock_server("error").await?;
+        let config_err = GoPluginDataSourceConfig {
+            source_type: "custom".to_string(),
+            plugin_path: "".to_string(),
+            endpoint: Some(addr_err),
+        };
+        let ds_err = GoPluginDataSource::new(config_err);
+        assert!(ds_err.read().await.is_err());
+
+        // Invalid JSON branch
+        let addr_inv = spawn_mock_server("invalid_json").await?;
+        let config_inv = GoPluginDataSourceConfig {
+            source_type: "custom".to_string(),
+            plugin_path: "".to_string(),
+            endpoint: Some(addr_inv),
+        };
+        let ds_inv = GoPluginDataSource::new(config_inv);
+        assert!(ds_inv.read().await.is_err());
+
+        // Plugin resp error branch
+        let addr_resp_err = spawn_mock_server("resp_error").await?;
+        let config_resp_err = GoPluginDataSourceConfig {
+            source_type: "custom".to_string(),
+            plugin_path: "".to_string(),
+            endpoint: Some(addr_resp_err),
+        };
+        let ds_resp_err = GoPluginDataSource::new(config_resp_err);
+        assert!(ds_resp_err.read().await.is_err());
+
         Ok(())
     }
 }

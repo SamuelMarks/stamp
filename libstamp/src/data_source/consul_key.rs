@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `consul-key` data source.
 //!
 //! Fetches key-value configuration values from `HashiCorp` Consul KV store.

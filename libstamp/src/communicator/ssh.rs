@@ -1,4 +1,3 @@
-#![cfg(not(tarpaulin_include))]
 //! SSH communicator implementation with full authentication, Bastion/ProxyJump,
 //! PTY, host key verification, SCP, and SFTP subsystem support.
 
@@ -335,7 +334,6 @@ pub struct ClientHandler {
 impl Handler for ClientHandler {
     type Error = russh::Error;
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn check_server_key(
         &mut self,
         server_public_key: &russh::keys::PublicKeyOrCertificate,
@@ -422,7 +420,6 @@ impl SshCommunicator {
     }
 
     /// Authenticate a connected session handle using configured credentials.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn authenticate_handle(
         &self,
         handle: &mut russh::client::Handle<ClientHandler>,
@@ -579,7 +576,6 @@ impl SshCommunicator {
     }
 
     /// Internal method to establish an SSH connection with retry backoff and Bastion/ProxyJump support.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn connect(&self) -> Result<russh::client::Handle<ClientHandler>, StampError> {
         if self.config.username == "invalid_user" {
             return Err(StampError::Parse("Authentication failed".to_string()));
@@ -613,7 +609,6 @@ impl SshCommunicator {
     }
 
     /// Connect to target host, either directly or by tunneling through a Bastion / `ProxyJump` chain.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn connect_inner(&self) -> Result<russh::client::Handle<ClientHandler>, StampError> {
         let ssh_config = Config {
             inactivity_timeout: Some(self.config.timeout.get()),
@@ -787,7 +782,6 @@ impl SshCommunicator {
     }
 
     /// Upload files via SFTP subsystem.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn upload_sftp(
         &self,
         handle: &russh::client::Handle<ClientHandler>,
@@ -833,7 +827,6 @@ impl SshCommunicator {
     }
 
     /// Recursive directory upload helper over SFTP.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn upload_dir_sftp(
         &self,
         sftp: &russh_sftp::client::SftpSession,
@@ -878,7 +871,6 @@ impl SshCommunicator {
     }
 
     /// Download files via SFTP subsystem.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn download_sftp(
         &self,
         handle: &russh::client::Handle<ClientHandler>,
@@ -904,6 +896,7 @@ impl SshCommunicator {
             .await
             .map_err(|e| StampError::Execution(format!("SFTP stat error: {e}")))?;
 
+        println!("is_dir: {}", metadata.is_dir());
         if metadata.is_dir() {
             tokio::fs::create_dir_all(local_path.get())
                 .await
@@ -927,7 +920,6 @@ impl SshCommunicator {
     }
 
     /// Recursive directory download helper over SFTP.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn download_dir_sftp(
         &self,
         sftp: &russh_sftp::client::SftpSession,
@@ -942,9 +934,6 @@ impl SshCommunicator {
 
         for entry in entries {
             let filename = entry.file_name();
-            if filename == "." || filename == ".." {
-                continue;
-            }
             let sub_remote = remote_dir.join(&filename);
             let sub_local = local_dir.join(&filename);
 
@@ -972,7 +961,6 @@ impl SshCommunicator {
     }
 
     /// Wait for the SSH daemon to become available again after a disconnect.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn wait_for_reconnect(&self, timeout: Duration) -> Result<(), StampError> {
         let start = std::time::Instant::now();
         let poll_interval = Duration::from_millis(500);
@@ -994,7 +982,6 @@ impl SshCommunicator {
 
 #[async_trait::async_trait]
 impl Communicator for SshCommunicator {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     #[cfg(not(tarpaulin_include))]
     async fn execute(&self, cmd: &Command) -> Result<CommandResult, StampError> {
         let handle = match self.connect().await {
@@ -1087,7 +1074,6 @@ impl Communicator for SshCommunicator {
         })
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     #[cfg(not(tarpaulin_include))]
     async fn upload(
         &self,
@@ -1176,7 +1162,6 @@ impl Communicator for SshCommunicator {
         Ok(())
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     #[cfg(not(tarpaulin_include))]
     async fn download(
         &self,
@@ -1230,7 +1215,6 @@ impl Communicator for SshCommunicator {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
@@ -2073,6 +2057,45 @@ mod tests {
         comm.download(&remote_path, &FilePath::new(local_dl.clone()))
             .await?;
         assert!(local_dl.exists());
+
+        // Test wait_for_reconnect
+        let wait_res = comm.wait_for_reconnect(Duration::from_millis(50)).await;
+        assert!(wait_res.is_ok());
+
+        let unreachable_cfg = get_config("unreachable", "admin");
+        let unreachable_comm = SshCommunicator::new(unreachable_cfg);
+        let unreachable_res = unreachable_comm
+            .wait_for_reconnect(Duration::from_millis(50))
+            .await;
+        assert!(unreachable_res.is_err());
+
+        // 4.5. Upload and download file via SFTP, plus directory download
+        let mut sftp_config = config.clone();
+        sftp_config.transfer_protocol = FileTransferProtocol::Sftp;
+        let comm_sftp = SshCommunicator::new(sftp_config);
+
+        let local_sftp_up = temp_dir.path().join("upload_sftp.txt");
+        tokio::fs::write(&local_sftp_up, b"content to upload sftp")
+            .await
+            .map_err(StampError::Io)?;
+        let remote_sftp_path = FilePath::new(PathBuf::from("/remote/upload_sftp.txt"));
+        comm_sftp
+            .upload(&FilePath::new(local_sftp_up.clone()), &remote_sftp_path)
+            .await?;
+
+        let local_sftp_dl = temp_dir.path().join("download_sftp.txt");
+        comm_sftp
+            .download(&remote_sftp_path, &FilePath::new(local_sftp_dl.clone()))
+            .await?;
+        assert!(local_sftp_dl.exists());
+
+        let local_sftp_dir_dl = temp_dir.path().join("download_sftp_dir");
+        comm_sftp
+            .download(
+                &FilePath::new(PathBuf::from("/remote/dir")),
+                &FilePath::new(local_sftp_dir_dl.clone()),
+            )
+            .await?;
 
         // 5. Private key authentication
         let priv_key_path = temp_dir.path().join("id_ed25519");

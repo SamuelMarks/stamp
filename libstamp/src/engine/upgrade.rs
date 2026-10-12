@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! AST rewrites for converting legacy Packer JSON templates into idiomatic HCL2.
 
 use crate::error::StampError;
@@ -562,19 +561,19 @@ pub fn upgrade_json_to_structured_hcl2(content: &str) -> Result<StructuredHcl2, 
                     if *k == "type" {
                         continue;
                     }
-                    if *k == "only" || *k == "except" {
-                        if let Some(targets) = v.as_array() {
-                            let mut remapped = Vec::new();
-                            for t in targets {
-                                if let Some(t_str) = t.as_str() {
-                                    let remap = builder_name_to_source
-                                        .get(t_str)
-                                        .map_or_else(|| t_str.to_string(), Clone::clone);
-                                    remapped.push(format!("\"{remap}\""));
-                                }
+                    if (*k == "only" || *k == "except")
+                        && let Some(targets) = v.as_array()
+                    {
+                        let mut remapped = Vec::new();
+                        for t in targets {
+                            if let Some(t_str) = t.as_str() {
+                                let remap = builder_name_to_source
+                                    .get(t_str)
+                                    .map_or_else(|| t_str.to_string(), Clone::clone);
+                                remapped.push(format!("\"{remap}\""));
                             }
-                            build_lines.push(format!("    {k} = [{}]", remapped.join(", ")));
                         }
+                        build_lines.push(format!("    {k} = [{}]", remapped.join(", ")));
                         continue;
                     }
                     let expr = json_val_to_hcl_expr(v, 2);
@@ -653,7 +652,6 @@ pub fn upgrade_json_to_structured_hcl2(content: &str) -> Result<StructuredHcl2, 
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
@@ -732,6 +730,15 @@ mod tests {
     }
 
     #[test]
+    fn test_upgrade_json_to_hcl2_no_post_processors() {
+        let json = r#"{
+            "builders": [{"type": "amazon-ebs", "name": "ami1"}]
+        }"#;
+        let res = upgrade_json_to_hcl2(json);
+        assert!(res.is_ok());
+    }
+
+    #[test]
     fn test_upgrade_json_to_hcl2_full() {
         let json = r#"{
             "description": "Ubuntu AMI build",
@@ -749,35 +756,43 @@ mod tests {
                     "name": "my-ami",
                     "region": "{{ user `region` }}",
                     "instance_type": "t3.micro"
-                }
+                },
+                "invalid-builder-type-string"
             ],
             "provisioners": [
                 {
                     "type": "shell",
                     "inline": ["echo hello", "uptime"],
-                    "only": ["my-ami"]
-                }
+                    "only": ["my-ami", 123]
+                },
+                "invalid-provisioner-string"
             ],
             "error-cleanup-provisioner": [
                 {
                     "type": "shell-local",
                     "inline": ["echo 'cleanup'"]
-                }
+                },
+                "invalid-error-provisioner-string"
             ],
             "post-processors": [
                 {
                     "type": "manifest",
-                    "output": "manifest.json"
+                    "output": "manifest.json",
+                    "only": ["my-ami", 123]
                 },
                 [
                     {
                         "type": "docker-tag",
-                        "repository": "my-repo"
+                        "repository": "my-repo",
+                        "except": ["other-ami"]
                     },
                     {
-                        "type": "docker-push"
-                    }
-                ]
+                        "type": "docker-push",
+                        "except": "not-an-array"
+                    },
+                    "invalid-nested-post-processor-string"
+                ],
+                "invalid-post-processor-string"
             ]
         }"#;
 
@@ -879,6 +894,24 @@ mod tests {
         let nested_map = serde_json::json!({ "key": "val" });
         let res = json_val_to_hcl_expr(&nested_map, 1);
         assert!(res.contains("key = \"val\""));
+
+        let nested_array = serde_json::json!(["val1", "val2"]);
+        let res2 = json_val_to_hcl_expr(&nested_array, 0);
+        assert!(res2.contains("\"val1\","));
+        assert!(res2.contains("\"val2\","));
+
+        let complex_obj = serde_json::json!({ "key": ["val"] });
+        let res3 = json_val_to_hcl_expr(&complex_obj, 0);
+        assert!(res3.contains("key = [\n    \"val\",\n  ]"));
+    }
+
+    #[test]
+    fn test_upgrade_json_to_structured_hcl2_no_post_processors() {
+        let json = r#"{
+            "builders": [{"type": "amazon-ebs", "name": "ami1"}]
+        }"#;
+        let res = upgrade_json_to_structured_hcl2(json);
+        assert!(res.is_ok());
     }
 
     #[test]
@@ -894,42 +927,56 @@ mod tests {
                     "type": "amazon-ebs",
                     "name": "ami1",
                     "region": "us-east-1"
-                }
+                },
+                "invalid-builder"
             ],
             "provisioners": [
                 {
                     "type": "shell",
                     "inline": ["echo test"],
-                    "only": ["ami1", "unknown"]
-                }
+                    "only": ["ami1", "unknown", 123]
+                },
+                "invalid-provisioner-string"
+            ],
+            "error-cleanup-provisioner": [
+                {
+                    "type": "shell-local",
+                    "inline": ["echo 'cleanup'"]
+                },
+                "invalid-error-provisioner-string"
             ],
             "post-processors": [
                 {
                     "type": "manifest",
-                    "output": "m.json"
+                    "output": "manifest.json",
+                    "only": ["ami1"]
                 },
                 [
                     {
                         "type": "docker-tag",
-                        "repository": "repo1"
-                    }
-                ]
+                        "repository": "my-repo",
+                        "except": ["other-ami"]
+                    },
+                    {
+                        "type": "docker-push",
+                        "except": "not-an-array"
+                    },
+                    "invalid-nested-post-processor-string"
+                ],
+                "invalid-post-processor-string"
             ]
         }"#;
 
         let res = upgrade_json_to_structured_hcl2(json);
         assert!(res.is_ok());
-        if let Ok(s) = res {
-            assert!(
-                s.variables.contains("packer {")
-                    || s.variables.contains("required_version = \">=1.8.0\"")
-            );
-            assert!(s.sources.contains("source \"amazon-ebs\" \"ami1\""));
-            assert!(s.build.contains("provisioner \"shell\""));
-            assert!(s.build.contains("post-processor \"manifest\""));
-            assert!(s.build.contains("post-processors {"));
-            assert!(s.build.contains("post-processor \"docker-tag\""));
-        }
+        let s = res.unwrap_or_default();
+        assert!(s.variables.contains("packer {"));
+        assert!(s.variables.contains("required_version = \">=1.8.0\""));
+        assert!(s.sources.contains("source \"amazon-ebs\" \"ami1\""));
+        assert!(s.build.contains("provisioner \"shell\""));
+        assert!(s.build.contains("post-processor \"manifest\""));
+        assert!(s.build.contains("post-processors {"));
+        assert!(s.build.contains("post-processor \"docker-tag\""));
     }
 
     #[test]

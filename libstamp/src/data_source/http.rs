@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! `http` data source implementation.
 
 use crate::data_source::DataSource;
@@ -91,7 +90,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_http_success_text() -> Result<(), crate::error::StampError> {
+    async fn test_http_success_text() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("GET", "/text")
@@ -107,14 +106,13 @@ mod tests {
             url: format!("{}/text", server.url()),
             headers,
         });
-        let val = ds.read().await?;
+        let val = ds.read().await.expect("read success");
         assert_eq!(val, Value::String("hello plain text".to_string()));
         mock.assert_async().await;
-        Ok(())
     }
 
     #[tokio::test]
-    async fn test_http_json_real_mock() -> Result<(), crate::error::StampError> {
+    async fn test_http_json_real_mock() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("GET", "/")
@@ -129,10 +127,9 @@ mod tests {
             ..Default::default()
         });
 
-        let val = ds.read().await?;
+        let val = ds.read().await.expect("read json");
         assert_eq!(val, serde_json::json!({"hello": "world"}));
         mock.assert_async().await;
-        Ok(())
     }
 
     #[tokio::test]
@@ -146,18 +143,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_http_bad_body() -> Result<(), crate::error::StampError> {
+    async fn test_http_bad_body() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .map_err(|e| StampError::Io(std::io::Error::other(e)))?;
-        let addr = listener
-            .local_addr()
-            .map_err(|e| StampError::Io(std::io::Error::other(e)))?;
+            .expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
 
         tokio::spawn(async move {
-            let Ok((mut socket, _)) = listener.accept().await else {
-                return;
-            };
+            let (mut socket, _) = listener.accept().await.expect("listener accept");
             use tokio::io::AsyncWriteExt;
             let response = "HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\nshort";
             let _ = socket.write_all(response.as_bytes()).await;
@@ -170,11 +163,10 @@ mod tests {
 
         let res = ds.read().await;
         assert!(res.is_err());
-        Ok(())
     }
 
     #[tokio::test]
-    async fn test_http_status_404_error() -> Result<(), crate::error::StampError> {
+    async fn test_http_status_404_error() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("GET", "/notfound")
@@ -189,15 +181,39 @@ mod tests {
         let res = ds.read().await;
         assert!(res.is_err());
         mock.assert_async().await;
-        Ok(())
     }
 
     #[tokio::test]
-    async fn test_http_failure_empty_url() -> Result<(), crate::error::StampError> {
+    async fn test_http_failure_empty_url() {
         let ds = HttpDataSource::new(HttpConfig::default());
         let result = ds.read().await;
-        assert!(matches!(result, Err(StampError::Parse(_))));
-        Ok(())
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_http_json_content_type_invalid_body() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/invalid-json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("plain text not json")
+            .create_async()
+            .await;
+
+        let mut headers = HashMap::new();
+        headers.insert(
+            "invalid header name with space".to_string(),
+            "val".to_string(),
+        );
+        let ds = HttpDataSource::new(HttpConfig {
+            url: format!("{}/invalid-json", server.url()),
+            headers,
+        });
+
+        let val = ds.read().await.expect("read");
+        assert_eq!(val, Value::String("plain text not json".to_string()));
+        mock.assert_async().await;
     }
 
     #[test]

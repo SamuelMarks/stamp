@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Communicator traits and implementations (SSH, `WinRM`, etc.).
 
 pub mod chroot;

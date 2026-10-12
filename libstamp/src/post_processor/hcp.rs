@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! HCP post-processor.
 
 use crate::error::StampError;

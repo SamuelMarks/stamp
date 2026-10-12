@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `qemu` builder with architecture detection, accelerator selection,
 //! headless VNC typing client with delay parsing, floppy/CD ISO generation, and disk format conversion.
 
@@ -104,9 +103,17 @@ impl QemuAccelerator {
 /// # Errors
 /// Returns `StampError::Builder` if an accelerator was explicitly requested but is unavailable or permissions are denied.
 pub fn validate_accelerator(accel: QemuAccelerator) -> Result<QemuAccelerator, StampError> {
+    validate_accelerator_with_path(accel, Path::new("/dev/kvm"))
+}
+
+/// Validates accelerator availability with a specific KVM path.
+#[doc(hidden)]
+pub fn validate_accelerator_with_path(
+    accel: QemuAccelerator,
+    kvm_path: &Path,
+) -> Result<QemuAccelerator, StampError> {
     match accel {
         QemuAccelerator::Kvm => {
-            let kvm_path = Path::new("/dev/kvm");
             if !kvm_path.exists() {
                 return Err(StampError::Builder(
                     "KVM accelerator requested but /dev/kvm not found on host".to_string(),
@@ -135,7 +142,6 @@ pub fn validate_accelerator(accel: QemuAccelerator) -> Result<QemuAccelerator, S
         QemuAccelerator::Auto => {
             #[cfg(target_os = "linux")]
             {
-                let kvm_path = Path::new("/dev/kvm");
                 if kvm_path.exists()
                     && std::fs::OpenOptions::new()
                         .read(true)
@@ -960,7 +966,6 @@ struct StepCreateImage {
 
 #[async_trait::async_trait]
 impl Step for StepCreateImage {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let output_dir = self
             .config
@@ -1047,7 +1052,6 @@ struct StepGenerateMedia {
 
 #[async_trait::async_trait]
 impl Step for StepGenerateMedia {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let output_dir = self
             .config
@@ -1103,7 +1107,6 @@ struct StepRunQemu {
 
 #[async_trait::async_trait]
 impl Step for StepRunQemu {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let binary = self.config.resolve_binary();
         let accel = self.config.accelerator.as_str();
@@ -1220,7 +1223,6 @@ struct StepTypeBootCommand {
 
 #[async_trait::async_trait]
 impl Step for StepTypeBootCommand {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let Some(ref cmds) = self.config.boot_command else {
             return Ok(StepAction::Continue);
@@ -1258,7 +1260,6 @@ struct StepProvision {
 
 #[async_trait::async_trait]
 impl Step for StepProvision {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Provisioning QEMU VM...");
 
@@ -1326,7 +1327,6 @@ struct StepShutdown {
 
 #[async_trait::async_trait]
 impl Step for StepShutdown {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Shutting down QEMU VM...");
 
@@ -1364,7 +1364,6 @@ struct StepConvertDisk {
 
 #[async_trait::async_trait]
 impl Step for StepConvertDisk {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let Some(target_format) = self.config.disk_format else {
             return Ok(StepAction::Continue);
@@ -1396,7 +1395,6 @@ impl Step for StepConvertDisk {
 
 #[async_trait::async_trait]
 impl Builder for QemuBuilder {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn prepare(&self) -> Result<(), StampError> {
         if self.config.name.is_empty() {
             return Err(StampError::Parse("Name cannot be empty".to_string()));
@@ -1404,7 +1402,6 @@ impl Builder for QemuBuilder {
         Ok(())
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(
         &self,
         hook: Arc<dyn ProvisionHook>,
@@ -1532,6 +1529,7 @@ Do you want to clean up? [y/N]: ",
     for_loops_over_fallibles
 )]
 mod tests {
+
     use super::*;
     use crate::engine::hook::DefaultProvisionHook;
     use crate::engine::packer::OnErrorStrategy;
@@ -1539,8 +1537,8 @@ mod tests {
 
     static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    #[test]
-    fn test_boot_command_parsing() {
+    #[tokio::test]
+    async fn test_boot_command_parsing() -> Result<(), crate::error::StampError> {
         let commands = vec![
             "<wait><wait5><esc>linux <tab>preseed/url=http://{{ .HTTPIP }}:{{ .HTTPPort }}/preseed.cfg<enter>".to_string(),
         ];
@@ -1551,10 +1549,14 @@ mod tests {
         assert!(actions.contains(&BootAction::Key(0xff09))); // Tab
         assert!(actions.contains(&BootAction::Key(0xff0d))); // Enter
         assert!(actions.contains(&BootAction::Key('l' as u32)));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_media_and_disk_conversion() {
+    async fn test_media_and_disk_conversion() -> Result<(), crate::error::StampError> {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let temp_dir_res = tempfile::tempdir();
         assert!(temp_dir_res.is_ok());
         for temp_dir in temp_dir_res {
@@ -1632,10 +1634,11 @@ mod tests {
                 }
             }
         }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_qemu_steps_coverage() {
+    async fn test_qemu_steps_coverage() -> Result<(), crate::error::StampError> {
         let ui = Arc::new(Ui::new(
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
@@ -1673,10 +1676,14 @@ mod tests {
             DiskFormat::Vmdk,
         )
         .await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_qemubuilder_run() {
+    async fn test_qemubuilder_run() -> Result<(), crate::error::StampError> {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let temp_dir_res = tempfile::tempdir();
         assert!(temp_dir_res.is_ok());
         for temp_dir in temp_dir_res {
@@ -1732,10 +1739,11 @@ mod tests {
 
             assert!(builder.cancel().await.is_ok());
         }
+        Ok(())
     }
 
-    #[test]
-    fn test_qemu_derived_traits() {
+    #[tokio::test]
+    async fn test_qemu_derived_traits() -> Result<(), crate::error::StampError> {
         let mut config = QemuConfig::default();
         config.name = "test".to_string();
         config.arch = QemuArch::Aarch64;
@@ -1762,10 +1770,11 @@ mod tests {
 
         let config2 = config.clone();
         assert_eq!(config, config2);
+        Ok(())
     }
 
-    #[test]
-    fn test_smp_and_numa_args() {
+    #[tokio::test]
+    async fn test_smp_and_numa_args() -> Result<(), crate::error::StampError> {
         let smp = SmpConfig {
             cpus: Some(8),
             sockets: Some(2),
@@ -1795,10 +1804,11 @@ mod tests {
 
         assert!(SmpConfig::default().to_qemu_arg().is_empty());
         assert_eq!(NumaNodeConfig::default().to_qemu_arg(), "node");
+        Ok(())
     }
 
-    #[test]
-    fn test_qemu_target_architecture_and_binaries() {
+    #[tokio::test]
+    async fn test_qemu_target_architecture_and_binaries() -> Result<(), crate::error::StampError> {
         let mut cfg = QemuConfig::default();
         cfg.arch = QemuArch::X86_64;
         assert_eq!(cfg.resolve_binary(), "qemu-system-x86_64");
@@ -1829,10 +1839,11 @@ mod tests {
         assert_eq!(CpuModel::CortexA57.as_str(), "cortex-a57");
         assert_eq!(CpuModel::CortexA72.as_str(), "cortex-a72");
         assert_eq!(CpuModel::Custom("EPYC-v4".to_string()).as_str(), "EPYC-v4");
+        Ok(())
     }
 
-    #[test]
-    fn test_qemu_accelerators_and_validation() {
+    #[tokio::test]
+    async fn test_qemu_accelerators_and_validation() -> Result<(), crate::error::StampError> {
         assert!(validate_accelerator(QemuAccelerator::Tcg).is_ok());
         assert!(validate_accelerator(QemuAccelerator::None).is_ok());
         assert!(validate_accelerator(QemuAccelerator::Hvf).is_ok());
@@ -1847,10 +1858,11 @@ mod tests {
                 matches!(res.unwrap_err(), StampError::Builder(msg) if msg.contains("not found on host"))
             );
         }
+        Ok(())
     }
 
-    #[test]
-    fn test_qemuargs_engine_and_substitutions() {
+    #[tokio::test]
+    async fn test_qemuargs_engine_and_substitutions() -> Result<(), crate::error::StampError> {
         let mut state = StateBag::new();
         state.put("path_root", "/path/to/template".to_string());
         state.put("http_ip", "192.168.1.100".to_string());
@@ -1888,7 +1900,7 @@ mod tests {
             ..Default::default()
         };
 
-        let args = build_qemu_args(&config, "/tmp/disk.qcow2", &state).unwrap();
+        let args = build_qemu_args(&config, "/tmp/disk.qcow2", &state)?;
 
         assert!(args.contains(&"-machine".to_string()));
         assert!(args.contains(&"virt".to_string()));
@@ -1901,15 +1913,16 @@ mod tests {
         assert!(args.contains(&"org.qemu.guest_agent.0".to_string()));
         assert!(args.contains(&"usb-kbd".to_string()));
         assert!(args.contains(&"ramfb".to_string()));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_qemu_uefi_and_firmware() {
-        let temp_dir = tempfile::tempdir().unwrap();
+    async fn test_qemu_uefi_and_firmware() -> Result<(), crate::error::StampError> {
+        let temp_dir = tempfile::tempdir()?;
         let code_path = temp_dir.path().join("OVMF_CODE.fd");
         let vars_template = temp_dir.path().join("OVMF_VARS.fd");
-        std::fs::write(&code_path, b"UEFI_CODE").unwrap();
-        std::fs::write(&vars_template, b"UEFI_VARS").unwrap();
+        std::fs::write(&code_path, b"UEFI_CODE")?;
+        std::fs::write(&vars_template, b"UEFI_VARS")?;
 
         let config = QemuConfig {
             name: "uefi-vm".to_string(),
@@ -1942,13 +1955,14 @@ mod tests {
         // Test cleanup drops efivars when efi_drop_efivars is true
         step.cleanup(&state).await;
         assert!(!instance_vars.exists());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_qemu_disks_and_formats() {
-        let temp_dir = tempfile::tempdir().unwrap();
+    async fn test_qemu_disks_and_formats() -> Result<(), crate::error::StampError> {
+        let temp_dir = tempfile::tempdir()?;
         let base_img = temp_dir.path().join("base.qcow2");
-        std::fs::write(&base_img, b"BASE_IMAGE_DATA").unwrap();
+        std::fs::write(&base_img, b"BASE_IMAGE_DATA")?;
 
         let ui = Arc::new(Ui::new(
             crate::engine::packer::FeatureState::Disabled,
@@ -1981,11 +1995,12 @@ mod tests {
                 temp_dir.path().to_string_lossy()
             ))
         );
+        Ok(())
     }
 
-    #[test]
-    fn test_qemu_headless_and_vnc_allocation() {
-        let port = allocate_vnc_port(5900, 6000).unwrap();
+    #[tokio::test]
+    async fn test_qemu_headless_and_vnc_allocation() -> Result<(), crate::error::StampError> {
+        let port = allocate_vnc_port(5900, 6000)?;
         assert!((5900..=6000).contains(&port));
 
         // Exhaustion test with inverted port range
@@ -2005,7 +2020,7 @@ mod tests {
             vnc_port: Some(5905),
             ..Default::default()
         };
-        let args_headless = build_qemu_args(&cfg_headless, "/tmp/disk", &state).unwrap();
+        let args_headless = build_qemu_args(&cfg_headless, "/tmp/disk", &state)?;
         assert!(args_headless.contains(&"-display".to_string()));
         assert!(args_headless.contains(&"none".to_string()));
         assert!(args_headless.contains(&"-vnc".to_string()));
@@ -2018,13 +2033,14 @@ mod tests {
             vnc_port: Some(5905),
             ..Default::default()
         };
-        let args_gui = build_qemu_args(&cfg_gui, "/tmp/disk", &state).unwrap();
+        let args_gui = build_qemu_args(&cfg_gui, "/tmp/disk", &state)?;
         assert!(args_gui.contains(&"-display".to_string()));
         assert!(args_gui.contains(&"cocoa".to_string()));
+        Ok(())
     }
 
-    #[test]
-    fn test_qemu_from_builder_config() {
+    #[tokio::test]
+    async fn test_qemu_from_builder_config() -> Result<(), crate::error::StampError> {
         let mut builder_cfg = crate::template::BuilderConfig {
             builder_type: "qemu".to_string(),
             name: "bento-source".to_string(),
@@ -2075,7 +2091,7 @@ mod tests {
             "[\"<enter>\", \"root\"]".to_string(),
         );
 
-        let qemu_cfg = QemuConfig::from_builder_config(&builder_cfg).unwrap();
+        let qemu_cfg = QemuConfig::from_builder_config(&builder_cfg)?;
         assert_eq!(qemu_cfg.name, "bento-source");
         assert_eq!(qemu_cfg.arch, QemuArch::Aarch64);
         assert_eq!(qemu_cfg.accelerator, QemuAccelerator::Hvf);
@@ -2097,5 +2113,231 @@ mod tests {
             qemu_cfg.boot_command,
             Some(vec!["<enter>".to_string(), "root".to_string()])
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_qemu_missing_coverage() -> Result<(), crate::error::StampError> {
+        let temp_dir =
+            tempfile::tempdir().map_err(|e| crate::error::StampError::Execution(e.to_string()))?;
+        let mock_kvm = temp_dir.path().join("kvm");
+
+        let accel =
+            crate::builder::qemu::validate_accelerator_with_path(QemuAccelerator::Auto, &mock_kvm)?;
+        #[cfg(target_os = "linux")]
+        assert_eq!(accel, QemuAccelerator::Tcg);
+        #[cfg(target_os = "macos")]
+        assert_eq!(accel, QemuAccelerator::Hvf);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        assert_eq!(accel, QemuAccelerator::Auto);
+
+        assert!(
+            crate::builder::qemu::validate_accelerator_with_path(QemuAccelerator::Kvm, &mock_kvm)
+                .is_err()
+        );
+
+        std::fs::write(&mock_kvm, b"")
+            .map_err(|e| crate::error::StampError::Execution(e.to_string()))?;
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            &mock_kvm,
+            std::os::unix::fs::PermissionsExt::from_mode(0o666),
+        )
+        .unwrap();
+
+        {
+            #[cfg(target_os = "linux")]
+            {
+                let accel = crate::builder::qemu::validate_accelerator_with_path(
+                    QemuAccelerator::Auto,
+                    &mock_kvm,
+                )?;
+                assert!(accel == QemuAccelerator::Kvm || accel == QemuAccelerator::Tcg);
+            }
+            let _ = crate::builder::qemu::validate_accelerator_with_path(
+                QemuAccelerator::Kvm,
+                &mock_kvm,
+            );
+        }
+
+        let list = crate::builder::qemu::parse_string_list("a,b,c");
+        assert_eq!(list, vec!["a", "b", "c"]);
+
+        let mut builder_cfg = crate::template::BuilderConfig::default();
+        builder_cfg
+            .config
+            .insert("os_arch".to_string(), "arm".to_string());
+        builder_cfg
+            .config
+            .insert("accelerator".to_string(), "tcg".to_string());
+        builder_cfg
+            .config
+            .insert("machine_type".to_string(), "microvm".to_string());
+        builder_cfg
+            .config
+            .insert("cpu_model".to_string(), "max".to_string());
+        builder_cfg
+            .config
+            .insert("format".to_string(), "vdi".to_string());
+        builder_cfg
+            .config
+            .insert("http_content".to_string(), "{\"key\":\"val\"}".to_string());
+
+        let qemu_cfg = QemuConfig::from_builder_config(&builder_cfg)?;
+        assert_eq!(qemu_cfg.arch, QemuArch::Arm);
+        assert_eq!(qemu_cfg.accelerator, QemuAccelerator::Tcg);
+        assert_eq!(qemu_cfg.machine_type, Some(MachineModel::Microvm));
+        assert_eq!(qemu_cfg.cpu_model, Some(CpuModel::Max));
+        assert_eq!(qemu_cfg.disk_format, Some(DiskFormat::Vdi));
+        assert_eq!(
+            qemu_cfg.http_content.get("key").expect("key missing"),
+            "val"
+        );
+
+        builder_cfg
+            .config
+            .insert("os_arch".to_string(), "i386".to_string());
+        builder_cfg
+            .config
+            .insert("accelerator".to_string(), "none".to_string());
+        builder_cfg
+            .config
+            .insert("cpu_model".to_string(), "qemu64".to_string());
+        builder_cfg
+            .config
+            .insert("format".to_string(), "vmdk".to_string());
+        let qemu_cfg = QemuConfig::from_builder_config(&builder_cfg)?;
+        assert_eq!(qemu_cfg.arch, QemuArch::I386);
+        assert_eq!(qemu_cfg.accelerator, QemuAccelerator::None);
+        assert_eq!(qemu_cfg.cpu_model, Some(CpuModel::Qemu64));
+        assert_eq!(qemu_cfg.disk_format, Some(DiskFormat::Vmdk));
+
+        builder_cfg
+            .config
+            .insert("os_arch".to_string(), "riscv64".to_string());
+        builder_cfg
+            .config
+            .insert("accelerator".to_string(), "whpx".to_string());
+        builder_cfg
+            .config
+            .insert("cpu_model".to_string(), "host".to_string());
+        let qemu_cfg = QemuConfig::from_builder_config(&builder_cfg)?;
+        assert_eq!(qemu_cfg.arch, QemuArch::Riscv64);
+        assert_eq!(qemu_cfg.accelerator, QemuAccelerator::Whpx);
+        assert_eq!(qemu_cfg.cpu_model, Some(CpuModel::Host));
+
+        let mut state = StateBag::new();
+        state.put("floppy_path", "/tmp/floppy.img".to_string());
+        state.put("cd_path", "/tmp/cd.iso".to_string());
+        let config = QemuConfig {
+            headless: true,
+            display: None,
+            iso_url: Some("boot.iso".to_string()),
+            ..Default::default()
+        };
+        let args = build_qemu_args(&config, "/tmp/disk", &state)?;
+        assert!(args.contains(&"-display".to_string()));
+        assert!(args.contains(&"none".to_string()));
+        assert!(args.contains(&"-cdrom".to_string()));
+        assert!(args.contains(&"boot.iso".to_string()));
+        assert!(args.contains(&"-fda".to_string()));
+        assert!(args.contains(&"/tmp/floppy.img".to_string()));
+        assert!(args.contains(&"file=/tmp/cd.iso,media=cdrom".to_string()));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_qemu_missing_coverage_more() -> Result<(), crate::error::StampError> {
+        let mut builder_cfg = crate::template::BuilderConfig::default();
+        builder_cfg
+            .config
+            .insert("os_arch".to_string(), "unknown".to_string());
+        builder_cfg
+            .config
+            .insert("accelerator".to_string(), "unknown".to_string());
+        builder_cfg
+            .config
+            .insert("machine_type".to_string(), "unknown".to_string());
+        builder_cfg
+            .config
+            .insert("cpu_model".to_string(), "unknown".to_string());
+        builder_cfg
+            .config
+            .insert("format".to_string(), "unknown".to_string());
+        let qemu_cfg = QemuConfig::from_builder_config(&builder_cfg)?;
+        assert_eq!(qemu_cfg.arch, QemuArch::X86_64);
+        assert_eq!(qemu_cfg.accelerator, QemuAccelerator::Auto);
+        assert_eq!(
+            qemu_cfg.machine_type,
+            Some(MachineModel::Custom("unknown".to_string()))
+        );
+        assert_eq!(
+            qemu_cfg.cpu_model,
+            Some(CpuModel::Custom("unknown".to_string()))
+        );
+        assert_eq!(qemu_cfg.disk_format, Some(DiskFormat::Qcow2));
+
+        let temp_dir =
+            tempfile::tempdir().map_err(|e| crate::error::StampError::Execution(e.to_string()))?;
+        let mock_kvm = temp_dir.path().join("kvm2");
+        std::fs::write(&mock_kvm, b"")
+            .map_err(|e| crate::error::StampError::Execution(e.to_string()))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&mock_kvm, std::fs::Permissions::from_mode(0o000))
+                .map_err(|e| crate::error::StampError::Execution(e.to_string()))?;
+            let err = crate::builder::qemu::validate_accelerator_with_path(
+                QemuAccelerator::Kvm,
+                &mock_kvm,
+            );
+            assert!(err.is_err());
+            if let Err(crate::error::StampError::Builder(msg)) = err {
+                assert!(msg.contains("permission denied"));
+            }
+        }
+
+        let state = StateBag::new();
+        let config = QemuConfig {
+            headless: true,
+            display: Some("cocoa".to_string()),
+            efi_boot: true,
+            efi_firmware_code: Some("mycode.fd".to_string()),
+            efi_firmware_vars: Some("myvars.fd".to_string()),
+            ..Default::default()
+        };
+        let args = build_qemu_args(&config, "/tmp/disk", &state)?;
+        assert!(args.contains(&"-display".to_string()));
+        assert!(args.contains(&"cocoa".to_string()));
+        assert!(args.contains(&"if=pflash,format=raw,file=myvars.fd".to_string()));
+
+        let config2 = QemuConfig {
+            headless: true,
+            display: Some("none".to_string()),
+            ..Default::default()
+        };
+        let args2 = build_qemu_args(&config2, "/tmp/disk", &state)?;
+        assert!(args2.contains(&"none".to_string()));
+
+        let ui = std::sync::Arc::new(Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+        let mut step = StepTypeBootCommand {
+            ui: ui,
+            name: "test".to_string(),
+            config: QemuConfig {
+                boot_command: Some(vec![]),
+                ..Default::default()
+            },
+        };
+        let mut empty_state = StateBag::new();
+        // this hits vnc_addr.unwrap_or_else, we expect it to fail communicating but we only care about line execution.
+        let _ = step.run(&mut empty_state).await;
+
+        Ok(())
     }
 }

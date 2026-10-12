@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `outscale` builders (`outscale-bsu`, `outscale-chroot`) for 3DS OUTSCALE Cloud.
 //!
 //! Provides an Outscale API v1 client for managing virtual machines (VMs), block storage (BSU),

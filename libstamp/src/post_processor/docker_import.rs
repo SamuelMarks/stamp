@@ -99,9 +99,7 @@ impl PostProcessor for DockerImportPostProcessor {
                     .arg(&target_ref)
                     .stdin(std::process::Stdio::piped());
 
-                let mut child = cmd.spawn().map_err(|e| {
-                    StampError::Provisioner(format!("Failed to spawn docker import: {e}"))
-                })?;
+                let mut child = cmd.spawn().map_err(StampError::Io)?;
 
                 if let Some(mut stdin) = child.stdin.take() {
                     use tokio::io::AsyncWriteExt;
@@ -109,10 +107,7 @@ impl PostProcessor for DockerImportPostProcessor {
                     let _ = stdin.flush().await;
                 }
 
-                let status = child
-                    .wait()
-                    .await
-                    .map_err(|e| StampError::Provisioner(format!("docker import failed: {e}")))?;
+                let status = child.wait().await.map_err(StampError::Io)?;
 
                 if !status.success() {
                     return Err(StampError::Provisioner(format!(
@@ -126,9 +121,7 @@ impl PostProcessor for DockerImportPostProcessor {
                     .arg(&target_ref)
                     .status()
                     .await
-                    .map_err(|e| {
-                        StampError::Provisioner(format!("Failed to execute docker import: {e}"))
-                    })?;
+                    .map_err(StampError::Io)?;
 
                 if !status.success() && !cfg!(test) {
                     return Err(StampError::Provisioner(format!(

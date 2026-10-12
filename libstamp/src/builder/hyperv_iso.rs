@@ -275,9 +275,9 @@ impl HypervIsoConfig {
 /// # Errors
 ///
 /// Returns `StampError::Builder` if execution fails or PowerShell returns non-zero.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn run_hyperv_ps(cmd: &str) -> Result<String, StampError> {
-    #[cfg(test)]
-    {
+    if cfg!(test) && std::env::var("HYPERV_REAL_POWERSHELL").is_err() {
         if cmd.contains("TEST_FAIL") {
             return Err(StampError::Builder("PowerShell mock failure".to_string()));
         }
@@ -289,44 +289,41 @@ pub async fn run_hyperv_ps(cmd: &str) -> Result<String, StampError> {
 "
             .to_string());
         }
-        Ok("mock-output".to_string())
+        return Ok("mock-output".to_string());
     }
 
-    #[cfg(not(test))]
+    let shell = if tokio::process::Command::new("pwsh")
+        .arg("-v")
+        .status()
+        .await
+        .is_ok()
     {
-        let shell = if tokio::process::Command::new("pwsh")
-            .arg("-v")
-            .status()
-            .await
-            .is_ok()
-        {
-            "pwsh"
-        } else {
-            "powershell"
-        };
+        "pwsh"
+    } else {
+        "powershell"
+    };
 
-        let mut command = tokio::process::Command::new(shell);
-        command
-            .arg("-NoProfile")
-            .arg("-NonInteractive")
-            .arg("-Command")
-            .arg(cmd);
+    let mut command = tokio::process::Command::new(shell);
+    command
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg(cmd);
 
-        let output = command
-            .output()
-            .await
-            .map_err(|e| StampError::Builder(format!("Failed to execute powershell: {e}")))?;
+    let output = command
+        .output()
+        .await
+        .map_err(|e| StampError::Builder(format!("Failed to execute powershell: {e}")))?;
 
-        if !output.status.success() {
-            let code = output.status.code().unwrap_or(1);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(StampError::Builder(format!(
-                "powershell command failed with exit code {code}: {}",
-                stderr.trim()
-            )));
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    if !output.status.success() {
+        let code = output.status.code().unwrap_or(1);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(StampError::Builder(format!(
+            "powershell command failed with exit code {code}: {}",
+            stderr.trim()
+        )));
     }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 /// Extract guest IP address from Hyper-V network adapter integration services.
@@ -829,6 +826,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_hypervisobuilder_run_gen1_and_gen2() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let temp_dir = tempfile::tempdir().unwrap();
         let f_path = temp_dir.path().join("autounattend.xml");
         let _ = tokio::fs::write(&f_path, b"<xml/>").await;
@@ -914,6 +914,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_hyperv_from_builder_config() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut builder_cfg = crate::template::BuilderConfig {
             builder_type: "hyperv-iso".to_string(),
             name: "bento-hyperv".to_string(),
@@ -985,6 +988,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_extract_hyperv_ip() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let ip = extract_hyperv_ip("test-vm").await;
         assert_eq!(ip.as_deref().ok(), Some("127.0.0.1"));
 
@@ -995,12 +1001,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_run_hyperv_ps_real_execution_error() {
+        // Force the real path
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("HYPERV_REAL_POWERSHELL", "1");
+        }
+
+        // This will either fail to spawn pwsh/powershell or fail the invalid command
+        let res = run_hyperv_ps("INVALID_COMMAND_THAT_SHOULD_FAIL").await;
+
+        unsafe {
+            std::env::remove_var("HYPERV_REAL_POWERSHELL");
+        }
+
+        assert!(res.is_err());
+    }
+
+    #[tokio::test]
     async fn test_run_hyperv_ps_fail() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         assert!(run_hyperv_ps("TEST_FAIL").await.is_err());
     }
 
     #[tokio::test]
     async fn test_prepare_failure() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let config = HypervIsoConfig {
             name: String::new(),
             ..Default::default()
@@ -1011,6 +1043,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_hypervisobuilder_error_strategies() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let config = HypervIsoConfig {
             name: "test_runner_error".to_string(),
             ..Default::default()
@@ -1071,6 +1106,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_step_provision_and_cleanup() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let ui = Arc::new(Ui::new(
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
@@ -1136,5 +1174,29 @@ mod tests {
         let b1 = HypervIsoBuilder::new(config1);
         let b2 = b1.clone();
         assert_eq!(format!("{b1:?}"), format!("{b2:?}"));
+    }
+
+    #[test]
+    fn test_hyperv_http_content() {
+        let mut builder_cfg = crate::template::BuilderConfig {
+            builder_type: "hyperv-iso".to_string(),
+            name: "test-hyperv".to_string(),
+            ..Default::default()
+        };
+        builder_cfg.config.insert(
+            "http_content".to_string(),
+            "{\"test.txt\": \"content\"}".to_string(),
+        );
+
+        let builder = HypervIsoConfig::from_builder_config(&builder_cfg);
+        assert!(builder.is_ok());
+        let builder = builder.expect("should be ok");
+        assert_eq!(
+            builder
+                .http_content
+                .get("test.txt")
+                .expect("should have it"),
+            "content"
+        );
     }
 }

@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Core concurrent workflow engine for Stamp.
 
 pub mod console;

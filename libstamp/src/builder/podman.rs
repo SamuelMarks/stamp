@@ -180,7 +180,7 @@ impl Builder for PodmanBuilder {
         let cnt_id = state
             .get::<String>("container_id")
             .cloned()
-            .unwrap_or_else(|| "cnt-mock".to_string());
+            .unwrap_or_default();
 
         let comm = crate::communicator::podman::PodmanCommunicator::new(
             crate::communicator::podman::PodmanConfig::new(&cnt_id),
@@ -304,14 +304,12 @@ mod tests {
 
         let artifact = builder.run(hook, ui, OnErrorStrategy::Cleanup).await;
         assert!(artifact.is_ok());
-        let artifact = match artifact {
-            Ok(a) => a,
-            Err(e) => panic!("{e}"),
-        };
-        assert_eq!(artifact.id(), "localhost/my-app:latest");
-        assert!(artifact.string().contains("Podman image"));
-        assert!(artifact.destroy().is_ok());
-        assert!(builder.cancel().await.is_ok());
+        if let Ok(artifact) = artifact {
+            assert_eq!(artifact.id(), "localhost/my-app:latest");
+            assert!(artifact.string().contains("Podman image"));
+            assert!(artifact.destroy().is_ok());
+            assert!(builder.cancel().await.is_ok());
+        }
     }
 
     #[test]

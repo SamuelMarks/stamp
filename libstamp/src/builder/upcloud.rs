@@ -267,12 +267,8 @@ impl Builder for UpCloudBuilder {
         let template_uuid = state
             .get::<String>("template_uuid")
             .cloned()
-            .unwrap_or_else(|| "01234567-89ab-cdef-0123-456789abcdef".to_string());
-        let zone = self
-            .config
-            .zone
-            .clone()
-            .unwrap_or_else(|| "de-fra1".to_string());
+            .unwrap_or_default();
+        let zone = self.config.zone.clone().unwrap_or_default();
 
         Ok(Box::new(UpCloudArtifact {
             template_uuid,
@@ -342,12 +338,10 @@ mod tests {
             .await;
         assert!(artifact.is_ok());
         assert!(artifact.is_ok());
-        let art = match artifact {
-            Ok(a) => a,
-            Err(e) => panic!("{e}"),
-        };
-        assert_eq!(art.builder_id(), "upcloud");
-        assert!(art.state("foo").is_none());
+        if let Ok(art) = artifact {
+            assert_eq!(art.builder_id(), "upcloud");
+            assert!(art.state("foo").is_none());
+        }
     }
 
     #[tokio::test]

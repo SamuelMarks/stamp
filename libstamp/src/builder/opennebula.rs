@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `opennebula` builder via XML-RPC / `OneFlow` API.
 //!
 //! Provides a client for `OpenNebula` RPC2 endpoints (`http://host:2633/RPC2`),
@@ -474,7 +473,6 @@ impl Builder for OpenNebulaBuilder {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::pedantic,

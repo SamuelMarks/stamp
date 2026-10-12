@@ -24,6 +24,9 @@ pub const DEFAULT_CACHE_DIR: &str = "packer_cache";
 /// Environment variable configuring the global cache directory.
 pub const PACKER_CACHE_DIR_ENV: &str = "PACKER_CACHE_DIR";
 
+/// Environment variable for Stamp-specific cache directory override.
+pub const STAMP_CACHE_DIR_ENV: &str = "STAMP_CACHE_DIR";
+
 /// Supported cryptographic checksum algorithms for cached assets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChecksumAlgorithm {
@@ -218,9 +221,14 @@ pub fn compute_file_hash(path: &Path, algo: ChecksumAlgorithm) -> Result<String,
     }
 }
 
-/// Resolves the global Packer cache directory, respecting `PACKER_CACHE_DIR`.
+/// Resolves the global Packer cache directory, respecting `STAMP_CACHE_DIR` and `PACKER_CACHE_DIR`.
 #[must_use]
 pub fn packer_cache_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var(STAMP_CACHE_DIR_ENV)
+        && !dir.trim().is_empty()
+    {
+        return PathBuf::from(dir);
+    }
     if let Ok(dir) = std::env::var(PACKER_CACHE_DIR_ENV)
         && !dir.trim().is_empty()
     {
@@ -483,32 +491,30 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn test_checksum_algorithm_parsing() {
+    fn test_checksum_algorithm_parsing() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!("md5".parse::<ChecksumAlgorithm>()?, ChecksumAlgorithm::Md5);
         assert_eq!(
-            "md5".parse::<ChecksumAlgorithm>().unwrap(),
-            ChecksumAlgorithm::Md5
-        );
-        assert_eq!(
-            "sha1".parse::<ChecksumAlgorithm>().unwrap(),
+            "sha1".parse::<ChecksumAlgorithm>()?,
             ChecksumAlgorithm::Sha1
         );
         assert_eq!(
-            "sha256".parse::<ChecksumAlgorithm>().unwrap(),
+            "sha256".parse::<ChecksumAlgorithm>()?,
             ChecksumAlgorithm::Sha256
         );
         assert_eq!(
-            "sha-256".parse::<ChecksumAlgorithm>().unwrap(),
+            "sha-256".parse::<ChecksumAlgorithm>()?,
             ChecksumAlgorithm::Sha256
         );
         assert_eq!(
-            "sha512".parse::<ChecksumAlgorithm>().unwrap(),
+            "sha512".parse::<ChecksumAlgorithm>()?,
             ChecksumAlgorithm::Sha512
         );
         assert_eq!(
-            "none".parse::<ChecksumAlgorithm>().unwrap(),
+            "none".parse::<ChecksumAlgorithm>()?,
             ChecksumAlgorithm::None
         );
         assert!("invalid".parse::<ChecksumAlgorithm>().is_err());
+        Ok(())
     }
 
     #[test]
@@ -541,15 +547,15 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_file_hashes_and_verify() {
-        let dir = tempdir().unwrap();
+    fn test_compute_file_hashes_and_verify() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempdir()?;
         let file_path = dir.path().join("test.bin");
-        std::fs::write(&file_path, b"hello world").unwrap();
+        std::fs::write(&file_path, b"hello world")?;
 
-        let md5_hash = compute_file_hash(&file_path, ChecksumAlgorithm::Md5).unwrap();
+        let md5_hash = compute_file_hash(&file_path, ChecksumAlgorithm::Md5)?;
         assert_eq!(md5_hash, "5eb63bbbe01eeed093cb22bb8f5acdc3");
 
-        let sha256_hash = compute_file_hash(&file_path, ChecksumAlgorithm::Sha256).unwrap();
+        let sha256_hash = compute_file_hash(&file_path, ChecksumAlgorithm::Sha256)?;
         assert_eq!(
             sha256_hash,
             "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
@@ -567,21 +573,22 @@ mod tests {
                 .to_string(),
         };
         assert!(spec_bad.verify_file(&file_path).is_err());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_cache_manager_local_file_and_locking() {
-        let dir = tempdir().unwrap();
+    async fn test_cache_manager_local_file_and_locking() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempdir()?;
         let cache_dir = dir.path().join("cache");
         let src_file = dir.path().join("source.iso");
-        std::fs::write(&src_file, b"ISO payload data here").unwrap();
+        std::fs::write(&src_file, b"ISO payload data here")?;
 
         let mgr = CacheManager::with_config(CacheConfig {
             cache_dir: cache_dir.clone(),
             allow_resuming: true,
         });
 
-        let hash = compute_file_hash(&src_file, ChecksumAlgorithm::Sha256).unwrap();
+        let hash = compute_file_hash(&src_file, ChecksumAlgorithm::Sha256)?;
         let spec = ChecksumSpec::Direct {
             algorithm: ChecksumAlgorithm::Sha256,
             expected_hex: hash,
@@ -589,22 +596,21 @@ mod tests {
 
         let cached = mgr
             .get_or_download(&[src_file.to_string_lossy().to_string()], Some(&spec))
-            .await
-            .unwrap();
+            .await?;
         assert!(cached.exists());
-        assert_eq!(std::fs::read(&cached).unwrap(), b"ISO payload data here");
+        assert_eq!(std::fs::read(&cached)?, b"ISO payload data here");
 
         // Re-read from cache
         let cached2 = mgr
             .get_or_download(&[src_file.to_string_lossy().to_string()], Some(&spec))
-            .await
-            .unwrap();
+            .await?;
         assert_eq!(cached, cached2);
 
         // Test clean cache
         let _ = std::fs::create_dir_all(cache_dir.join("subfolder"));
-        let cleaned = clean_cache(&cache_dir, 0).unwrap();
+        let cleaned = clean_cache(&cache_dir, 0)?;
         assert!(cleaned >= 1);
+        Ok(())
     }
 
     static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -703,7 +709,7 @@ mod tests {
             };
             assert!(nonexistent_spec.verify_file(&nonexistent_file).is_err());
 
-            // 4. packer_cache_dir with PACKER_CACHE_DIR env var
+            // 4. packer_cache_dir with PACKER_CACHE_DIR and STAMP_CACHE_DIR env vars
             let custom_cache = temp_dir.path().join("custom_packer_cache");
             unsafe {
                 std::env::set_var(
@@ -712,7 +718,15 @@ mod tests {
                 );
             }
             assert_eq!(packer_cache_dir(), custom_cache);
+
+            let stamp_cache = temp_dir.path().join("stamp_cache");
             unsafe {
+                std::env::set_var(STAMP_CACHE_DIR_ENV, stamp_cache.to_string_lossy().as_ref());
+            }
+            assert_eq!(packer_cache_dir(), stamp_cache);
+
+            unsafe {
+                std::env::remove_var(STAMP_CACHE_DIR_ENV);
                 std::env::remove_var(PACKER_CACHE_DIR_ENV);
             }
 

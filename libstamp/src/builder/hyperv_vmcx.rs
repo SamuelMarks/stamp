@@ -63,7 +63,6 @@ struct StepCloneVM {
 
 #[async_trait::async_trait]
 impl Step for StepCloneVM {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let vm_name = self
             .config
@@ -138,7 +137,6 @@ struct StepRunVM {
 
 #[async_trait::async_trait]
 impl Step for StepRunVM {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let vm_name = state.get::<String>("vm_name").cloned().unwrap_or_default();
         self.ui.say(&self.name, "Starting Hyper-V VM...");
@@ -181,7 +179,6 @@ struct StepProvision {
 
 #[async_trait::async_trait]
 impl Step for StepProvision {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Provisioning VM...");
 
@@ -243,7 +240,6 @@ struct StepShutdown {
 
 #[async_trait::async_trait]
 impl Step for StepShutdown {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Shutting down Hyper-V VM...");
         let vm_name = state.get::<String>("vm_name").cloned().unwrap_or_default();
@@ -256,7 +252,6 @@ impl Step for StepShutdown {
 
 #[async_trait::async_trait]
 impl Builder for HypervVmcxBuilder {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn prepare(&self) -> Result<(), StampError> {
         if self.config.name.is_empty() {
             return Err(StampError::Parse("Name cannot be empty".to_string()));
@@ -264,7 +259,6 @@ impl Builder for HypervVmcxBuilder {
         Ok(())
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(
         &self,
         hook: Arc<dyn ProvisionHook>,
@@ -357,6 +351,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_hypervvmcxbuilder_run() {
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let config = HypervVmcxConfig {
             name: "test-builder".to_string(),
             vm_name: Some("test-vm".to_string()),

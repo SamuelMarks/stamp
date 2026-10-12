@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! The "none" communicator, which does nothing.
 
 use crate::communicator::{Command, CommandResult, Communicator};
@@ -46,7 +45,6 @@ impl Communicator for NoneCommunicator {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::pedantic,

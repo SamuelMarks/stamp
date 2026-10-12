@@ -59,7 +59,6 @@ impl Provisioner for ConvergeProvisioner {
         comm: &dyn Communicator,
         ui: std::sync::Arc<crate::engine::ui::Ui>,
     ) -> Result<(), StampError> {
-        #![cfg_attr(coverage_nightly, coverage(off))]
         let mut all_commands = Vec::new();
 
         if let Some(inline) = &self.config.inline {

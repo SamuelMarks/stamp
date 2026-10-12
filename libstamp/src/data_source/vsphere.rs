@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! `vsphere_virtual_machine` data source implementation.
 
 use crate::data_source::DataSource;

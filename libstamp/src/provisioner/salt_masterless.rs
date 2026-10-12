@@ -70,7 +70,6 @@ impl Provisioner for SaltMasterlessProvisioner {
         comm: &dyn Communicator,
         ui: std::sync::Arc<crate::engine::ui::Ui>,
     ) -> Result<(), StampError> {
-        #![cfg_attr(coverage_nightly, coverage(off))]
         let Some(state_tree) = &self.config.local_state_tree else {
             return Err(StampError::Provisioner(
                 "local_state_tree is required".to_string(),

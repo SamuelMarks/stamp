@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `artifactory` post-processor.
 
 use crate::error::StampError;
@@ -44,7 +43,6 @@ impl PostProcessor for ArtifactoryPostProcessor {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Legacy macro interpolation engine for Packer JSON templates.
 //!
 //! Evaluates legacy `{{ ... }}` macro expressions such as `{{ user `var` }}`,

@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Remote UI gRPC service and client adapter.
 //!
 //! Provides bidirectional streaming and remote invocation of `Ui` events

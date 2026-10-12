@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! gRPC Communicator proxy and server adapter.
 //!
 //! Provides bidirectional remote communication between Stamp and out-of-process
@@ -82,7 +81,7 @@ impl Communicator for GrpcCommunicatorProxy {
             stdin: Vec::new(),
         })
         .await
-        .map_err(|e| StampError::Execution(format!("Failed to stream command: {e}")))?;
+        .map_err(crate::utils::map_exec_err_stream)?;
 
         let mut client = self.client.clone();
         let resp = client
@@ -96,8 +95,7 @@ impl Communicator for GrpcCommunicatorProxy {
         let mut exit_code = 0;
 
         while let Some(item) = in_stream.next().await {
-            let chunk = item
-                .map_err(|e| StampError::Execution(format!("Execute stream chunk error: {e}")))?;
+            let chunk = item.map_err(crate::utils::map_exec_err_chunk)?;
             stdout_acc.extend_from_slice(&chunk.stdout);
             stderr_acc.extend_from_slice(&chunk.stderr);
             if chunk.finished {
@@ -141,23 +139,16 @@ impl Communicator for GrpcCommunicatorProxy {
             let mut buffer = vec![0u8; CHUNK_SIZE];
             let mut bytes_read = 0u64;
             while let Ok(n) = file.read(&mut buffer).await {
-                if n == 0 {
-                    break;
-                }
                 bytes_read += n as u64;
-                let is_last = bytes_read >= total_len;
-                if tx
+                let is_last = bytes_read >= total_len || n == 0;
+                let res = tx
                     .send(FileChunk {
                         path: remote_str.clone(),
                         data: buffer[..n].to_vec(),
                         end: is_last,
                     })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-                if is_last {
+                    .await;
+                if res.is_err() || is_last {
                     break;
                 }
             }
@@ -199,8 +190,7 @@ impl Communicator for GrpcCommunicatorProxy {
             .map_err(StampError::Io)?;
 
         while let Some(item) = in_stream.next().await {
-            let chunk = item
-                .map_err(|e| StampError::Execution(format!("Download stream chunk error: {e}")))?;
+            let chunk = item.map_err(crate::utils::map_exec_err_dl_chunk)?;
             if !chunk.data.is_empty() {
                 file.write_all(&chunk.data).await.map_err(StampError::Io)?;
             }
@@ -251,7 +241,7 @@ impl CommunicatorService for GrpcCommunicatorServer {
         let Some(first) = in_stream.next().await else {
             return Err(Status::invalid_argument("Empty command stream"));
         };
-        let cmd_stream = first.map_err(|e| Status::internal(e.to_string()))?;
+        let cmd_stream = first.map_err(crate::utils::map_status_internal)?;
 
         let (tx, rx) = mpsc::channel(4);
         let inner = self.inner.clone();
@@ -285,23 +275,23 @@ impl CommunicatorService for GrpcCommunicatorServer {
         request: Request<tonic::Streaming<FileChunk>>,
     ) -> Result<Response<UploadResponse>, Status> {
         let mut in_stream = request.into_inner();
-        let temp_dir = tempfile::tempdir().map_err(|e| Status::internal(e.to_string()))?;
+        let temp_dir = tempfile::tempdir().map_err(crate::utils::map_status_internal)?;
         let temp_file = temp_dir.path().join("upload_temp");
         let mut file = tokio::fs::File::create(&temp_file)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(crate::utils::map_status_internal)?;
 
         let mut target_path = String::new();
 
         while let Some(chunk_res) = in_stream.next().await {
-            let chunk = chunk_res.map_err(|e| Status::internal(e.to_string()))?;
+            let chunk = chunk_res.map_err(crate::utils::map_status_internal)?;
             if target_path.is_empty() {
                 target_path = chunk.path;
             }
             if !chunk.data.is_empty() {
                 file.write_all(&chunk.data)
                     .await
-                    .map_err(|e| Status::internal(e.to_string()))?;
+                    .map_err(crate::utils::map_status_internal)?;
             }
             if chunk.end {
                 break;
@@ -309,7 +299,7 @@ impl CommunicatorService for GrpcCommunicatorServer {
         }
         file.flush()
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(crate::utils::map_status_internal)?;
 
         let local = FilePath::new(temp_file);
         let remote = FilePath::new(target_path.into());
@@ -333,7 +323,7 @@ impl CommunicatorService for GrpcCommunicatorServer {
         request: Request<DownloadRequest>,
     ) -> Result<Response<Self::DownloadStream>, Status> {
         let req = request.into_inner();
-        let temp_dir = tempfile::tempdir().map_err(|e| Status::internal(e.to_string()))?;
+        let temp_dir = tempfile::tempdir().map_err(crate::utils::map_status_internal)?;
         let temp_file = temp_dir.path().join("download_temp");
 
         let remote = FilePath::new(req.path.into());
@@ -342,15 +332,15 @@ impl CommunicatorService for GrpcCommunicatorServer {
         self.inner
             .download(&remote, &local)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(crate::utils::map_status_internal)?;
 
         let mut file = tokio::fs::File::open(&temp_file)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(crate::utils::map_status_internal)?;
         let total_len = file
             .metadata()
             .await
-            .map_err(|e| Status::internal(e.to_string()))?
+            .map_err(crate::utils::map_status_internal)?
             .len();
 
         let (tx, rx) = mpsc::channel(8);
@@ -369,11 +359,8 @@ impl CommunicatorService for GrpcCommunicatorServer {
             let mut buffer = vec![0u8; CHUNK_SIZE];
             let mut read_acc = 0u64;
             while let Ok(n) = file.read(&mut buffer).await {
-                if n == 0 {
-                    break;
-                }
                 read_acc += n as u64;
-                let is_last = read_acc >= total_len;
+                let is_last = read_acc >= total_len || n == 0;
                 let _ = tx
                     .send(Ok(FileChunk {
                         path: String::new(),

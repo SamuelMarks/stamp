@@ -272,11 +272,7 @@ impl SsmCommunicator {
                 ui.say("ssm", "SSM agent not yet online; retrying...");
             }
 
-            #[cfg(test)]
-            let sleep_dur = Duration::from_millis(5);
-            #[cfg(not(test))]
-            let sleep_dur = Duration::from_secs(5);
-            tokio::time::sleep(sleep_dur).await;
+            tokio::time::sleep(ssm_poll_sleep_duration()).await;
         }
 
         Err(StampError::Execution(format!(
@@ -286,9 +282,17 @@ impl SsmCommunicator {
     }
 }
 
+/// Helper to determine poll sleep duration between SSM agent checks.
+fn ssm_poll_sleep_duration() -> Duration {
+    if cfg!(test) && std::env::var("SSM_TEST_LONG_SLEEP").is_err() {
+        Duration::from_millis(5)
+    } else {
+        Duration::from_secs(5)
+    }
+}
+
 #[async_trait]
 impl Communicator for SsmCommunicator {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     #[cfg(not(tarpaulin_include))]
     async fn execute(&self, cmd: &Command) -> Result<CommandResult, StampError> {
         if self.config.instance_id == "invalid_instance" {
@@ -331,7 +335,6 @@ impl Communicator for SsmCommunicator {
         })
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     #[cfg(not(tarpaulin_include))]
     async fn upload(
         &self,
@@ -350,7 +353,6 @@ impl Communicator for SsmCommunicator {
         Ok(())
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     #[cfg(not(tarpaulin_include))]
     async fn download(
         &self,
@@ -371,7 +373,6 @@ impl Communicator for SsmCommunicator {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::pedantic,
@@ -539,6 +540,15 @@ mod tests {
         let send_ps_args_none =
             build_ssm_send_powershell_command_args("i-win", "Get-Service", "us-east-1", None);
         assert!(!send_ps_args_none.contains(&"--profile".to_string()));
+
+        assert_eq!(ssm_poll_sleep_duration(), Duration::from_millis(5));
+        unsafe {
+            std::env::set_var("SSM_TEST_LONG_SLEEP", "1");
+        }
+        assert_eq!(ssm_poll_sleep_duration(), Duration::from_secs(5));
+        unsafe {
+            std::env::remove_var("SSM_TEST_LONG_SLEEP");
+        }
     }
 
     #[tokio::test]

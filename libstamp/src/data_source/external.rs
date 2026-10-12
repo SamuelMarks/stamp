@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! `external` data source implementation.
 
 use crate::data_source::DataSource;
@@ -63,15 +62,11 @@ impl DataSource for ExternalDataSource {
 
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
-            let query_json = serde_json::to_vec(&self.config.query).map_err(|e| {
-                StampError::Execution(format!("Failed to serialize query to JSON: {e}"))
-            })?;
+            let query_json = serde_json::to_vec(&self.config.query).unwrap_or_default();
             let _ = stdin.write_all(&query_json).await;
         }
 
-        let output = child.wait_with_output().await.map_err(|e| {
-            StampError::Execution(format!("Failed to wait for external program: {e}"))
-        })?;
+        let output = child.wait_with_output().await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

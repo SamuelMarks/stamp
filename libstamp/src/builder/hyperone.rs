@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `hyperone` builder for HyperOne Cloud Platform.
 //!
 //! Provides an API client for managing virtual machines, storage disks, and custom images

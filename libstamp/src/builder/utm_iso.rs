@@ -1,4 +1,3 @@
-#![cfg(not(tarpaulin_include))]
 //! Implementation of the `utm-iso` builder for creating, configuring, running, and exporting
 //! UTM virtual machine bundles (`.utm` package directory containing `config.plist` and disk images)
 //! via `utmctl` CLI driver and native macOS Virtualization / QEMU bundle generation.
@@ -594,26 +593,37 @@ impl UtmIsoConfig {
     }
 }
 
+/// Discovers candidate paths for the `utmctl` binary.
+fn utmctl_candidates() -> [PathBuf; 3] {
+    if cfg!(test) && std::env::var("UTMCTL_TEST_EMPTY_CANDIDATES").is_ok() {
+        [
+            PathBuf::from("/nonexistent/utmctl1"),
+            PathBuf::from("/nonexistent/utmctl2"),
+            PathBuf::from("/nonexistent/utmctl3"),
+        ]
+    } else {
+        [
+            PathBuf::from("/Applications/UTM.app/Contents/MacOS/utmctl"),
+            PathBuf::from("/usr/local/bin/utmctl"),
+            PathBuf::from("/usr/bin/utmctl"),
+        ]
+    }
+}
+
 /// Discovers the path to the `utmctl` CLI executable on the host system.
 #[must_use]
 pub fn find_utmctl_binary() -> PathBuf {
-    if let Ok(env_path) = std::env::var("UTMCTL_PATH") {
-        let p = PathBuf::from(env_path);
-        if p.exists() {
-            return p;
-        }
-    }
+    let env_bin = std::env::var("UTMCTL_PATH")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|p| p.exists());
 
-    let candidates = [
-        PathBuf::from("/Applications/UTM.app/Contents/MacOS/utmctl"),
-        PathBuf::from("/usr/local/bin/utmctl"),
-        PathBuf::from("/usr/bin/utmctl"),
-    ];
-
-    candidates
-        .into_iter()
-        .find(|c| c.exists())
-        .unwrap_or_else(|| PathBuf::from("utmctl"))
+    env_bin.unwrap_or_else(|| {
+        utmctl_candidates()
+            .into_iter()
+            .find(|c| c.exists())
+            .unwrap_or_else(|| PathBuf::from("utmctl"))
+    })
 }
 
 /// Execute a `utmctl` command with arguments.
@@ -625,16 +635,13 @@ pub async fn run_utmctl(args: &[&str]) -> Result<String, StampError> {
     run_utmctl_with_cmd(utmctl_binary(), args).await
 }
 
-#[cfg(not(test))]
-/// Resolves the default `utmctl` binary name for production execution.
+/// Resolves the default `utmctl` binary name for execution.
 fn utmctl_binary() -> &'static str {
-    "utmctl"
-}
-
-#[cfg(test)]
-/// Resolves the mock `echo` binary name during unit tests.
-fn utmctl_binary() -> &'static str {
-    "echo"
+    if cfg!(test) && std::env::var("UTMCTL_REAL_BIN").is_err() {
+        "echo"
+    } else {
+        "utmctl"
+    }
 }
 
 /// Execute a specific command as `utmctl` driver.
@@ -792,7 +799,6 @@ struct StepCreateBundle {
 
 #[async_trait::async_trait]
 impl Step for StepCreateBundle {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let vm_name = self.config.vm_name.as_deref().unwrap_or("packer-utm-iso");
         let output_dir = self
@@ -872,7 +878,6 @@ struct StepRunVM {
 
 #[async_trait::async_trait]
 impl Step for StepRunVM {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let vm_name = state.get::<String>("vm_name").cloned().unwrap_or_default();
         self.ui.say(&self.name, "Starting UTM VM...");
@@ -929,7 +934,6 @@ struct StepUploadAdditions {
 
 #[async_trait::async_trait]
 impl Step for StepUploadAdditions {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         if self.config.guest_additions_mode != UtmGuestAdditionsMode::Upload {
             return Ok(StepAction::Continue);
@@ -983,7 +987,6 @@ struct StepProvision {
 
 #[async_trait::async_trait]
 impl Step for StepProvision {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Provisioning UTM VM...");
 
@@ -1073,7 +1076,6 @@ struct StepShutdown {
 
 #[async_trait::async_trait]
 impl Step for StepShutdown {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Shutting down UTM VM...");
         let vm_name = state.get::<String>("vm_name").cloned().unwrap_or_default();
@@ -1108,7 +1110,6 @@ struct StepExport {
 
 #[async_trait::async_trait]
 impl Step for StepExport {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let utm_bundle = state
             .get::<String>("utm_bundle")
@@ -1134,7 +1135,6 @@ impl Step for StepExport {
 
 #[async_trait::async_trait]
 impl Builder for UtmIsoBuilder {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn prepare(&self) -> Result<(), StampError> {
         if self.config.name.is_empty() {
             return Err(StampError::Parse("Name cannot be empty".to_string()));
@@ -1142,7 +1142,6 @@ impl Builder for UtmIsoBuilder {
         Ok(())
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(
         &self,
         hook: Arc<dyn ProvisionHook>,
@@ -1476,6 +1475,11 @@ mod tests {
         builder_cfg
             .config
             .insert("shutdown_command".to_string(), "poweroff".to_string());
+        builder_cfg.config.insert(
+            "http_content".to_string(),
+            r#"{"index.html": "hello"}"#.to_string(),
+        );
+
         builder_cfg
             .config
             .insert("ssh_username".to_string(), "vagrant".to_string());
@@ -1519,6 +1523,122 @@ mod tests {
         assert_eq!(cfg.disk_size, Some(MemoryMb::new(60000)));
         assert_eq!(cfg.shutdown_command.as_deref(), Some("poweroff"));
         assert_eq!(cfg.output_directory.as_deref(), Some("output-utm-custom"));
+    }
+
+    #[test]
+    fn test_utm_fallback_config_aliases() {
+        let mut builder_cfg = crate::template::BuilderConfig {
+            builder_type: "utm-iso".to_string(),
+            name: "bento-utm".to_string(),
+            ..Default::default()
+        };
+        builder_cfg
+            .config
+            .insert("utm_hypervisor".to_string(), "false".to_string());
+        builder_cfg
+            .config
+            .insert("utm_uefi_boot".to_string(), "false".to_string());
+        builder_cfg.config.insert(
+            "utm_display_hardware_type".to_string(),
+            "console".to_string(),
+        );
+        builder_cfg
+            .config
+            .insert("utm_hard_drive_interface".to_string(), "virtio".to_string());
+        builder_cfg
+            .config
+            .insert("utm_iso_interface".to_string(), "ide".to_string());
+        builder_cfg.config.insert(
+            "utm_guest_additions_interface".to_string(),
+            "usb".to_string(),
+        );
+        builder_cfg
+            .config
+            .insert("utm_guest_additions_mode".to_string(), "upload".to_string());
+        builder_cfg.config.insert(
+            "utm_guest_additions_url".to_string(),
+            "http://example.com/iso".to_string(),
+        );
+        builder_cfg
+            .config
+            .insert("utm_guest_additions_sha256".to_string(), "abc".to_string());
+        builder_cfg.config.insert(
+            "utm_guest_additions_target_path".to_string(),
+            "/tmp/iso".to_string(),
+        );
+        builder_cfg.config.insert(
+            "utm_guest_additions_path".to_string(),
+            "/path/iso".to_string(),
+        );
+        builder_cfg
+            .config
+            .insert("utm_disable_vnc".to_string(), "true".to_string());
+        builder_cfg
+            .config
+            .insert("utm_boot_nopause".to_string(), "false".to_string());
+        builder_cfg
+            .config
+            .insert("utm_display_nopause".to_string(), "false".to_string());
+        builder_cfg
+            .config
+            .insert("utm_export_nopause".to_string(), "false".to_string());
+        builder_cfg
+            .config
+            .insert("winrm_port".to_string(), "5986".to_string());
+        builder_cfg
+            .config
+            .insert("boot_command".to_string(), r#"["boot"]"#.to_string());
+        builder_cfg
+            .config
+            .insert("floppy_files".to_string(), r#"["floppy"]"#.to_string());
+        builder_cfg
+            .config
+            .insert("cd_files".to_string(), r#"["cd"]"#.to_string());
+        builder_cfg
+            .config
+            .insert("ssh_port".to_string(), "2222".to_string());
+        builder_cfg
+            .config
+            .insert("winrm_use_ntlm".to_string(), "on".to_string());
+        builder_cfg
+            .config
+            .insert("winrm_insecure".to_string(), "on".to_string());
+        builder_cfg
+            .config
+            .insert("winrm_use_ssl".to_string(), "on".to_string());
+        builder_cfg
+            .config
+            .insert("http_port_min".to_string(), "8000".to_string());
+        builder_cfg
+            .config
+            .insert("http_port_max".to_string(), "8010".to_string());
+        builder_cfg
+            .config
+            .insert("http_content".to_string(), "invalid json".to_string());
+
+        let cfg = UtmIsoConfig::from_builder_config(&builder_cfg).expect("parse utm config");
+        assert!(!cfg.hypervisor);
+        assert!(!cfg.uefi_boot);
+        assert_eq!(cfg.display_hardware_type, Some(UtmDisplayType::Console));
+        assert_eq!(cfg.hard_drive_interface, UtmInterface::VirtIo);
+        assert_eq!(cfg.iso_interface, UtmInterface::Ide);
+        assert_eq!(cfg.guest_additions_interface, UtmInterface::Usb);
+        assert_eq!(cfg.guest_additions_mode, UtmGuestAdditionsMode::Upload);
+        assert!(cfg.disable_vnc);
+        assert!(!cfg.boot_nopause);
+        assert!(!cfg.display_nopause);
+        assert!(!cfg.export_nopause);
+        assert_eq!(cfg.ssh_port, Some(Port::new(2222)));
+        assert_eq!(cfg.winrm_host_port, Some(Port::new(5986)));
+        assert_eq!(cfg.winrm_use_ntlm, Some(true));
+        assert_eq!(cfg.winrm_insecure, Some(true));
+        assert_eq!(cfg.winrm_use_ssl, Some(true));
+        assert_eq!(cfg.floppy_files.len(), 1);
+        assert_eq!(cfg.cd_files.len(), 1);
+        assert!(cfg.boot_command.is_some());
+        assert_eq!(cfg.http_port_min, Some(8000));
+        assert_eq!(cfg.http_port_max, Some(8010));
+        assert!(cfg.http_content.is_empty());
     }
 
     #[tokio::test]
@@ -1627,7 +1747,10 @@ mod tests {
             );
 
             // discover_utm_guest_ip
-            assert_eq!(discover_utm_guest_ip("test-vm").await.unwrap(), "127.0.0.1");
+            assert_eq!(
+                discover_utm_guest_ip("test-vm").await.expect("ip default"),
+                "127.0.0.1"
+            );
 
             let script = td.path().join("fake_utmctl.sh");
             let _ = tokio::fs::write(
@@ -1643,7 +1766,53 @@ echo 192.168.64.5
                 let _ = std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755));
             }
             let ip_sh = discover_utm_guest_ip_with_cmd(&script.to_string_lossy(), "test-vm").await;
-            assert_eq!(ip_sh.unwrap(), "192.168.64.5");
+            assert_eq!(ip_sh.expect("ip from script"), "192.168.64.5");
+
+            let script_unknown = td.path().join("fake_utmctl_unknown.sh");
+            let _ = tokio::fs::write(
+                &script_unknown,
+                b"#!/bin/sh
+echo 'unknown'
+",
+            )
+            .await;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(
+                    &script_unknown,
+                    std::fs::Permissions::from_mode(0o755),
+                );
+            }
+            let ip_unknown =
+                discover_utm_guest_ip_with_cmd(&script_unknown.to_string_lossy(), "test-vm").await;
+            assert_eq!(ip_unknown.expect("unknown fallback"), "127.0.0.1");
+
+            let script_prefix = td.path().join("fake_utmctl_prefix.sh");
+            let _ = tokio::fs::write(
+                &script_prefix,
+                b"#!/bin/sh
+echo 'ip-address error'
+",
+            )
+            .await;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(
+                    &script_prefix,
+                    std::fs::Permissions::from_mode(0o755),
+                );
+            }
+            let ip_prefix =
+                discover_utm_guest_ip_with_cmd(&script_prefix.to_string_lossy(), "test-vm").await;
+            assert_eq!(ip_prefix.expect("prefix fallback"), "127.0.0.1");
+
+            assert!(
+                discover_utm_guest_ip_with_cmd("/nonexistent_utmctl_binary_path", "test-vm")
+                    .await
+                    .is_err()
+            );
 
             // find_utmctl_binary
             let fake_utmctl = td.path().join("utmctl");
@@ -1658,9 +1827,33 @@ echo 192.168.64.5
             }
             assert_eq!(find_utmctl_binary(), fake_utmctl);
             unsafe {
+                std::env::set_var("UTMCTL_PATH", "/nonexistent/utmctl/path");
+            }
+            let _ = find_utmctl_binary();
+            unsafe {
                 std::env::remove_var("UTMCTL_PATH");
             }
             let _ = find_utmctl_binary();
+
+            unsafe {
+                std::env::set_var("UTMCTL_TEST_EMPTY_CANDIDATES", "1");
+            }
+            assert_eq!(find_utmctl_binary(), PathBuf::from("utmctl"));
+            unsafe {
+                std::env::remove_var("UTMCTL_TEST_EMPTY_CANDIDATES");
+            }
+
+            unsafe {
+                std::env::set_var("UTMCTL_REAL_BIN", "1");
+            }
+            assert_eq!(utmctl_binary(), "utmctl");
+            unsafe {
+                std::env::remove_var("UTMCTL_REAL_BIN");
+            }
+            assert_eq!(utmctl_binary(), "echo");
+
+            let b_cancel = UtmIsoBuilder::new(UtmIsoConfig::default());
+            assert!(b_cancel.cancel().await.is_ok());
 
             // parse_string_list with json and csv
             assert_eq!(parse_string_list(r#"["x", "y"]"#), vec!["x", "y"]);

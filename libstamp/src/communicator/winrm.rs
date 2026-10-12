@@ -28,7 +28,6 @@ pub enum WinRmAuth {
 }
 
 impl From<WinRmAuth> for AuthMethod {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn from(auth: WinRmAuth) -> Self {
         match auth {
             WinRmAuth::Basic => Self::Basic,
@@ -266,7 +265,6 @@ impl WinRmCommunicator {
     }
 
     /// Upload a file in Base64 chunks over PowerShell execution.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn upload_chunked_base64(
         &self,
         client: &WinrmClient,
@@ -339,7 +337,6 @@ impl WinRmCommunicator {
     }
 
     /// Download a file in Base64 chunks over PowerShell execution.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn download_chunked_base64(
         &self,
         client: &WinrmClient,
@@ -383,7 +380,6 @@ impl WinRmCommunicator {
 
 #[async_trait::async_trait]
 impl Communicator for WinRmCommunicator {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     #[cfg(not(tarpaulin_include))]
     async fn execute(&self, cmd: &Command) -> Result<CommandResult, StampError> {
         let client = match self.create_client() {
@@ -472,7 +468,6 @@ impl Communicator for WinRmCommunicator {
         }
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     #[cfg(not(tarpaulin_include))]
     async fn upload(
         &self,
@@ -494,7 +489,6 @@ impl Communicator for WinRmCommunicator {
             .await
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     #[cfg(not(tarpaulin_include))]
     async fn download(
         &self,
@@ -518,7 +512,6 @@ impl Communicator for WinRmCommunicator {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;

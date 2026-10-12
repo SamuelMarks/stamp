@@ -267,7 +267,6 @@ impl Provisioner for WindowsUpdateProvisioner {
         comm: &dyn Communicator,
         ui: std::sync::Arc<crate::engine::ui::Ui>,
     ) -> Result<(), StampError> {
-        #![cfg_attr(coverage_nightly, coverage(off))]
         let _max_iterations = 10;
         let mut iteration = 0;
 

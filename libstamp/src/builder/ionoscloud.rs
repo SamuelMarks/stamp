@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `ionoscloud` (and `oneandone`) builder for IONOS Cloud API v6.
 //!
 //! Provides a complete REST client for IONOS Cloud (`https://api.ionos.com/cloudapi/v6/`),
@@ -629,7 +628,6 @@ impl Builder for IonosBuilder {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::pedantic, clippy::all, for_loops_over_fallibles)]
 mod tests {
     use super::*;

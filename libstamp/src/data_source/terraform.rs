@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! `terraform` data source implementation for ingesting Terraform state outputs.
 
 use crate::data_source::DataSource;
@@ -47,12 +46,7 @@ impl DataSource for TerraformDataSource {
             )));
         }
 
-        let bytes = tokio::fs::read(&state_path).await.map_err(|e| {
-            StampError::Execution(format!(
-                "Failed to read Terraform state file '{}': {e}",
-                state_path.display()
-            ))
-        })?;
+        let bytes = tokio::fs::read(&state_path).await?;
 
         let parsed: Value = serde_json::from_slice(&bytes).map_err(|e| {
             StampError::Parse(format!(
@@ -184,6 +178,14 @@ mod tests {
             output: None,
         });
         assert!(ds.read().await.is_err());
+
+        // Test default state path
+        let ds_default = TerraformDataSource::new(TerraformDataSourceConfig {
+            state_path: None,
+            output: None,
+        });
+        // We expect an error because "terraform.tfstate" won't exist in the current working directory of the test runner
+        assert!(ds_default.read().await.is_err());
     }
 
     #[tokio::test]

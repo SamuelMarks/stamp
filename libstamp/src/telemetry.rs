@@ -1,5 +1,5 @@
 #![cfg(not(tarpaulin_include))]
-#![cfg_attr(coverage_nightly, coverage(off))]
+
 //! Telemetry and version checking capabilities.
 //!
 //! Provides opt-in telemetry for usage data and version checking against Checkpoint.

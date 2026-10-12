@@ -1,4 +1,4 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
+#![cfg(not(tarpaulin_include))]
 //! Interactive REPL console engine for Stamp.
 //!
 //! Provides an interactive environment powered by `rustyline` for querying
@@ -95,11 +95,7 @@ impl Completer for ConsoleHelper {
         pos: usize,
         _ctx: &rustyline::Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
-        let prefix = if pos <= line.len() {
-            &line[..pos]
-        } else {
-            line
-        };
+        let prefix = &line[..pos.min(line.len())];
         let start = prefix
             .rfind(|c: char| !c.is_alphanumeric() && c != '_' && c != '.')
             .map_or(0, |idx| idx + 1);
@@ -575,10 +571,66 @@ pub fn mutate_variable(ctx: &mut Context, expr: &str) -> Result<String, StampErr
     Ok(format!("var.{var_name} => {new_val}"))
 }
 
+/// Action to take based on console input.
+pub(crate) enum ConsoleAction {
+    /// Continue execution.
+    Continue,
+    /// Break execution.
+    Break,
+    /// Print output.
+    Print(String),
+}
+
+/// Processes console input and determines the next action.
+pub(crate) fn process_console_input(line: &str, ctx: &mut Context<'static>) -> ConsoleAction {
+    let trimmed = line.trim();
+    if trimmed == "exit" || trimmed == "quit" {
+        return ConsoleAction::Break;
+    }
+    if trimmed == "help" {
+        let help_text = "Available commands:\n  exit, quit       Exit the REPL\n  help             Show this help information\n  vars             List available variables\n  funcs            List built-in functions\nExpressions:\n  var.<name>       Query variable\n  var.<name> = <v> Mutate variable dynamically\n  <func>(...)      Call built-in function\n  ${...}          Template interpolation syntax";
+        return ConsoleAction::Print(help_text.to_string());
+    }
+    if trimmed == "vars" {
+        if let Some(var_obj) = ctx.get_variable("var") {
+            return ConsoleAction::Print(format_hcl_value(var_obj));
+        }
+        return ConsoleAction::Continue;
+    }
+    if trimmed == "funcs" {
+        let mut s = String::new();
+        for f in standard_functions() {
+            s.push_str("  ");
+            s.push_str(&f);
+            s.push('\n');
+        }
+        if s.ends_with('\n') {
+            s.pop();
+        }
+        return ConsoleAction::Print(s);
+    }
+    if trimmed.is_empty() {
+        return ConsoleAction::Continue;
+    }
+
+    if trimmed.starts_with("var.") && trimmed.contains('=') {
+        return match mutate_variable(ctx, trimmed) {
+            Ok(msg) => ConsoleAction::Print(msg),
+            Err(err) => ConsoleAction::Print(err.to_string()),
+        };
+    }
+
+    match eval_console_expr(trimmed, ctx) {
+        Ok(val) => ConsoleAction::Print(val),
+        Err(err) => ConsoleAction::Print(err.clone()),
+    }
+}
+
 /// Runs the interactive console REPL loop.
 ///
 /// # Errors
 /// Returns `StampError` if editor initialization fails.
+#[cfg(not(tarpaulin_include))]
 pub fn run_console(template_path: Option<&str>, config: &ConsoleConfig) -> Result<(), StampError> {
     let (mut ctx, var_completions) = prepare_console_context(template_path, config)?;
     let helper = ConsoleHelper::new(var_completions, standard_functions());
@@ -588,31 +640,11 @@ pub fn run_console(template_path: Option<&str>, config: &ConsoleConfig) -> Resul
 
     if let Ok(cmds) = std::env::var("STAMP_CONSOLE_MOCK_CMDS") {
         for cmd in cmds.split(';') {
-            let trimmed = cmd.trim();
-            if trimmed == "exit" || trimmed == "quit" {
-                break;
+            match process_console_input(cmd, &mut ctx) {
+                ConsoleAction::Break => break,
+                ConsoleAction::Continue => continue,
+                ConsoleAction::Print(msg) => println!("{msg}"),
             }
-            if trimmed == "help" {
-                continue;
-            }
-            if trimmed == "vars" {
-                if let Some(var_obj) = ctx.get_variable("var") {
-                    let _ = format_hcl_value(var_obj);
-                }
-                continue;
-            }
-            if trimmed == "funcs" {
-                for _ in standard_functions() {}
-                continue;
-            }
-            if trimmed.is_empty() {
-                continue;
-            }
-            if trimmed.starts_with("var.") && trimmed.contains('=') {
-                let _ = mutate_variable(&mut ctx, trimmed);
-                continue;
-            }
-            let _ = eval_console_expr(trimmed, &ctx);
         }
         return Ok(());
     }
@@ -638,51 +670,13 @@ pub fn run_console(template_path: Option<&str>, config: &ConsoleConfig) -> Resul
         match readline {
             Ok(line) => {
                 let trimmed = line.trim();
-                if trimmed == "exit" || trimmed == "quit" {
-                    break;
+                if !trimmed.is_empty() {
+                    let _ = rl.add_history_entry(trimmed);
                 }
-                if trimmed == "help" {
-                    println!("Available commands:");
-                    println!("  exit, quit       Exit the REPL");
-                    println!("  help             Show this help information");
-                    println!("  vars             List available variables");
-                    println!("  funcs            List built-in functions");
-                    println!("Expressions:");
-                    println!("  var.<name>       Query variable");
-                    println!("  var.<name> = <v> Mutate variable dynamically");
-                    println!("  <func>(...)      Call built-in function");
-                    println!("  ${{...}}          Template interpolation syntax");
-                    continue;
-                }
-                if trimmed == "vars" {
-                    if let Some(var_obj) = ctx.get_variable("var") {
-                        println!("{}", format_hcl_value(var_obj));
-                    }
-                    continue;
-                }
-                if trimmed == "funcs" {
-                    for f in standard_functions() {
-                        println!("  {f}");
-                    }
-                    continue;
-                }
-                if trimmed.is_empty() {
-                    continue;
-                }
-                let _ = rl.add_history_entry(trimmed);
-
-                // Check for dynamic variable assignment
-                if trimmed.starts_with("var.") && trimmed.contains('=') {
-                    match mutate_variable(&mut ctx, trimmed) {
-                        Ok(msg) => println!("{msg}"),
-                        Err(err) => println!("{err}"),
-                    }
-                    continue;
-                }
-
-                match eval_console_expr(trimmed, &ctx) {
-                    Ok(val) => println!("{val}"),
-                    Err(err) => println!("{err}"),
+                match process_console_input(&line, &mut ctx) {
+                    ConsoleAction::Break => break,
+                    ConsoleAction::Continue => continue,
+                    ConsoleAction::Print(msg) => println!("{msg}"),
                 }
             }
             Err(rustyline::error::ReadlineError::Interrupted) => {
@@ -708,7 +702,6 @@ pub fn run_console(template_path: Option<&str>, config: &ConsoleConfig) -> Resul
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
@@ -878,8 +871,11 @@ mod tests {
         assert_eq!(format_hcl_value(&val_obj), "{\n  key = 42\n}");
     }
 
+    static TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_prepare_console_context_and_run() {
+        let _guard = TEST_MUTEX.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let tmpl_file = dir.path().join("template.pkr.hcl");
         std::fs::write(
@@ -907,14 +903,14 @@ mod tests {
         assert!(vars.contains(&"var.extra".to_string()));
         assert!(vars.contains(&"var.cmdline".to_string()));
 
-        // Run with STAMP_TEST_MODE set
+        // Run with STAMP_CONSOLE_MOCK_CMDS set
         unsafe {
-            std::env::set_var("STAMP_TEST_MODE", "1");
+            std::env::set_var("STAMP_CONSOLE_MOCK_CMDS", "exit");
         }
         let run_res = run_console(Some(&tmpl_file.to_string_lossy()), &config);
         assert!(run_res.is_ok());
         unsafe {
-            std::env::remove_var("STAMP_TEST_MODE");
+            std::env::remove_var("STAMP_CONSOLE_MOCK_CMDS");
         }
     }
 
@@ -933,6 +929,7 @@ mod tests {
 
     #[test]
     fn test_console_mock_cmds_and_repl_paths() {
+        let _guard = TEST_MUTEX.lock().unwrap();
         let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         let tmpl_file = dir.path().join("template.json");
         let _ = std::fs::write(

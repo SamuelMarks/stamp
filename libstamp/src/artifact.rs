@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Artifact definitions for Stamp.
 
 use std::any::Any;
@@ -29,6 +28,7 @@ pub trait Artifact: Send + Sync + std::fmt::Debug {
 
 /// A basic mock artifact for use in testing and stubbed builders.
 #[derive(Debug, Clone)]
+
 pub struct MockArtifact {
     /// The builder ID.
     pub builder_id: String,
@@ -65,7 +65,6 @@ impl Artifact for MockArtifact {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
@@ -84,5 +83,17 @@ mod tests {
         assert_eq!(artifact.string(), "MockArtifact(id: test-id)");
         assert!(artifact.state("anything").is_none());
         assert!(artifact.destroy().is_ok());
+    }
+
+    #[test]
+    fn test_mock_artifact_derived_traits() {
+        let artifact = MockArtifact {
+            builder_id: "b".into(),
+            id: "i".into(),
+            files: vec!["f".into()],
+        };
+        let cloned = artifact.clone();
+        assert_eq!(cloned.id, "i");
+        assert_eq!(format!("{:?}", artifact), format!("{:?}", cloned));
     }
 }

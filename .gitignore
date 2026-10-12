@@ -1,3 +1,4 @@
+*.bak
 libstamp/custom-vmware-*
 libstamp/output-vmware-*
 libstamp/.packer.d

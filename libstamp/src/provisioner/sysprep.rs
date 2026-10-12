@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Sysprep provisioner.
 
 use crate::error::StampError;
@@ -69,7 +68,7 @@ impl Provisioner for SysprepProvisioner {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    #![cfg_attr(coverage_nightly, coverage(off))]
+
     use super::*;
     use crate::communicator::mock::MockCommunicator;
 

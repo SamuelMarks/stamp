@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Mock communicator for testing.
 
 use crate::communicator::{Command, CommandResult, Communicator};
@@ -62,7 +61,6 @@ impl Communicator for MockCommunicator {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::pedantic,

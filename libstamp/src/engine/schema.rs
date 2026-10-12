@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Schema validation and type coercion for plugin configurations.
 //!
 //! Provides dynamic schema negotiation between Stamp and external plugins:

@@ -297,7 +297,7 @@ impl PowershellProvisioner {
 }
 
 #[async_trait::async_trait]
-#[cfg_attr(coverage_nightly, coverage(off))]
+
 impl Provisioner for PowershellProvisioner {
     fn only(&self) -> Option<&[String]> {
         self.config.only.as_deref()
@@ -312,7 +312,6 @@ impl Provisioner for PowershellProvisioner {
         comm: &dyn Communicator,
         ui: std::sync::Arc<crate::engine::ui::Ui>,
     ) -> Result<(), StampError> {
-        #![cfg_attr(coverage_nightly, coverage(off))]
         if let Some(pause) = &self.config.pause_before {
             tokio::time::sleep(pause.0).await;
         }

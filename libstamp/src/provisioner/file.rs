@@ -254,7 +254,6 @@ impl Provisioner for FileProvisioner {
         comm: &dyn Communicator,
         ui: std::sync::Arc<crate::engine::ui::Ui>,
     ) -> Result<(), StampError> {
-        #![cfg_attr(coverage_nightly, coverage(off))]
         match self.config.direction {
             FileDirection::Upload => {
                 let local_path = &self.config.source.0;

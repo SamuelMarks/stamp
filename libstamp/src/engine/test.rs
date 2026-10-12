@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Template Testing Engine (`stamp test`).
 //!
 //! Provides a native testing framework for HCL2 templates.

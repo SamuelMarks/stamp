@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `yandex` builder for Yandex Compute Cloud.
 //!
 //! Provides a full REST client for Yandex Compute Cloud, managing service account IAM tokens,

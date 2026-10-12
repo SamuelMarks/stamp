@@ -149,7 +149,6 @@ impl Builder for GoPluginBuilder {
     }
 
     async fn prepare(&self) -> Result<(), StampError> {
-        #![cfg_attr(coverage_nightly, coverage(off))]
         use std::process::Stdio;
         use tokio::io::{AsyncBufReadExt, BufReader};
         use tokio::process::Command;

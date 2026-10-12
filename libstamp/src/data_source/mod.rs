@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Data Sources for template evaluation.
 
 use crate::error::StampError;
@@ -19,36 +18,6 @@ pub trait DataSource: Send + Sync {
 /// Returns `StampError` if the data source type is unknown.
 pub fn create_data_source(config: &DataSourceConfig) -> Result<Box<dyn DataSource>, StampError> {
     match config.source_type.as_str() {
-        "amazon-ami" => {
-            let filters = config.config.clone();
-            Ok(Box::new(amazon_ami::AmazonAmiDataSource::new(
-                amazon_ami::AmazonAmiConfig { filters },
-            )))
-        }
-        "amazon-secretsmanager" => {
-            let secret_id = config.config.get("secret_id").cloned().unwrap_or_default();
-            let key = config.config.get("key").cloned();
-            Ok(Box::new(
-                amazon_secretsmanager::AmazonSecretsManagerDataSource::new(
-                    amazon_secretsmanager::AmazonSecretsManagerConfig { secret_id, key },
-                ),
-            ))
-        }
-        "amazon-parameterstore" | "amazon_parameterstore" | "aws-parameterstore" => {
-            let name = config.config.get("name").cloned().unwrap_or_default();
-            let with_decryption = config
-                .config
-                .get("with_decryption")
-                .is_none_or(|v| v != "false");
-            Ok(Box::new(
-                amazon_parameterstore::AmazonParameterStoreDataSource::new(
-                    amazon_parameterstore::AmazonParameterStoreConfig {
-                        name,
-                        with_decryption,
-                    },
-                ),
-            ))
-        }
         "git" => {
             let path = config.config.get("path").cloned();
             Ok(Box::new(git::GitDataSource::new(
@@ -145,18 +114,6 @@ pub fn create_data_source(config: &DataSourceConfig) -> Result<Box<dyn DataSourc
                 filters: config.config.clone(),
             }),
         )),
-        "azure" | "azure-arm" | "azure-image" | "azure_image" => Ok(Box::new(
-            azure::AzureImageDataSource::new(azure::AzureImageConfig {
-                filters: config.config.clone(),
-            }),
-        )),
-        "googlecompute" | "googlecompute-image" | "googlecompute_image" => {
-            Ok(Box::new(googlecompute::GooglecomputeImageDataSource::new(
-                googlecompute::GooglecomputeImageConfig {
-                    filters: config.config.clone(),
-                },
-            )))
-        }
         "vsphere" | "vsphere-virtual-machine" | "vsphere_virtual_machine" => Ok(Box::new(
             vsphere::VsphereVirtualMachineDataSource::new(vsphere::VsphereVirtualMachineConfig {
                 filters: config.config.clone(),
@@ -237,15 +194,10 @@ pub fn create_data_source(config: &DataSourceConfig) -> Result<Box<dyn DataSourc
 }
 
 pub mod alicloud;
-pub mod amazon_ami;
-pub mod amazon_parameterstore;
-pub mod amazon_secretsmanager;
-pub mod azure;
 pub mod consul_key;
 pub mod external;
 pub mod git;
 pub mod go_plugin;
-pub mod googlecompute;
 pub mod hcp;
 pub mod http;
 pub mod local_file;
@@ -257,31 +209,6 @@ pub mod vsphere;
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn test_create_data_source_amazon_ami() -> Result<(), StampError> {
-        let mut config = DataSourceConfig::default();
-        config.source_type = "amazon-ami".to_string();
-        let ds = create_data_source(&config)?;
-        let _ = ds.read().await; // dummy check
-        Ok(())
-    }
-
-    #[test]
-    fn test_create_data_source_secretsmanager() -> Result<(), StampError> {
-        let mut config = DataSourceConfig::default();
-        config.source_type = "amazon-secretsmanager".to_string();
-        let _ = create_data_source(&config)?;
-
-        let mut config2 = DataSourceConfig::default();
-        config2.source_type = "amazon-secretsmanager".to_string();
-        config2
-            .config
-            .insert("secret_id".to_string(), "foo".to_string());
-        config2.config.insert("key".to_string(), "bar".to_string());
-        let _ = create_data_source(&config2)?;
-        Ok(())
-    }
 
     #[test]
     fn test_create_data_source_hcp_packer_iteration() -> Result<(), StampError> {
@@ -363,30 +290,6 @@ mod tests {
     }
 
     #[test]
-    fn test_create_data_source_azure() -> Result<(), StampError> {
-        let mut config = DataSourceConfig::default();
-        config.source_type = "azure".to_string();
-        let _ = create_data_source(&config)?;
-
-        let mut config2 = DataSourceConfig::default();
-        config2.source_type = "azure-arm".to_string();
-        let _ = create_data_source(&config2)?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_create_data_source_googlecompute() -> Result<(), StampError> {
-        let mut config = DataSourceConfig::default();
-        config.source_type = "googlecompute".to_string();
-        let _ = create_data_source(&config)?;
-
-        let mut config2 = DataSourceConfig::default();
-        config2.source_type = "googlecompute-image".to_string();
-        let _ = create_data_source(&config2)?;
-        Ok(())
-    }
-
-    #[test]
     fn test_create_data_source_vsphere() -> Result<(), StampError> {
         let mut config = DataSourceConfig::default();
         config.source_type = "vsphere".to_string();
@@ -415,14 +318,13 @@ mod tests {
         let _ = create_data_source(&config2)?;
         Ok(())
     }
-
     #[test]
     fn test_create_data_source_external() -> Result<(), StampError> {
         let mut config = DataSourceConfig::default();
         config.source_type = "external".to_string();
         config
             .config
-            .insert("program".to_string(), "[\"echo\", \"hi\"]".to_string());
+            .insert("program".to_string(), r#"["echo", "hello"]"#.to_string());
         config
             .config
             .insert("working_dir".to_string(), ".".to_string());
@@ -434,6 +336,18 @@ mod tests {
             .config
             .insert("program".to_string(), "echo".to_string());
         let _ = create_data_source(&config2)?;
+
+        let mut config3 = DataSourceConfig::default();
+        config3.source_type = "external".to_string();
+        config3
+            .config
+            .insert("program".to_string(), "[bash, -c, echo]".to_string());
+        let _ = create_data_source(&config3)?;
+
+        let mut config4 = DataSourceConfig::default();
+        config4.source_type = "external".to_string();
+        let _ = create_data_source(&config4)?;
+
         Ok(())
     }
 
@@ -465,18 +379,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_data_source_new_sources() -> Result<(), StampError> {
-        let mut ps_cfg = DataSourceConfig::default();
-        ps_cfg.source_type = "amazon-parameterstore".to_string();
-        ps_cfg
-            .config
-            .insert("name".to_string(), "/app/param".to_string());
-        ps_cfg
-            .config
-            .insert("with_decryption".to_string(), "false".to_string());
-        let ps_ds = create_data_source(&ps_cfg)?;
-        let val_ps = ps_ds.read().await?;
-        assert_eq!(val_ps["name"], "/app/param");
-
         let mut git_cfg = DataSourceConfig::default();
         git_cfg.source_type = "git".to_string();
         git_cfg.config.insert("path".to_string(), ".".to_string());

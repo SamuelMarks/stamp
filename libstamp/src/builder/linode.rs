@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `linode` builder.
 
 use crate::builder::Builder;
@@ -48,13 +47,11 @@ impl LinodeBuilder {
     }
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 /// Return the base Linode API endpoint URL.
 fn linode_api_url() -> String {
     std::env::var("LINODE_API_URL").unwrap_or_else(|_| "https://api.linode.com/v4".to_string())
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 /// Construct an authenticated HTTP client for Linode API calls.
 fn linode_client(token: &str) -> Result<reqwest::Client, StampError> {
     let mut headers = reqwest::header::HeaderMap::new();
@@ -81,7 +78,6 @@ struct StepCreateInstance {
 
 #[async_trait::async_trait]
 impl Step for StepCreateInstance {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Creating Linode Instance...");
 
@@ -167,7 +163,6 @@ struct StepProvision {
 
 #[async_trait::async_trait]
 impl Step for StepProvision {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Provisioning Instance...");
 
@@ -248,7 +243,6 @@ struct StepShutdownInstance {
 
 #[async_trait::async_trait]
 impl Step for StepShutdownInstance {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let linode_id = state.get::<u64>("linode_id").copied().unwrap_or_default();
         self.ui
@@ -292,7 +286,6 @@ struct StepCreateImage {
 
 #[async_trait::async_trait]
 impl Step for StepCreateImage {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let linode_id = state.get::<u64>("linode_id").copied().unwrap_or_default();
         self.ui.say(
@@ -357,7 +350,6 @@ impl Step for StepCreateImage {
 
 #[async_trait::async_trait]
 impl Builder for LinodeBuilder {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn prepare(&self) -> Result<(), StampError> {
         if self.config.name.is_empty() {
             return Err(StampError::Parse("Name cannot be empty".to_string()));
@@ -446,7 +438,6 @@ Do you want to clean up? [y/N]: ",
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::pedantic,

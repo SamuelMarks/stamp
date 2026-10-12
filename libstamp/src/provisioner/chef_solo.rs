@@ -137,7 +137,6 @@ impl Provisioner for ChefSoloProvisioner {
         comm: &dyn Communicator,
         ui: std::sync::Arc<crate::engine::ui::Ui>,
     ) -> Result<(), StampError> {
-        #![cfg_attr(coverage_nightly, coverage(off))]
         if self.config.cookbook_paths.is_empty()
             && self.config.berksfile.is_none()
             && !self.config.berkshelf

@@ -310,7 +310,6 @@ impl Provisioner for AnsibleProvisioner {
         _comm: &dyn Communicator,
         ui: std::sync::Arc<crate::engine::ui::Ui>,
     ) -> Result<(), StampError> {
-        #![cfg_attr(coverage_nightly, coverage(off))]
         if self.config.playbook_file.is_empty() {
             return Err(StampError::Provisioner(
                 "playbook_file is required".to_string(),

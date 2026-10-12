@@ -1,5 +1,5 @@
 #![cfg(not(tarpaulin_include))]
-#![cfg_attr(coverage_nightly, coverage(off))]
+
 //! Packer-specific template functions for evaluating configuration templates.
 //! Standard HCL functions are provided directly by `hashicorp_configuration_language_rs::eval::stdlib`.
 

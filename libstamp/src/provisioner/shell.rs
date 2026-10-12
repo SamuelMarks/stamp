@@ -372,7 +372,6 @@ impl Provisioner for ShellProvisioner {
         comm: &dyn Communicator,
         ui: std::sync::Arc<crate::engine::ui::Ui>,
     ) -> Result<(), StampError> {
-        #![cfg_attr(coverage_nightly, coverage(off))]
         if let Some(pause) = &self.config.pause_before {
             tokio::time::sleep(pause.0).await;
         }

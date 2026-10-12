@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Core error types for the Stamp library.
 
 use derive_more::derive::{Display, From};
@@ -138,7 +137,6 @@ pub enum StampError {
 impl std::error::Error for StampError {}
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;

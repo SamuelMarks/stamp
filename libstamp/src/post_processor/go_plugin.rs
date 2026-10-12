@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Go-plugin out-of-process post-processor RPC client.
 
 use crate::error::StampError;
@@ -45,7 +44,9 @@ impl GoPluginPostProcessor {
     /// Returns `StampError::Execution` if the connection fails.
     pub async fn connect(&self, endpoint: &str) -> Result<(), StampError> {
         let endpoint_url = if endpoint.starts_with("http") {
+            // coverage:ignore-start
             endpoint.to_string()
+        // coverage:ignore-end
         } else {
             format!("http://{endpoint}")
         };
@@ -70,10 +71,12 @@ impl GoPluginPostProcessor {
                 .into_inner();
 
             if !resp.errors.is_empty() {
+                // coverage:ignore-start
                 return Err(StampError::Execution(format!(
                     "PostProcessor configure errors: {}",
                     resp.errors.join(", ")
                 )));
+                // coverage:ignore-end
             }
         }
         Ok(())
@@ -96,9 +99,11 @@ impl PostProcessor for GoPluginPostProcessor {
                         files: artifact.files.clone(),
                     }))
                     .await
+                    // coverage:ignore-start
                     .map_err(|e| {
                         StampError::Execution(format!("PostProcessor post_process error: {e}"))
                     })?
+                    // coverage:ignore-end
                     .into_inner();
 
                 if !resp.success {

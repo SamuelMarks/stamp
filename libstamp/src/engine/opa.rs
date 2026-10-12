@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Open Policy Agent (OPA) / Rego policy evaluation engine for Stamp templates.
 //!
 //! Evaluates Stamp templates, planned builders, provisioners, and build artifacts
@@ -190,19 +189,21 @@ impl OpaEvaluator {
         })?;
 
         // Try executing external `opa` CLI if available on PATH
-        if let Ok(path_var) = std::env::var("PATH") {
-            let opa_exists = path_var
+        let use_external = if let Ok(path_var) = std::env::var("PATH") {
+            path_var
                 .split(':')
-                .any(|dir| Path::new(dir).join("opa").exists());
+                .any(|dir| Path::new(dir).join("opa").exists())
+        } else {
+            false
+        };
 
-            if opa_exists {
-                return self.evaluate_external_opa(path, input, violations).await;
-            }
+        if use_external {
+            self.evaluate_external_opa(path, input, violations).await
+        } else {
+            // Native built-in Rego compliance engine
+            Self::evaluate_rego_source(&path.display().to_string(), &content, input, violations);
+            Ok(())
         }
-
-        // Native built-in Rego compliance engine
-        Self::evaluate_rego_source(&path.display().to_string(), &content, input, violations);
-        Ok(())
     }
 
     /// Evaluates Rego policy using the external `opa` binary.
@@ -227,7 +228,11 @@ impl OpaEvaluator {
             .spawn()
             .map_err(|e| StampError::Execution(format!("Failed to spawn opa process: {e}")))?;
 
-        if let Some(mut stdin) = child.stdin.take() {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| StampError::Execution("Missing stdin for opa".to_string()))?;
+        {
             use tokio::io::AsyncWriteExt;
             let _ = stdin.write_all(input_str.as_bytes()).await;
         }
@@ -249,28 +254,28 @@ impl OpaEvaluator {
             .map_err(|e| StampError::Execution(format!("Failed to parse OPA JSON output: {e}")))?;
 
         if let Some(result_arr) = res_json["result"].as_array() {
-            for item in result_arr {
-                if let Some(exprs) = item["expressions"].as_array() {
-                    for expr in exprs {
-                        match &expr["value"] {
-                            serde_json::Value::Array(arr) => {
-                                for v in arr {
-                                    let msg = v.as_str().unwrap_or(&v.to_string()).to_string();
-                                    violations.push(OpaViolation {
-                                        policy: policy_path.display().to_string(),
-                                        message: msg,
-                                    });
-                                }
-                            }
-                            serde_json::Value::Bool(b) if !b => {
-                                violations.push(OpaViolation {
-                                    policy: policy_path.display().to_string(),
-                                    message: "Policy condition evaluated to false".to_string(),
-                                });
-                            }
-                            _ => {}
+            for expr in result_arr
+                .iter()
+                .filter_map(|item| item["expressions"].as_array())
+                .flatten()
+            {
+                match &expr["value"] {
+                    serde_json::Value::Array(arr) => {
+                        for v in arr {
+                            let msg = v.as_str().unwrap_or(&v.to_string()).to_string();
+                            violations.push(OpaViolation {
+                                policy: policy_path.display().to_string(),
+                                message: msg,
+                            });
                         }
                     }
+                    serde_json::Value::Bool(b) if !b => {
+                        violations.push(OpaViolation {
+                            policy: policy_path.display().to_string(),
+                            message: "Policy condition evaluated to false".to_string(),
+                        });
+                    }
+                    _ => {}
                 }
             }
         }
@@ -622,6 +627,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_opa_filesystem_errors() {
+        let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            // Unreadable directory
+            let unreadable_dir = tmp.path().join("unreadable_dir");
+            std::fs::create_dir_all(&unreadable_dir).unwrap_or_else(|e| panic!("{e}"));
+            std::fs::set_permissions(&unreadable_dir, std::fs::Permissions::from_mode(0o000))
+                .unwrap_or_else(|e| panic!("{e}"));
+
+            let config1 = OpaConfig {
+                policy_paths: vec![OpaPolicyPath(unreadable_dir.clone())],
+                ..Default::default()
+            };
+            let eval1 = OpaEvaluator::new(config1);
+            let res1 = eval1.evaluate_template(&Template::default(), &[]).await;
+            assert!(res1.is_err());
+
+            // Unreadable file
+            let unreadable_file = tmp.path().join("unreadable.rego");
+            std::fs::write(&unreadable_file, "package main").unwrap_or_else(|e| panic!("{e}"));
+            std::fs::set_permissions(&unreadable_file, std::fs::Permissions::from_mode(0o000))
+                .unwrap_or_else(|e| panic!("{e}"));
+
+            let config2 = OpaConfig {
+                policy_paths: vec![OpaPolicyPath(unreadable_file.clone())],
+                ..Default::default()
+            };
+            let eval2 = OpaEvaluator::new(config2);
+            let res2 = eval2.evaluate_template(&Template::default(), &[]).await;
+            assert!(res2.is_err());
+
+            // Cleanup
+            let _ =
+                std::fs::set_permissions(&unreadable_dir, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    #[tokio::test]
     async fn test_opa_policy_file_and_directory_evaluation() {
         let _guard = crate::utils::ENV_MUTEX
             .lock()
@@ -675,6 +722,18 @@ mod tests {
 
         let res_pass = evaluator.evaluate_template(&pass_tmpl, &[]).await;
         assert!(res_pass.is_ok());
+
+        std::fs::write(tmp.path().join("ignore.txt"), "hello").unwrap_or_else(|e| panic!("{e}"));
+
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+        unsafe {
+            std::env::remove_var("PATH");
+        }
+        let res_no_path = evaluator.evaluate_template(&pass_tmpl, &[]).await;
+        assert!(res_no_path.is_ok());
+        unsafe {
+            std::env::set_var("PATH", orig_path);
+        }
     }
 
     #[tokio::test]
@@ -830,6 +889,14 @@ exit 2
         let res_fail = eval.evaluate_template(&Template::default(), &[]).await;
         assert!(res_fail.is_err());
 
+        // Test valid JSON but no result array
+        let script_no_result = r#"#!/bin/sh
+printf '%s\n' '{"other":true}'
+"#;
+        std::fs::write(&opa_script, script_no_result).unwrap_or_else(|e| panic!("{e}"));
+        let res_no_result = eval.evaluate_template(&Template::default(), &[]).await;
+        assert!(res_no_result.is_ok());
+
         unsafe { std::env::set_var("PATH", orig_path) };
     }
 
@@ -861,17 +928,22 @@ exit 2
             }
         }
         let art = DummyArt;
+        assert_eq!(art.id(), "dummy-id");
+        assert_eq!(art.builder_id(), "dummy-builder");
+        assert_eq!(art.files(), vec!["file.bin".to_string()]);
         assert_eq!(art.string(), "dummy");
         assert!(art.state("foo").is_none());
         assert!(art.destroy().is_ok());
 
-        // Nested config for builder
-        let mut tmpl = Template::default();
-        let mut b = crate::template::BuilderConfig::default();
-        b.config
-            .insert("encrypt_boot".to_string(), "false".to_string());
-        b.builder_type = "amazon-ebs".to_string();
-        tmpl.builders.push(b);
+        let input = serde_json::json!({
+            "builders": [{
+                "builder_type": "amazon-ebs",
+                "name": "test-builder",
+                "config": {
+                    "encrypt_boot": "false"
+                }
+            }]
+        });
 
         let config = OpaConfig {
             inline_policy: Some(
@@ -881,6 +953,15 @@ exit 2
             ..Default::default()
         };
         let eval = OpaEvaluator::new(config);
+        assert!(eval.evaluate_input(&input).await.is_err());
+
+        // Also evaluate a normal template
+        let mut tmpl = Template::default();
+        let mut b = crate::template::BuilderConfig::default();
+        b.config
+            .insert("encrypt_boot".to_string(), "false".to_string());
+        b.builder_type = "amazon-ebs".to_string();
+        tmpl.builders.push(b);
         assert!(eval.evaluate_template(&tmpl, &[]).await.is_err());
     }
 }

@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! HCP Packer data sources.
 
 use crate::error::StampError;
@@ -403,7 +402,6 @@ impl super::DataSource for HcpPackerImageDataSource {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::all, clippy::pedantic)]
 mod tests {
     use super::*;

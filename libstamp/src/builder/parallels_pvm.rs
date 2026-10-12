@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `parallels-pvm` builder.
 
 use crate::builder::Builder;
@@ -31,7 +30,6 @@ impl ParallelsPvmBuilder {
 
 #[async_trait::async_trait]
 impl Builder for ParallelsPvmBuilder {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn prepare(&self) -> Result<(), StampError> {
         if self.config.name.is_empty() {
             return Err(StampError::Parse("Name cannot be empty".to_string()));
@@ -39,7 +37,6 @@ impl Builder for ParallelsPvmBuilder {
         Ok(())
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(
         &self,
         _hook: std::sync::Arc<dyn crate::engine::hook::ProvisionHook>,
@@ -95,7 +92,6 @@ impl Builder for ParallelsPvmBuilder {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;

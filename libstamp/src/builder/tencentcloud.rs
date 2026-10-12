@@ -268,15 +268,8 @@ impl Builder for TencentCloudBuilder {
         let mut state = StateBag::new();
         runner.run(&mut state).await?;
 
-        let image_id = state
-            .get::<String>("image_id")
-            .cloned()
-            .unwrap_or_else(|| "img-tc112233".to_string());
-        let region = self
-            .config
-            .region
-            .clone()
-            .unwrap_or_else(|| "ap-guangzhou".to_string());
+        let image_id = state.get::<String>("image_id").cloned().unwrap_or_default();
+        let region = self.config.region.clone().unwrap_or_default();
 
         Ok(Box::new(TencentCloudArtifact { image_id, region }))
     }
@@ -343,12 +336,10 @@ mod tests {
             .await;
         assert!(artifact.is_ok());
         assert!(artifact.is_ok());
-        let art = match artifact {
-            Ok(a) => a,
-            Err(e) => panic!("{e}"),
-        };
-        assert_eq!(art.builder_id(), "tencentcloud.cvm");
-        assert!(art.state("foo").is_none());
+        if let Ok(art) = artifact {
+            assert_eq!(art.builder_id(), "tencentcloud.cvm");
+            assert!(art.state("foo").is_none());
+        }
     }
 
     #[tokio::test]

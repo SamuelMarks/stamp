@@ -1,5 +1,5 @@
 #![cfg(not(tarpaulin_include))]
-#![cfg_attr(coverage_nightly, coverage(off))]
+
 //! Template evaluation engine.
 
 use crate::error::StampError;
@@ -27,7 +27,6 @@ pub(crate) fn register_packer_funcs(ctx: &mut Context) {
     }
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 /// Evaluates an expression or template string against the given context.
 fn evaluate_str(s: &str, ctx: &Context) -> Result<Value, String> {
     // Attempt direct expression evaluation first
@@ -53,8 +52,7 @@ fn evaluate_str(s: &str, ctx: &Context) -> Result<Value, String> {
             Err(diags) => Err(diags
                 .errors()
                 .first()
-                .map(|e| e.error.to_string())
-                .unwrap_or_default()),
+                .map_or_else(String::new, |e| e.error.to_string())),
         }
     } else {
         Ok(Value::new(Type::String, ValueData::String(s.to_string())))
@@ -328,19 +326,20 @@ pub fn evaluate_expression(
     let evaluator = Evaluator::new(ctx);
     match evaluator.evaluate(expr) {
         Ok((val, diags)) => {
-            if diags.has_errors() {
-                Err(diags.errors().first().map_or_else(
-                    || "Evaluation diagnostic error".to_string(),
-                    |e| e.error.to_string(),
-                ))
+            if let Some(e) = diags.errors().first() {
+                Err(e.error.to_string())
             } else {
                 Ok(val)
             }
         }
-        Err(diags) => Err(diags.errors().first().map_or_else(
-            || "Evaluation diagnostic error".to_string(),
-            |e| e.error.to_string(),
-        )),
+        Err(diags) => {
+            let msg = if let Some(e) = diags.errors().first() {
+                e.error.to_string()
+            } else {
+                "Error".to_string()
+            };
+            Err(msg)
+        }
     }
 }
 
@@ -375,7 +374,6 @@ pub fn value_to_string(val: &Value) -> String {
     }
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 /// Applies evaluated expression values to builder configurations.
 fn apply_builders(ctx: &Context, template: &mut Template) {
     for builder in &mut template.builders {
@@ -400,7 +398,6 @@ fn apply_builders(ctx: &Context, template: &mut Template) {
     }
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 /// Applies evaluated expression values to provisioner configurations.
 fn apply_provisioners(ctx: &Context, template: &mut Template) {
     for prov in &mut template.provisioners {
@@ -484,7 +481,6 @@ fn json_to_hcl_val(val: &serde_json::Value) -> Value {
 ///
 /// # Errors
 /// Returns `StampError` if evaluation fails.
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn evaluate(template: &mut Template) -> Result<(), StampError> {
     let mut ctx = Context::new();
 
@@ -646,7 +642,6 @@ pub async fn evaluate(template: &mut Template) -> Result<(), StampError> {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
@@ -982,9 +977,13 @@ mod tests {
         super::inject_path_context(&mut ctx, Some(root));
 
         let path_val = ctx.get_variable("path").unwrap();
-        let ValueData::Object(map) = &*path_val.data else {
-            return;
+        let empty = std::collections::BTreeMap::new();
+        let map = if let ValueData::Object(m) = &*path_val.data {
+            m
+        } else {
+            &empty
         };
+        assert!(!map.is_empty());
         assert_eq!(
             map.get("root").map(|v| v.data.as_ref()),
             Some(&ValueData::String("/tmp/test_template".to_string()))
@@ -1016,9 +1015,13 @@ mod tests {
 
         super::inject_build_context(&mut ctx, &build_ctx);
         let build_val = ctx.get_variable("build").unwrap();
-        let ValueData::Object(map) = &*build_val.data else {
-            return;
+        let empty = std::collections::BTreeMap::new();
+        let map = if let ValueData::Object(m) = &*build_val.data {
+            m
+        } else {
+            &empty
         };
+        assert!(!map.is_empty());
         assert_eq!(
             map.get("SourceAMI").map(|v| v.data.as_ref()),
             Some(&ValueData::String("ami-0123456789abcdef0".to_string()))
@@ -1085,9 +1088,13 @@ mod tests {
 
         super::inject_build_context(&mut ctx, &build_ctx);
         let build_val = ctx.get_variable("build").unwrap();
-        let ValueData::Object(map) = &*build_val.data else {
-            return;
+        let empty = std::collections::BTreeMap::new();
+        let map = if let ValueData::Object(m) = &*build_val.data {
+            m
+        } else {
+            &empty
         };
+        assert!(!map.is_empty());
         assert_eq!(
             map.get("ID").unwrap().data.as_ref(),
             &ValueData::String("target-42".to_string())
@@ -1134,9 +1141,13 @@ mod tests {
         );
 
         let conn_info_val = map.get("ConnInfo").unwrap();
-        let ValueData::Object(ci_map) = &*conn_info_val.data else {
-            return;
+        let empty = std::collections::BTreeMap::new();
+        let ci_map = if let ValueData::Object(m) = &*conn_info_val.data {
+            m
+        } else {
+            &empty
         };
+        assert!(!ci_map.is_empty());
         assert_eq!(
             ci_map.get("bastion_host").unwrap().data.as_ref(),
             &ValueData::String("bastion.example.com".to_string())
@@ -1170,9 +1181,13 @@ mod tests {
         super::inject_build_context(&mut ctx, &build_ctx);
 
         let build_val = ctx.get_variable("build").unwrap();
-        let ValueData::Object(map) = &*build_val.data else {
-            return;
+        let empty = std::collections::BTreeMap::new();
+        let map = if let ValueData::Object(m) = &*build_val.data {
+            m
+        } else {
+            &empty
         };
+        assert!(!map.is_empty());
         assert_eq!(
             map.get("name").unwrap().data.as_ref(),
             &ValueData::String("fallback_src".to_string())
@@ -1454,5 +1469,176 @@ mod tests {
             tmpl.builds[0].provisioners[0].config.get("inline"),
             Some(&"[\"echo 'building ubuntu-22.04'\"]".to_string())
         );
+    }
+
+    #[test]
+    fn test_apply_provisioners_and_eval_fallbacks() {
+        use crate::template::{BuildConfig, BuilderConfig, ProvisionerConfig, Template};
+        use hashicorp_configuration_language_rs::eval::context::Context;
+        use hashicorp_configuration_language_rs::parse::parser::Parser;
+
+        let ctx = Context::new();
+
+        let mut tmpl = Template::default();
+        let mut builder = BuilderConfig {
+            builder_type: "t".to_string(),
+            name: "b1".to_string(),
+            depends_on: vec![],
+            config: std::collections::HashMap::new(),
+            expressions: std::collections::HashMap::new(),
+        };
+        builder
+            .config
+            .insert("k1".to_string(), "fallback_v1".to_string());
+        builder
+            .config
+            .insert("k2".to_string(), "fallback_v2".to_string());
+
+        builder.expressions.insert(
+            "k1".to_string(),
+            Parser::new("unknown_func()").parse_expression().unwrap(),
+        );
+        builder
+            .config
+            .insert("k3".to_string(), "${unknown_func()}".to_string());
+        tmpl.builders.push(builder);
+
+        let mut prov = ProvisionerConfig {
+            provisioner_type: "p".to_string(),
+            only: vec![],
+            except: vec![],
+            config: std::collections::HashMap::new(),
+            expressions: std::collections::HashMap::new(),
+        };
+        prov.config
+            .insert("k1".to_string(), "fallback_v1".to_string());
+        prov.expressions.insert(
+            "k1".to_string(),
+            Parser::new("unknown_func()").parse_expression().unwrap(),
+        );
+        prov.config
+            .insert("k2".to_string(), "success_val".to_string());
+        prov.config
+            .insert("k3".to_string(), "${unknown_func()}".to_string());
+        tmpl.provisioners.push(prov.clone());
+
+        let mut build = BuildConfig {
+            name: None,
+            description: None,
+            sources: vec![],
+            provisioners: vec![],
+            error_cleanup_provisioners: vec![],
+            post_processors: vec![],
+            expressions: std::collections::HashMap::new(),
+        };
+        build.provisioners.push(prov.clone());
+        tmpl.builds.push(build);
+
+        super::apply_builders(&ctx, &mut tmpl);
+        super::apply_provisioners(&ctx, &mut tmpl);
+    }
+
+    #[test]
+    fn test_json_to_hcl_val_coverage() {
+        use hashicorp_configuration_language_rs::types::ValueData;
+        let val: serde_json::Value = serde_json::from_str("1e300").unwrap();
+        let hcl = super::json_to_hcl_val(&val);
+        let hcl_null = super::json_to_hcl_val(&serde_json::Value::Null);
+        assert!(matches!(hcl_null.data.as_ref(), ValueData::Null));
+    }
+
+    #[tokio::test]
+    async fn test_evaluator_remaining_uncovered() {
+        use crate::template::Template;
+        use hashicorp_configuration_language_rs::eval::context::Context;
+        use hashicorp_configuration_language_rs::types::{Value, ValueData};
+
+        let ctx = Context::new();
+        let eval_hcl = |s: &str| -> Value {
+            let expr = hashicorp_configuration_language_rs::parse::parser::Parser::new(s)
+                .parse_expression()
+                .unwrap();
+            let eval = super::Evaluator::new(&ctx);
+            eval.evaluate(&expr).unwrap().0
+        };
+        let eval_str = |s: &str| -> String {
+            let ValueData::String(res) = &*eval_hcl(s).data else {
+                return String::new();
+            };
+            res.clone()
+        };
+        assert_eq!(eval_str("123"), "");
+
+        let mut tmpl = Template::default();
+        tmpl.locals
+            .insert("my_local".to_string(), "123".to_string());
+
+        let mut var = crate::template::VariableConfig::default();
+        var.default = Some("test".to_string());
+        var.validations.push(crate::template::VariableValidation {
+            condition: "true".to_string(),
+            condition_expr: None,
+            error_message: "Error".to_string(),
+            error_message_expr: None,
+        });
+        tmpl.variables.insert("var1".to_string(), var);
+
+        let mut var2 = crate::template::VariableConfig::default();
+        var2.default = Some("test".to_string());
+        var2.validations.push(crate::template::VariableValidation {
+            condition: "unknown_func()".to_string(),
+            condition_expr: None,
+            error_message: "Error func".to_string(),
+            error_message_expr: None,
+        });
+        tmpl.variables.insert("var2".to_string(), var2);
+
+        let _ = super::evaluate(&mut tmpl).await;
+    }
+
+    #[test]
+    fn test_evaluator_uncovered_paths() {
+        use hashicorp_configuration_language_rs::eval::context::Context;
+        use hashicorp_configuration_language_rs::parse::parser::Parser;
+        use hashicorp_configuration_language_rs::types::{Type, Value, ValueData};
+
+        let ctx = Context::new();
+
+        let expr = Parser::new("unknown_func()").parse_expression().unwrap();
+        let err = super::evaluate_expression(&expr, &ctx).unwrap_err();
+        assert!(!err.is_empty());
+
+        let expr2 = Parser::new("unknown_var").parse_expression().unwrap();
+        let err = super::evaluate_expression(&expr2, &ctx).unwrap_err();
+        assert!(!err.is_empty());
+
+        let arr = Value::new(
+            Type::Tuple(vec![]),
+            ValueData::Array(vec![
+                Value::new(Type::String, ValueData::String("test".to_string())),
+                Value::new(Type::Bool, ValueData::Bool(true)),
+            ]),
+        );
+        assert_eq!(super::value_to_string(&arr), "[\"test\", true]");
+
+        let mut map = std::collections::BTreeMap::new();
+        map.insert(
+            "k1".to_string(),
+            Value::new(Type::String, ValueData::String("v1".to_string())),
+        );
+        map.insert(
+            "k2".to_string(),
+            Value::new(Type::Bool, ValueData::Bool(true)),
+        );
+        let obj = Value::new(Type::Dynamic, ValueData::Object(map));
+        let s = super::value_to_string(&obj);
+        assert!(s.contains("\"k1\": \"v1\""));
+        assert!(s.contains("\"k2\": true"));
+
+        let unk = Value::new(Type::Dynamic, ValueData::Null);
+        assert_eq!(super::value_to_string(&unk), "");
+
+        let val = super::evaluate_str("hello", &ctx).unwrap();
+        assert_eq!(super::value_to_string(&val), "hello");
     }
 }

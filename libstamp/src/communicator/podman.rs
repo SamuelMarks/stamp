@@ -142,7 +142,17 @@ impl Communicator for PodmanCommunicator {
         local_path: &FilePath,
         remote_path: &FilePath,
     ) -> Result<(), StampError> {
-        let cmd_name = if cfg!(test) { "true" } else { "podman" };
+        let cmd_name = if cfg!(test) {
+            if std::env::var("PODMAN_MOCK_SPAWN_FAIL").is_ok() {
+                "/nonexistent/podman/bin"
+            } else if std::env::var("PODMAN_MOCK_FAIL").is_ok() {
+                "/usr/bin/false"
+            } else {
+                "/usr/bin/true"
+            }
+        } else {
+            "podman"
+        };
 
         let target_dest = format!("{}:{}", self.config.container_id, remote_path.0.display());
         let args = self.build_cp_args(&local_path.0.to_string_lossy(), &target_dest);
@@ -154,7 +164,7 @@ impl Communicator for PodmanCommunicator {
                 StampError::Execution(format!("Failed to execute podman cp upload: {e}"))
             })?;
 
-        if !status.success() && !cfg!(test) {
+        if !status.success() {
             return Err(StampError::Execution(format!(
                 "podman cp upload failed with status {status}"
             )));
@@ -168,7 +178,17 @@ impl Communicator for PodmanCommunicator {
         remote_path: &FilePath,
         local_path: &FilePath,
     ) -> Result<(), StampError> {
-        let cmd_name = if cfg!(test) { "true" } else { "podman" };
+        let cmd_name = if cfg!(test) {
+            if std::env::var("PODMAN_MOCK_SPAWN_FAIL").is_ok() {
+                "/nonexistent/podman/bin"
+            } else if std::env::var("PODMAN_MOCK_FAIL").is_ok() {
+                "/usr/bin/false"
+            } else {
+                "/usr/bin/true"
+            }
+        } else {
+            "podman"
+        };
 
         let source = format!("{}:{}", self.config.container_id, remote_path.0.display());
         let args = self.build_cp_args(&source, &local_path.0.to_string_lossy());
@@ -180,7 +200,7 @@ impl Communicator for PodmanCommunicator {
                 StampError::Execution(format!("Failed to execute podman cp download: {e}"))
             })?;
 
-        if !status.success() && !cfg!(test) {
+        if !status.success() {
             return Err(StampError::Execution(format!(
                 "podman cp download failed with status {status}"
             )));
@@ -237,7 +257,7 @@ mod tests {
         let res = comm
             .execute(&Command::new("echo hello".to_string()))
             .await
-            .unwrap();
+            .expect("execute");
         assert_eq!(res.exit_code, 0);
     }
 
@@ -247,7 +267,7 @@ mod tests {
         let res = comm
             .execute(&Command::new("fail_cmd".to_string()))
             .await
-            .unwrap();
+            .expect("execute fail");
         assert_ne!(res.exit_code, 0);
     }
 
@@ -278,6 +298,32 @@ mod tests {
 
         let down_res = comm.download(&remote_path, &local_path).await;
         assert!(down_res.is_ok());
+
+        // Test upload and download failures (status code)
+        unsafe {
+            std::env::set_var("PODMAN_MOCK_FAIL", "1");
+        }
+        let fail_up = comm.upload(&local_path, &remote_path).await;
+        assert!(fail_up.is_err());
+
+        let fail_down = comm.download(&remote_path, &local_path).await;
+        assert!(fail_down.is_err());
+        unsafe {
+            std::env::remove_var("PODMAN_MOCK_FAIL");
+        }
+
+        // Test upload and download failures (spawn failure)
+        unsafe {
+            std::env::set_var("PODMAN_MOCK_SPAWN_FAIL", "1");
+        }
+        let spawn_fail_up = comm.upload(&local_path, &remote_path).await;
+        assert!(spawn_fail_up.is_err());
+
+        let spawn_fail_down = comm.download(&remote_path, &local_path).await;
+        assert!(spawn_fail_down.is_err());
+        unsafe {
+            std::env::remove_var("PODMAN_MOCK_SPAWN_FAIL");
+        }
     }
 
     #[test]
