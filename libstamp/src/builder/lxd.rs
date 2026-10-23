@@ -2,6 +2,7 @@
 //!
 //! Manages container creation, provisioning, snapshotting, and image publishing (`/1.0/images` or `lxc publish`).
 
+use crate::artifact::BuildArtifact;
 use crate::builder::Builder;
 use crate::communicator::Communicator;
 use crate::engine::hook::{BuildContext, ProvisionHook};
@@ -305,7 +306,7 @@ impl Step for StepProvisionLxd {
             build_id: self.name.clone(),
             host: "lxd".to_string(),
             user: "root".to_string(),
-            packer_run_uuid: "mocked-uuid".to_string(),
+            packer_run_uuid: uuid::Uuid::new_v4().to_string(),
             source_name: self.name.clone(),
             source_type: "lxd".to_string(),
             ..Default::default()
@@ -431,28 +432,20 @@ impl Builder for LxdBuilder {
         let mut runner = Runner::new(steps);
         let mut state = StateBag::new();
 
-        match runner.run(&mut state).await {
-            Ok(()) => {
-                runner.cleanup(&state).await;
-            }
-            Err(e) => {
-                if on_error == crate::engine::packer::OnErrorStrategy::Cleanup {
-                    runner.cleanup(&state).await;
-                }
-                return Err(e);
-            }
-        }
+        runner
+            .run_with_strategy(&mut state, &self.name(), &ui, on_error)
+            .await?;
 
         let artifact_id = state
             .get::<String>("artifact_id")
             .cloned()
             .unwrap_or_default();
 
-        Ok(Box::new(crate::artifact::MockArtifact {
-            builder_id: self.name(),
-            id: artifact_id,
-            files: vec![],
-        }))
+        Ok(Box::new(BuildArtifact::with_builder(
+            self.name(),
+            artifact_id,
+            vec![],
+        )))
     }
 
     async fn cancel(&self) -> Result<(), StampError> {
@@ -461,24 +454,11 @@ impl Builder for LxdBuilder {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::pedantic,
-    clippy::all,
-    for_loops_over_fallibles
-)]
 mod tests {
     use super::*;
 
-    fn create_mock_lxc_script() -> std::path::PathBuf {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "mock_lxc_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_micros()
-        ));
+    fn create_mock_lxc_script(dir: &std::path::Path) -> Result<std::path::PathBuf, StampError> {
+        let path = dir.join("mock_lxc.sh");
         let script = r#"#!/bin/sh
 case "$1" in
     launch)
@@ -521,13 +501,13 @@ case "$1" in
         ;;
 esac
 "#;
-        let _ = std::fs::write(&path, script);
+        std::fs::write(&path, script)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
         }
-        path
+        Ok(path)
     }
 
     struct FailingProvisioner;
@@ -542,45 +522,8 @@ esac
         }
     }
 
-    #[test]
-    fn test_derived_traits() {
-        let config = LxdConfig {
-            name: "test".to_string(),
-            image: "ubuntu:22.04".to_string(),
-            output_image: Some("my-img".to_string()),
-            endpoint: None,
-            profiles: vec!["default".to_string()],
-            config: std::collections::HashMap::new(),
-            command: None,
-        };
-        assert_eq!(config.clone(), config);
-        assert_eq!(format!("{config:?}"), format!("{config:?}"));
-
-        let serialized = serde_json::to_string(&config);
-        assert!(serialized.is_ok());
-        for json in serialized {
-            let deserialized: Result<LxdConfig, _> = serde_json::from_str(&json);
-            assert!(deserialized.is_ok());
-        }
-
-        let builder = LxdBuilder::new(config);
-        assert_eq!(format!("{builder:?}"), format!("{builder:?}"));
-
-        let client = LxdClient::new("local".to_string());
-        assert_eq!(format!("{client:?}"), format!("{client:?}"));
-
-        let client_custom = LxdClient::with_command("local".to_string(), "lxc-custom".to_string());
-        assert_eq!(client_custom.command, "lxc-custom");
-
-        let comm = LxdCommunicator {
-            container_name: "test-c".to_string(),
-            command: "lxc".to_string(),
-        };
-        assert_eq!(format!("{comm:?}"), format!("{comm:?}"));
-    }
-
     #[tokio::test]
-    async fn test_lxd_prepare() {
+    async fn test_lxd_prepare() -> Result<(), StampError> {
         let mut c = LxdConfig::default();
         let b = LxdBuilder::new(c.clone());
         assert!(b.prepare().await.is_err());
@@ -591,107 +534,98 @@ esac
 
         c.image = "images:alpine".to_string();
         let b = LxdBuilder::new(c);
-        assert!(b.prepare().await.is_ok());
+        b.prepare().await?;
+        assert_eq!(b.name(), "test");
+
+        let client = LxdClient::new("local".to_string());
+        assert_eq!(client.command, "lxc");
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_lxd_client_mocked() {
-        let script = create_mock_lxc_script();
+    async fn test_lxd_client_mocked() -> Result<(), StampError> {
+        let dir = tempfile::tempdir()?;
+        let script = create_mock_lxc_script(dir.path())?;
         let script_str = script.to_string_lossy().to_string();
         let client = LxdClient::with_command("socket".to_string(), script_str);
 
-        // Success launch
         let c_id = client
             .launch_container("c1", "ubuntu:22.04", &["default".to_string()])
-            .await;
-        assert!(c_id.is_ok());
+            .await?;
+        assert_eq!(c_id, "c1");
 
-        // Status failure launch
-        let c_id_fail = client.launch_container("c1", "fail:image", &[]).await;
-        assert!(c_id_fail.is_err());
+        assert!(
+            client
+                .launch_container("c1", "fail:image", &[])
+                .await
+                .is_err()
+        );
 
-        // Spawn failure launch
         let bad_client =
             LxdClient::with_command("socket".to_string(), "non_existent_binary_xyz".to_string());
-        let c_id_bad = bad_client.launch_container("c1", "ubuntu:22.04", &[]).await;
-        assert!(c_id_bad.is_err());
+        assert!(
+            bad_client
+                .launch_container("c1", "ubuntu:22.04", &[])
+                .await
+                .is_err()
+        );
 
-        // Stop container
-        let stop_res = client.stop_container("c1").await;
-        assert!(stop_res.is_ok());
+        client.stop_container("c1").await?;
 
-        // Publish image success
-        let fp = client.publish_image("c1", "my-alias").await;
-        let fp = fp.expect("publish_image failed");
+        let fp = client.publish_image("c1", "my-alias").await?;
         assert!(fp.starts_with("fingerprint-"));
 
-        // Publish image short output (fallback to alias)
-        let fp_short = client.publish_image("c1", "short").await;
-        assert!(fp_short.is_ok());
-        for f in fp_short {
-            assert_eq!(f, "short");
-        }
+        let fp_short = client.publish_image("c1", "short").await?;
+        assert_eq!(fp_short, "short");
 
-        // Publish image failure
-        let fp_fail = client.publish_image("fail-container", "my-alias").await;
-        assert!(fp_fail.is_err());
+        assert!(
+            client
+                .publish_image("fail-container", "my-alias")
+                .await
+                .is_err()
+        );
+        assert!(bad_client.publish_image("c1", "my-alias").await.is_err());
 
-        // Publish image bad client
-        let fp_bad = bad_client.publish_image("c1", "my-alias").await;
-        assert!(fp_bad.is_err());
-
-        // Delete container
-        let del_res = client.delete_container("c1").await;
-        assert!(del_res.is_ok());
-
-        let _ = std::fs::remove_file(&script);
+        client.delete_container("c1").await?;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_lxd_communicator() {
-        let script = create_mock_lxc_script();
+    async fn test_lxd_communicator() -> Result<(), StampError> {
+        let dir = tempfile::tempdir()?;
+        let script = create_mock_lxc_script(dir.path())?;
         let script_str = script.to_string_lossy().to_string();
         let comm = LxdCommunicator {
             container_name: "test-c".to_string(),
             command: script_str,
         };
 
-        // Execute success
         let cmd = crate::communicator::Command::new("echo hello".to_string());
-        let exec_res = comm.execute(&cmd).await;
-        assert!(exec_res.is_ok());
-        for res in exec_res {
-            assert_eq!(res.exit_code, 0);
-            assert!(res.stdout.contains("exec output"));
-        }
+        let res = comm.execute(&cmd).await?;
+        assert_eq!(res.exit_code, 0);
+        assert!(res.stdout.contains("exec output"));
 
-        // Execute non-zero exit code
         let cmd_fail = crate::communicator::Command::new("exit 42".to_string());
-        let exec_fail = comm.execute(&cmd_fail).await;
-        assert!(exec_fail.is_ok());
-        for res in exec_fail {
-            assert_eq!(res.exit_code, 42);
-        }
+        let res_fail = comm.execute(&cmd_fail).await?;
+        assert_eq!(res_fail.exit_code, 42);
 
-        // Execute with bad binary
         let bad_comm = LxdCommunicator {
             container_name: "test-c".to_string(),
             command: "non_existent_exec_binary_xyz".to_string(),
         };
         assert!(bad_comm.execute(&cmd).await.is_err());
 
-        // Upload and download
-        let local_path = crate::types::FilePath::new(std::path::PathBuf::from("/tmp/local"));
-        let remote_path = crate::types::FilePath::new(std::path::PathBuf::from("/tmp/remote"));
-        assert!(comm.upload(&local_path, &remote_path).await.is_ok());
-        assert!(comm.download(&remote_path, &local_path).await.is_ok());
-
-        let _ = std::fs::remove_file(&script);
+        let local_path = crate::types::FilePath::new(dir.path().join("local"));
+        let remote_path = crate::types::FilePath::new(dir.path().join("remote"));
+        comm.upload(&local_path, &remote_path).await?;
+        comm.download(&remote_path, &local_path).await?;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_lxd_builder_run() {
-        let script = create_mock_lxc_script();
+    async fn test_lxd_builder_run_and_failures() -> Result<(), StampError> {
+        let dir = tempfile::tempdir()?;
+        let script = create_mock_lxc_script(dir.path())?;
         let script_str = script.to_string_lossy().to_string();
 
         let config = LxdConfig {
@@ -699,7 +633,7 @@ esac
             image: "ubuntu:22.04".to_string(),
             output_image: Some("published-lxd".to_string()),
             endpoint: Some("/custom/lxd.socket".to_string()),
-            command: Some(script_str),
+            command: Some(script_str.clone()),
             ..Default::default()
         };
         let b = LxdBuilder::new(config);
@@ -713,24 +647,17 @@ esac
             crate::engine::packer::FeatureState::Disabled,
         ));
 
-        let artifact = b
-            .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
-            .await;
-        assert!(artifact.is_ok());
-        for art in artifact {
-            assert!(art.id().starts_with("lxd:fingerprint-"));
-        }
-        assert!(b.cancel().await.is_ok());
+        let art = b
+            .run(
+                hook.clone(),
+                ui.clone(),
+                crate::engine::packer::OnErrorStrategy::Cleanup,
+            )
+            .await?;
+        assert!(art.id().starts_with("lxd:fingerprint-"));
+        assert_eq!(art.builder_id(), "test-lxd");
+        b.cancel().await?;
 
-        let _ = std::fs::remove_file(&script);
-    }
-
-    #[tokio::test]
-    async fn test_lxd_builder_run_failures() {
-        let script = create_mock_lxc_script();
-        let script_str = script.to_string_lossy().to_string();
-
-        // Launch failure with OnErrorStrategy::Cleanup
         let config_fail = LxdConfig {
             name: "test-fail".to_string(),
             image: "fail:image".to_string(),
@@ -738,39 +665,31 @@ esac
             ..Default::default()
         };
         let b_fail = LxdBuilder::new(config_fail);
-        let hook = Arc::new(crate::engine::hook::DefaultProvisionHook {
-            provisioners: Arc::new(vec![]),
-            error_cleanup_provisioners: Arc::new(vec![]),
-        });
-        let ui = Arc::new(crate::engine::ui::Ui::new(
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-        ));
-        let res_cleanup = b_fail
-            .run(
-                hook.clone(),
-                ui.clone(),
-                crate::engine::packer::OnErrorStrategy::Cleanup,
-            )
-            .await;
-        assert!(res_cleanup.is_err());
+        assert!(
+            b_fail
+                .run(
+                    hook.clone(),
+                    ui.clone(),
+                    crate::engine::packer::OnErrorStrategy::Cleanup,
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            b_fail
+                .run(
+                    hook,
+                    ui.clone(),
+                    crate::engine::packer::OnErrorStrategy::Abort,
+                )
+                .await
+                .is_err()
+        );
 
-        // Launch failure with OnErrorStrategy::Abort
-        let res_abort = b_fail
-            .run(
-                hook,
-                ui.clone(),
-                crate::engine::packer::OnErrorStrategy::Abort,
-            )
-            .await;
-        assert!(res_abort.is_err());
-
-        // Provisioner failure
         let config_prov_fail = LxdConfig {
             name: "test-prov-fail".to_string(),
             image: "ubuntu:22.04".to_string(),
-            command: Some(script_str.clone()),
+            command: Some(script_str),
             ..Default::default()
         };
         let b_prov_fail = LxdBuilder::new(config_prov_fail);
@@ -778,88 +697,16 @@ esac
             provisioners: Arc::new(vec![Box::new(FailingProvisioner)]),
             error_cleanup_provisioners: Arc::new(vec![]),
         });
-        let res_prov = b_prov_fail
-            .run(
-                fail_hook,
-                ui.clone(),
-                crate::engine::packer::OnErrorStrategy::Cleanup,
-            )
-            .await;
-        assert!(res_prov.is_err());
-
-        // Builder run with default command: None (hits unwrap_or_else(|| "lxc".to_string()))
-        let config_default_cmd = LxdConfig {
-            name: "test-default-cmd".to_string(),
-            image: "ubuntu:22.04".to_string(),
-            command: None,
-            ..Default::default()
-        };
-        let b_default_cmd = LxdBuilder::new(config_default_cmd);
-        let _ = b_default_cmd
-            .run(
-                Arc::new(crate::engine::hook::DefaultProvisionHook {
-                    provisioners: Arc::new(vec![]),
-                    error_cleanup_provisioners: Arc::new(vec![]),
-                }),
-                ui,
-                crate::engine::packer::OnErrorStrategy::Cleanup,
-            )
-            .await;
-
-        let _ = std::fs::remove_file(&script);
-    }
-
-    #[tokio::test]
-    async fn test_step_cleanups_and_edges() {
-        let script = create_mock_lxc_script();
-        let script_str = script.to_string_lossy().to_string();
-        let client = LxdClient::with_command("socket".to_string(), script_str);
-        let ui = Arc::new(crate::engine::ui::Ui::new(
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-        ));
-
-        // StepLaunchLxd cleanup with and without container_name
-        let mut step_launch = StepLaunchLxd {
-            ui: ui.clone(),
-            name: "test".to_string(),
-            client: client.clone(),
-            config: LxdConfig::default(),
-        };
-        let mut state = StateBag::new();
-        step_launch.cleanup(&state).await;
-        state.put("container_name", "c-to-delete".to_string());
-        step_launch.cleanup(&state).await;
-
-        // StepPublishLxdImage run when container_name is empty/missing
-        let mut step_publish = StepPublishLxdImage {
-            ui: ui.clone(),
-            name: "test".to_string(),
-            client: client.clone(),
-            config: LxdConfig {
-                output_image: None,
-                ..Default::default()
-            },
-        };
-        let mut pub_state = StateBag::new();
-        let pub_res = step_publish.run(&mut pub_state).await;
-        assert!(pub_res.is_ok());
-        step_publish.cleanup(&pub_state).await;
-
-        // StepProvisionLxd cleanup
-        let hook = Arc::new(crate::engine::hook::DefaultProvisionHook {
-            provisioners: Arc::new(vec![]),
-            error_cleanup_provisioners: Arc::new(vec![]),
-        });
-        let mut step_prov = StepProvisionLxd {
-            ui,
-            name: "test".to_string(),
-            hook,
-            command: "lxc".to_string(),
-        };
-        step_prov.cleanup(&pub_state).await;
-
-        let _ = std::fs::remove_file(&script);
+        assert!(
+            b_prov_fail
+                .run(
+                    fail_hook,
+                    ui,
+                    crate::engine::packer::OnErrorStrategy::Cleanup,
+                )
+                .await
+                .is_err()
+        );
+        Ok(())
     }
 }

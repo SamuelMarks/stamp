@@ -63,6 +63,8 @@ pub struct ChefSoloConfig {
     pub skip_install: bool,
     /// Whether to delete staging directories on the guest upon completion. Defaults to true.
     pub clean_up: bool,
+    /// Optional custom path or command for the `berks` executable.
+    pub berks_command: Option<String>,
 }
 
 impl Default for ChefSoloConfig {
@@ -80,6 +82,7 @@ impl Default for ChefSoloConfig {
             install_command: None,
             skip_install: false,
             clean_up: true,
+            berks_command: None,
         }
     }
 }
@@ -107,26 +110,31 @@ impl ChefSoloProvisioner {
         berksfile: &FilePath,
         vendor_dir: &Path,
     ) -> Result<(), StampError> {
-        #[cfg(test)]
-        {
-            let _ = (berksfile, vendor_dir);
-            Ok(())
+        Self::vendor_berkshelf_with_cmd("berks", berksfile, vendor_dir).await
+    }
+
+    /// Vendors cookbooks using a custom Berkshelf executable into the specified destination directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`StampError::Provisioner`] if Berkshelf execution fails.
+    pub async fn vendor_berkshelf_with_cmd(
+        berks_cmd: &str,
+        berksfile: &FilePath,
+        vendor_dir: &Path,
+    ) -> Result<(), StampError> {
+        let mut cmd = tokio::process::Command::new(berks_cmd);
+        cmd.arg("vendor");
+        cmd.arg(vendor_dir);
+        cmd.arg("-b");
+        cmd.arg(&berksfile.0);
+        let status = cmd.status().await.map_err(StampError::Io)?;
+        if !status.success() {
+            return Err(StampError::Provisioner(format!(
+                "Berkshelf vendor failed with status: {status}"
+            )));
         }
-        #[cfg(not(test))]
-        {
-            let mut cmd = tokio::process::Command::new("berks");
-            cmd.arg("vendor");
-            cmd.arg(vendor_dir);
-            cmd.arg("-b");
-            cmd.arg(&berksfile.0);
-            let status = cmd.status().await.map_err(StampError::Io)?;
-            if !status.success() {
-                return Err(StampError::Provisioner(format!(
-                    "Berkshelf vendor failed with status: {status}"
-                )));
-            }
-            Ok(())
-        }
+        Ok(())
     }
 }
 
@@ -184,7 +192,8 @@ impl Provisioner for ChefSoloProvisioner {
         if let Some(berksfile) = &self.config.berksfile {
             let tmp_vendor =
                 std::env::temp_dir().join(format!("stamp_berks_{}", uuid::Uuid::new_v4()));
-            Self::vendor_berkshelf(berksfile, &tmp_vendor).await?;
+            let berks_cmd = self.config.berks_command.as_deref().unwrap_or("berks");
+            Self::vendor_berkshelf_with_cmd(berks_cmd, berksfile, &tmp_vendor).await?;
             let remote_cookbooks = format!("{remote_dir}/cookbooks");
             comm.upload(
                 &FilePath::new(tmp_vendor.clone()),
@@ -285,7 +294,6 @@ impl Provisioner for ChefSoloProvisioner {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
     use crate::communicator::mock::MockCommunicator;
@@ -312,21 +320,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_chef_solo_provision_with_json_and_berks() -> Result<(), StampError> {
-        let tmp_json =
-            std::env::temp_dir().join(format!("test_attrs_{}.json", uuid::Uuid::new_v4()));
+        let tmp_dir = tempfile::tempdir()?;
+        let tmp_json = tmp_dir.path().join("test_attrs.json");
         fs::write(&tmp_json, r#"{"port": 80}"#).map_err(StampError::Io)?;
 
-        let tmp_secret = std::env::temp_dir().join(format!("test_secret_{}", uuid::Uuid::new_v4()));
+        let tmp_secret = tmp_dir.path().join("test_secret");
         fs::write(&tmp_secret, "mysecret123").map_err(StampError::Io)?;
 
         let config = ChefSoloConfig {
             cookbook_paths: vec![FilePath::new(PathBuf::from("cookbooks"))],
             run_list: vec!["recipe[apache2]".to_string()],
-            json_path: Some(FilePath::new(tmp_json.clone())),
+            json_path: Some(FilePath::new(tmp_json)),
             json: Some(serde_json::json!({"environment": "production"})),
             berksfile: Some(FilePath::new(PathBuf::from("Berksfile"))),
             berkshelf: true,
-            encrypted_data_bag_secret_path: Some(FilePath::new(tmp_secret.clone())),
+            berks_command: Some("echo".to_string()),
+            encrypted_data_bag_secret_path: Some(FilePath::new(tmp_secret)),
             ..Default::default()
         };
         let prov = ChefSoloProvisioner::new(config);
@@ -340,8 +349,21 @@ mod tests {
             )),
         )
         .await?;
-        let _ = fs::remove_file(tmp_json);
-        let _ = fs::remove_file(tmp_secret);
+
+        let _ = ChefSoloProvisioner::vendor_berkshelf(
+            &FilePath::new(PathBuf::from("Berksfile")),
+            tmp_dir.path(),
+        )
+        .await;
+        assert!(
+            ChefSoloProvisioner::vendor_berkshelf_with_cmd(
+                "false",
+                &FilePath::new(PathBuf::from("Berksfile")),
+                tmp_dir.path()
+            )
+            .await
+            .is_err()
+        );
         Ok(())
     }
 
@@ -418,9 +440,10 @@ mod tests {
         };
         let config2 = config1.clone();
         assert_eq!(config1, config2);
-        assert_eq!(format!("{config1:?}"), format!("{config2:?}"));
+        assert!(format!("{config1:?}").contains("ChefSoloConfig"));
         let st1 = ChefSoloProvisioner::new(config1);
         let st2 = st1.clone();
-        assert_eq!(format!("{st1:?}"), format!("{st2:?}"));
+        assert!(format!("{st1:?}").contains("ChefSoloProvisioner"));
+        assert_eq!(st1.config, st2.config);
     }
 }

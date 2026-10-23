@@ -6,10 +6,44 @@
 //! Stamp CLI library containing command definitions, execution routing,
 //! and grounding verification against `HashiCorp` Packer reference schemas.
 
-use clap::{CommandFactory, Parser, Subcommand};
+/// Grounding verification, shell autocompletion installation, and environment parity checks.
+pub mod grounding;
+
+pub use grounding::{
+    AUTOCOMPLETE_MARKER, detect_shell, handle_autocomplete_install, handle_autocomplete_install_in,
+    handle_autocomplete_uninstall, handle_autocomplete_uninstall_in, resolve_shell_profile,
+    resolve_shell_profile_in, verify_cli_grounding, verify_environment_variables,
+    verify_exit_codes,
+};
+
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use libstamp::error::StampError;
-use serde_json::Value as JsonValue;
-use std::collections::{HashMap, HashSet};
+
+/// Strategy for handling build errors via `--on-error`.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BuildOnError {
+    /// Clean up any created resources.
+    #[default]
+    Cleanup,
+    /// Abort immediately without cleaning up.
+    Abort,
+    /// Prompt the user interactively.
+    Ask,
+    /// Run error-cleanup-provisioner before cleaning up.
+    #[value(name = "run-cleanup-provisioner")]
+    RunCleanupProvisioner,
+}
+
+impl From<BuildOnError> for libstamp::engine::packer::OnErrorStrategy {
+    fn from(val: BuildOnError) -> Self {
+        match val {
+            BuildOnError::Cleanup => Self::Cleanup,
+            BuildOnError::Abort => Self::Abort,
+            BuildOnError::Ask => Self::Ask,
+            BuildOnError::RunCleanupProvisioner => Self::RunCleanupProvisioner,
+        }
+    }
+}
 
 /// Subcommands for the `plugins` command.
 #[derive(Subcommand, Debug, Clone)]
@@ -137,7 +171,7 @@ pub enum Commands {
 
         #[arg(long)]
         /// If the build fails do: clean up, abort, or ask
-        on_error: Option<String>,
+        on_error: Option<BuildOnError>,
 
         #[arg(long)]
         /// Build only the specified builds
@@ -553,14 +587,10 @@ pub async fn execute_command(
                 } else {
                     libstamp::engine::packer::FeatureState::Disabled
                 },
-                on_error: match on_error.as_deref() {
-                    Some("abort") => libstamp::engine::packer::OnErrorStrategy::Abort,
-                    Some("ask") => libstamp::engine::packer::OnErrorStrategy::Ask,
-                    Some("run-cleanup-provisioner") => {
-                        libstamp::engine::packer::OnErrorStrategy::RunCleanupProvisioner
-                    }
-                    _ => libstamp::engine::packer::OnErrorStrategy::Cleanup,
-                },
+                on_error: on_error.map_or(
+                    libstamp::engine::packer::OnErrorStrategy::Cleanup,
+                    Into::into,
+                ),
                 parallel_builds: match parallel {
                     Some(false) => Some(1),
                     _ => *parallel_builds,
@@ -901,332 +931,6 @@ pub async fn execute_command(
     Ok(())
 }
 
-/// Verifies CLI parity against a reference schema JSON string.
-///
-/// # Errors
-/// Returns `StampError::Validation` if any command or flag is missing or mismatched.
-pub fn verify_cli_grounding(reference_json: &str) -> Result<(), StampError> {
-    let root: JsonValue = serde_json::from_str(reference_json)
-        .map_err(|e| StampError::Parse(format!("Failed to parse CLI reference schema: {e}")))?;
-
-    let commands_map = root
-        .get("commands")
-        .and_then(JsonValue::as_object)
-        .ok_or_else(|| {
-            StampError::Parse("Reference schema missing 'commands' object".to_string())
-        })?;
-
-    let cli_cmd = Cli::command();
-    let subcommands: HashMap<String, clap::Command> = cli_cmd
-        .get_subcommands()
-        .map(|s| (s.get_name().to_string(), s.clone()))
-        .collect();
-
-    for (cmd_name, expected_flags_val) in commands_map {
-        let subcmd = subcommands.get(cmd_name).ok_or_else(|| {
-            StampError::Validation(format!("Missing expected CLI subcommand '{cmd_name}'"))
-        })?;
-
-        let actual_flags: HashSet<String> = subcmd
-            .get_arguments()
-            .filter_map(|arg| arg.get_long().map(ToString::to_string))
-            .collect();
-
-        if let Some(expected_flags) = expected_flags_val.as_array() {
-            for flag in expected_flags {
-                if let Some(flag_str) = flag.as_str()
-                    && !actual_flags.contains(flag_str)
-                {
-                    return Err(StampError::Validation(format!(
-                        "Command '{cmd_name}' missing expected flag '--{flag_str}'"
-                    )));
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Marker comment used to detect and modify shell profile autocomplete scripts.
-pub const AUTOCOMPLETE_MARKER: &str = "# Stamp shell autocompletion";
-
-/// Detects current shell name from `$SHELL` environment variable.
-#[must_use]
-pub fn detect_shell() -> String {
-    if let Ok(shell_path) = std::env::var("SHELL")
-        && let Some(name) = std::path::Path::new(&shell_path)
-            .file_name()
-            .and_then(|n| n.to_str())
-    {
-        return name.to_ascii_lowercase();
-    }
-    if cfg!(windows) {
-        "powershell".to_string()
-    } else {
-        "bash".to_string()
-    }
-}
-
-/// Resolves the user shell profile path for autocompletion installation.
-#[must_use]
-pub fn resolve_shell_profile(shell: &str) -> Option<std::path::PathBuf> {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .ok()?;
-    let home_path = std::path::PathBuf::from(home);
-
-    match shell {
-        "zsh" => Some(home_path.join(".zshrc")),
-        "fish" => Some(home_path.join(".config").join("fish").join("config.fish")),
-        "powershell" | "pwsh" => Some(
-            home_path
-                .join(".config")
-                .join("powershell")
-                .join("Microsoft.PowerShell_profile.ps1"),
-        ),
-        _ => {
-            let bashrc = home_path.join(".bashrc");
-            if bashrc.exists() {
-                Some(bashrc)
-            } else {
-                Some(home_path.join(".bash_profile"))
-            }
-        }
-    }
-}
-
-/// Installs shell autocompletions into the user's shell profile.
-///
-/// # Errors
-/// Returns `StampError` if shell profile writing fails.
-pub fn handle_autocomplete_install() -> Result<(), StampError> {
-    use std::io::Write as _;
-
-    let shell = detect_shell();
-    let profile = resolve_shell_profile(&shell).ok_or_else(|| {
-        StampError::Execution(
-            "Could not resolve home directory for autocomplete install".to_string(),
-        )
-    })?;
-
-    if let Some(parent) = profile.parent() {
-        std::fs::create_dir_all(parent).map_err(StampError::Io)?;
-    }
-
-    let existing = std::fs::read_to_string(&profile).unwrap_or_default();
-    if existing.contains(AUTOCOMPLETE_MARKER) {
-        println!("Autocomplete is already installed in {}", profile.display());
-        return Ok(());
-    }
-
-    let completion_entry = match shell.as_str() {
-        "zsh" => format!(
-            "\n{AUTOCOMPLETE_MARKER}\nwhich stamp >/dev/null 2>&1 && eval \"$(stamp autocomplete --shell zsh)\"\n"
-        ),
-        "fish" => format!(
-            "\n{AUTOCOMPLETE_MARKER}\ntype -q stamp; and stamp autocomplete --shell fish | source\n"
-        ),
-        "powershell" | "pwsh" => format!(
-            "\n{AUTOCOMPLETE_MARKER}\nif (Get-Command stamp -ErrorAction SilentlyContinue) {{ & stamp autocomplete --shell powershell | Out-String | Invoke-Expression }}\n"
-        ),
-        _ => format!(
-            "\n{AUTOCOMPLETE_MARKER}\nwhich stamp >/dev/null 2>&1 && eval \"$(stamp autocomplete --shell bash)\"\n"
-        ),
-    };
-
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&profile)
-        .map_err(StampError::Io)?;
-    file.write_all(completion_entry.as_bytes())
-        .map_err(StampError::Io)?;
-
-    println!(
-        "Successfully installed autocomplete in {}",
-        profile.display()
-    );
-    Ok(())
-}
-
-/// Uninstalls shell autocompletions from the user's shell profile.
-///
-/// # Errors
-/// Returns `StampError` if shell profile rewriting fails.
-pub fn handle_autocomplete_uninstall() -> Result<(), StampError> {
-    let shell = detect_shell();
-    let profile = resolve_shell_profile(&shell).ok_or_else(|| {
-        StampError::Execution(
-            "Could not resolve home directory for autocomplete uninstall".to_string(),
-        )
-    })?;
-
-    if !profile.exists() {
-        println!(
-            "Shell profile {} does not exist, nothing to uninstall.",
-            profile.display()
-        );
-        return Ok(());
-    }
-
-    let content = std::fs::read_to_string(&profile).map_err(StampError::Io)?;
-    if !content.contains(AUTOCOMPLETE_MARKER) {
-        println!("Autocomplete was not installed in {}", profile.display());
-        return Ok(());
-    }
-
-    let mut filtered_lines = Vec::new();
-    let mut skipping = false;
-    for line in content.lines() {
-        if line.contains(AUTOCOMPLETE_MARKER) {
-            skipping = true;
-            continue;
-        }
-        if skipping {
-            skipping = false;
-            continue;
-        }
-        filtered_lines.push(line);
-    }
-
-    std::fs::write(&profile, filtered_lines.join("\n")).map_err(StampError::Io)?;
-    println!(
-        "Successfully uninstalled autocomplete from {}",
-        profile.display()
-    );
-    Ok(())
-}
-
-/// Verifies environment variable override parity against Packer specifications.
-///
-/// Asserts proper behavior for `PACKER_LOG`, `PACKER_LOG_PATH`, `PACKER_CONFIG_DIR`,
-/// `PACKER_CACHE_DIR`, `PACKER_NO_COLOR`, and `CHECKPOINT_DISABLE`.
-///
-/// # Errors
-/// Returns `StampError::Validation` if any environment variable override behaves incorrectly.
-pub fn verify_environment_variables() -> Result<(), StampError> {
-    // 1. PACKER_CONFIG_DIR
-    let test_cfg = "/tmp/test_packer_cfg_dir";
-    unsafe {
-        std::env::set_var("PACKER_CONFIG_DIR", test_cfg);
-    }
-    let resolved_cfg = libstamp::utils::packer_config_dir();
-    unsafe {
-        std::env::remove_var("PACKER_CONFIG_DIR");
-    }
-    if resolved_cfg != std::path::Path::new(test_cfg) {
-        return Err(StampError::Validation(
-            "PACKER_CONFIG_DIR override verification failed".to_string(),
-        ));
-    }
-
-    // 2. PACKER_CACHE_DIR
-    let test_cache = "/tmp/test_packer_cache_dir";
-    unsafe {
-        std::env::set_var("PACKER_CACHE_DIR", test_cache);
-    }
-    let resolved_cache = libstamp::utils::packer_cache_dir();
-    unsafe {
-        std::env::remove_var("PACKER_CACHE_DIR");
-    }
-    if resolved_cache != std::path::Path::new(test_cache) {
-        return Err(StampError::Validation(
-            "PACKER_CACHE_DIR override verification failed".to_string(),
-        ));
-    }
-
-    // 2b. STAMP_CACHE_DIR
-    let test_stamp_cache = "/tmp/test_stamp_cache_dir";
-    unsafe {
-        std::env::set_var("STAMP_CACHE_DIR", test_stamp_cache);
-    }
-    let resolved_stamp_cache = libstamp::utils::packer_cache_dir();
-    unsafe {
-        std::env::remove_var("STAMP_CACHE_DIR");
-    }
-    if resolved_stamp_cache != std::path::Path::new(test_stamp_cache) {
-        return Err(StampError::Validation(
-            "STAMP_CACHE_DIR override verification failed".to_string(),
-        ));
-    }
-
-    // 3. PACKER_NO_COLOR
-    unsafe {
-        std::env::set_var("PACKER_NO_COLOR", "1");
-    }
-    let is_no_color = std::env::var("PACKER_NO_COLOR").is_ok();
-    unsafe {
-        std::env::remove_var("PACKER_NO_COLOR");
-    }
-    if !is_no_color {
-        return Err(StampError::Validation(
-            "PACKER_NO_COLOR verification failed".to_string(),
-        ));
-    }
-
-    // 4. CHECKPOINT_DISABLE
-    unsafe {
-        std::env::set_var("CHECKPOINT_DISABLE", "1");
-    }
-    let is_checkpoint_disabled = std::env::var("CHECKPOINT_DISABLE").is_ok();
-    unsafe {
-        std::env::remove_var("CHECKPOINT_DISABLE");
-    }
-    if !is_checkpoint_disabled {
-        return Err(StampError::Validation(
-            "CHECKPOINT_DISABLE verification failed".to_string(),
-        ));
-    }
-
-    // 5. PACKER_LOG and PACKER_LOG_PATH
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let test_log = std::env::temp_dir().join(format!("verify_packer_log_{nanos}.log"));
-    let test_log_str = test_log.to_string_lossy().to_string();
-    unsafe {
-        std::env::set_var("PACKER_LOG", "1");
-        std::env::set_var("PACKER_LOG_PATH", &test_log_str);
-    }
-    let lvl = libstamp::utils::init_packer_logging()?;
-    unsafe {
-        std::env::remove_var("PACKER_LOG");
-        std::env::remove_var("PACKER_LOG_PATH");
-    }
-    let _ = std::fs::remove_file(&test_log);
-    if lvl.as_deref() != Some("DEBUG") {
-        return Err(StampError::Validation(
-            "PACKER_LOG / PACKER_LOG_PATH verification failed".to_string(),
-        ));
-    }
-
-    Ok(())
-}
-
-/// Verifies exit code parity matching `HashiCorp` Packer conventions.
-///
-/// Asserts:
-/// - Exit code 0 for successful operations.
-/// - Exit code 1 for command or execution errors.
-/// - Exit code 130 for SIGINT / signal termination.
-///
-/// # Errors
-/// Returns `StampError::Validation` if exit code definitions mismatch.
-pub fn verify_exit_codes() -> Result<(), StampError> {
-    const EXIT_SUCCESS: i32 = 0;
-    const EXIT_ERROR: i32 = 1;
-    const EXIT_SIGINT: i32 = 130;
-
-    if EXIT_SUCCESS != 0 || EXIT_ERROR != 1 || EXIT_SIGINT != 130 {
-        return Err(StampError::Validation(
-            "Exit code conventions do not match Packer standards".to_string(),
-        ));
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1320,9 +1024,10 @@ mod tests {
 
         let plugin_dir = temp_dir.join("test_packer_plugins");
         let _ = std::fs::create_dir_all(&plugin_dir);
-        unsafe {
-            std::env::set_var("PACKER_PLUGIN_PATH", plugin_dir.to_str().unwrap_or("."));
-        }
+        let _env = libstamp::utils::ScopedEnvVar::set(
+            "PACKER_PLUGIN_PATH",
+            plugin_dir.to_str().unwrap_or("."),
+        );
 
         let cli = Cli::try_parse_from(["stamp", "init", tmpl_str])
             .map_err(|e| StampError::Execution(e.to_string()))?;
@@ -1336,9 +1041,6 @@ mod tests {
             .map_err(|e| StampError::Execution(e.to_string()))?;
         let _ = execute_command(&cli.command, cli.machine_readable, false).await;
 
-        unsafe {
-            std::env::remove_var("PACKER_PLUGIN_PATH");
-        }
         let _ = std::fs::remove_file(&tmpl_path);
         let _ = std::fs::remove_dir_all(&plugin_dir);
         Ok(())
@@ -1660,9 +1362,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_version() -> Result<(), StampError> {
-        unsafe {
-            std::env::set_var("CHECKPOINT_DISABLE", "1");
-        }
+        let _env = libstamp::utils::ScopedEnvVar::set("CHECKPOINT_DISABLE", "1");
 
         let cli = Cli::try_parse_from(["stamp", "version"])
             .map_err(|e| StampError::Execution(e.to_string()))?;
@@ -1684,83 +1384,53 @@ mod tests {
             .map_err(|e| StampError::Execution(e.to_string()))?;
         execute_command(&cli.command, cli.machine_readable, false).await?;
 
-        unsafe {
-            std::env::remove_var("CHECKPOINT_DISABLE");
-        }
         Ok(())
     }
 
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn test_detect_shell_and_resolve_profile() {
-        let _lock = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let shell = detect_shell();
         assert_ne!(shell, "");
 
-        let bash_profile = resolve_shell_profile("bash");
-        assert!(bash_profile.is_some());
+        let fake_home = std::path::Path::new("/tmp/fake_home_detect");
+        let bash_profile = resolve_shell_profile_in("bash", fake_home);
+        assert!(bash_profile.ends_with(".bash_profile") || bash_profile.ends_with(".bashrc"));
 
-        let zsh_profile = resolve_shell_profile("zsh");
-        assert!(zsh_profile.is_some());
+        let zsh_profile = resolve_shell_profile_in("zsh", fake_home);
+        assert!(zsh_profile.ends_with(".zshrc"));
 
-        let fish_profile = resolve_shell_profile("fish");
-        assert!(fish_profile.is_some());
+        let fish_profile = resolve_shell_profile_in("fish", fake_home);
+        assert!(fish_profile.ends_with("config.fish"));
 
-        let pwsh_profile = resolve_shell_profile("powershell");
-        assert!(pwsh_profile.is_some());
+        let pwsh_profile = resolve_shell_profile_in("powershell", fake_home);
+        assert!(pwsh_profile.ends_with("Microsoft.PowerShell_profile.ps1"));
     }
 
     #[test]
     fn test_autocomplete_install_and_uninstall_lifecycle() -> Result<(), StampError> {
-        let _lock = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
         let fake_home = std::env::temp_dir().join(format!("fake_home_autocomplete_{nanos}"));
         std::fs::create_dir_all(&fake_home).map_err(StampError::Io)?;
 
-        let old_home = std::env::var("HOME").ok();
-        let old_shell = std::env::var("SHELL").ok();
-
-        unsafe {
-            std::env::set_var("HOME", &fake_home);
-            std::env::set_var("SHELL", "/bin/zsh");
-        }
-
-        assert!(handle_autocomplete_install().is_ok());
+        assert!(handle_autocomplete_install_in("zsh", Some(&fake_home)).is_ok());
         let zshrc = fake_home.join(".zshrc");
         assert!(zshrc.exists());
         let content = std::fs::read_to_string(&zshrc).map_err(StampError::Io)?;
         assert!(content.contains(AUTOCOMPLETE_MARKER));
 
         // Re-run install to hit "already installed" branch
-        assert!(handle_autocomplete_install().is_ok());
+        assert!(handle_autocomplete_install_in("zsh", Some(&fake_home)).is_ok());
 
         // Run uninstall
-        assert!(handle_autocomplete_uninstall().is_ok());
+        assert!(handle_autocomplete_uninstall_in("zsh", Some(&fake_home)).is_ok());
         let content_after = std::fs::read_to_string(&zshrc).map_err(StampError::Io)?;
         assert!(!content_after.contains(AUTOCOMPLETE_MARKER));
 
         // Re-run uninstall to hit "was not installed" branch
-        assert!(handle_autocomplete_uninstall().is_ok());
+        assert!(handle_autocomplete_uninstall_in("zsh", Some(&fake_home)).is_ok());
 
-        unsafe {
-            if let Some(h) = old_home {
-                std::env::set_var("HOME", h);
-            } else {
-                std::env::remove_var("HOME");
-            }
-            if let Some(s) = old_shell {
-                std::env::set_var("SHELL", s);
-            } else {
-                std::env::remove_var("SHELL");
-            }
-        }
         let _ = std::fs::remove_dir_all(&fake_home);
         Ok(())
     }
@@ -1824,10 +1494,8 @@ mod tests {
         std::fs::write(&auto_var_path, "secret_token = \"override_secret\"\n")
             .map_err(StampError::Io)?;
 
-        unsafe {
-            std::env::set_var("PKR_VAR_extra_key", "extra_val");
-            std::env::set_var("PACKER_BUILDER_PACING_MS", "5");
-        }
+        let _env1 = libstamp::utils::ScopedEnvVar::set("PKR_VAR_extra_key", "extra_val");
+        let _env2 = libstamp::utils::ScopedEnvVar::set("PACKER_BUILDER_PACING_MS", "5");
 
         let tmpl_str = tmpl_path.to_str().unwrap_or("test.json");
         let cli = Cli::try_parse_from([
@@ -1847,10 +1515,6 @@ mod tests {
 
         let _ = execute_command(&cli.command, false, false).await;
 
-        unsafe {
-            std::env::remove_var("PKR_VAR_extra_key");
-            std::env::remove_var("PACKER_BUILDER_PACING_MS");
-        }
         let _ = std::fs::remove_file(&tmpl_path);
         let _ = std::fs::remove_file(&auto_var_path);
         let _ = std::fs::remove_dir_all(&build_dir);
@@ -1859,78 +1523,34 @@ mod tests {
 
     #[test]
     fn test_autocomplete_install_all_shells() -> Result<(), StampError> {
-        let _lock = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
         let fake_home = std::env::temp_dir().join(format!("fake_home_shells_{nanos}"));
         std::fs::create_dir_all(&fake_home).map_err(StampError::Io)?;
 
-        let old_home = std::env::var("HOME").ok();
-        let old_shell = std::env::var("SHELL").ok();
-
-        unsafe {
-            std::env::set_var("HOME", &fake_home);
-        }
-
         for (shell_name, profile_file) in [
-            ("/bin/bash", ".bashrc"),
-            ("/usr/bin/fish", ".config/fish/config.fish"),
+            ("bash", ".bash_profile"),
+            ("fish", ".config/fish/config.fish"),
             (
                 "powershell",
                 ".config/powershell/Microsoft.PowerShell_profile.ps1",
             ),
-            ("/bin/unknown_shell", ".bashrc"),
+            ("unknown_shell", ".bash_profile"),
         ] {
-            unsafe {
-                std::env::set_var("SHELL", shell_name);
-            }
-            assert!(handle_autocomplete_install().is_ok());
-            assert!(handle_autocomplete_uninstall().is_ok());
+            assert!(handle_autocomplete_install_in(shell_name, Some(&fake_home)).is_ok());
+            assert!(handle_autocomplete_uninstall_in(shell_name, Some(&fake_home)).is_ok());
             let profile_path = fake_home.join(profile_file);
             let _ = std::fs::remove_file(&profile_path);
         }
 
-        unsafe {
-            if let Some(h) = old_home {
-                std::env::set_var("HOME", h);
-            } else {
-                std::env::remove_var("HOME");
-            }
-            if let Some(s) = old_shell {
-                std::env::set_var("SHELL", s);
-            } else {
-                std::env::remove_var("SHELL");
-            }
-        }
         let _ = std::fs::remove_dir_all(&fake_home);
         Ok(())
     }
 
     #[test]
     fn test_autocomplete_home_missing_error() {
-        let _lock = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let old_home = std::env::var("HOME").ok();
-        let old_userprofile = std::env::var("USERPROFILE").ok();
-        unsafe {
-            std::env::remove_var("HOME");
-            std::env::remove_var("USERPROFILE");
-        }
-
-        assert!(handle_autocomplete_install().is_err());
-        assert!(handle_autocomplete_uninstall().is_err());
-
-        unsafe {
-            if let Some(h) = old_home {
-                std::env::set_var("HOME", h);
-            }
-            if let Some(u) = old_userprofile {
-                std::env::set_var("USERPROFILE", u);
-            }
-        }
+        assert!(handle_autocomplete_install_in("bash", None).is_err());
+        assert!(handle_autocomplete_uninstall_in("bash", None).is_err());
     }
 }

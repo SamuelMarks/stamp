@@ -145,7 +145,7 @@ impl Builder for NullBuilder {
             build_id: self.name(),
             host: self.config.host.clone().unwrap_or_default(),
             user: self.config.username.clone().unwrap_or_default(),
-            packer_run_uuid: "mocked-uuid".to_string(),
+            packer_run_uuid: uuid::Uuid::new_v4().to_string(),
             source_name: self.name(),
             source_type: "null".to_string(),
             ..Default::default()
@@ -169,11 +169,11 @@ impl Builder for NullBuilder {
             return Err(e);
         }
 
-        Ok(Box::new(crate::artifact::MockArtifact {
-            builder_id: self.name(),
-            id: format!("{}-artifact", self.name()),
-            files: vec![],
-        }))
+        Ok(Box::new(crate::artifact::BuildArtifact::with_builder(
+            self.name(),
+            format!("{}-artifact", self.name()),
+            vec![],
+        )))
     }
 
     async fn cancel(&self) -> Result<(), StampError> {
@@ -186,7 +186,6 @@ impl Builder for NullBuilder {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -197,10 +196,11 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(config.clone(), config);
-        assert_eq!(format!("{config:?}"), format!("{:?}", config));
+        assert!(format!("{config:?}").contains("NullConfig"));
 
         let builder = NullBuilder::new(config);
-        assert_eq!(format!("{:?}", builder.clone()), format!("{:?}", builder));
+        assert!(format!("{builder:?}").contains("NullBuilder"));
+        assert_eq!(builder.clone().name(), "test");
     }
 
     #[tokio::test]
@@ -290,12 +290,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_null_run_ssh_success() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::set_var("STAMP_TEST_MODE", "1");
-        }
+        let _env = crate::utils::ScopedEnvVar::set("STAMP_TEST_MODE", "1");
         let config = NullConfig {
             name: "test".to_string(),
             communicator: Some("ssh".to_string()),
@@ -318,9 +313,6 @@ mod tests {
                 crate::engine::packer::OnErrorStrategy::Cleanup,
             )
             .await;
-        unsafe {
-            std::env::remove_var("STAMP_TEST_MODE");
-        }
         assert!(res.is_ok());
     }
 
@@ -353,12 +345,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_null_run_winrm_success() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::set_var("STAMP_TEST_MODE", "1");
-        }
+        let _env = crate::utils::ScopedEnvVar::set("STAMP_TEST_MODE", "1");
         let config = NullConfig {
             name: "test".to_string(),
             communicator: Some("winrm".to_string()),
@@ -381,9 +368,6 @@ mod tests {
                 crate::engine::packer::OnErrorStrategy::Cleanup,
             )
             .await;
-        unsafe {
-            std::env::remove_var("STAMP_TEST_MODE");
-        }
         assert!(res.is_ok());
     }
 

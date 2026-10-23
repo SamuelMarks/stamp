@@ -54,7 +54,8 @@ impl AnsibleSshProxyAdapter {
                             let comm_clone = comm.clone();
                             tokio::spawn(async move {
                                 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                                let _ = socket.write_all(b"SSH-2.0-StampAnsibleProxy_1.0\r\n").await;
+                                let _ = socket.write_all(b"SSH-2.0-StampAnsibleProxy_1.0
+                ").await;
                                 let mut buf = [0u8; 512];
                                 if let Ok(n) = socket.read(&mut buf).await
                                     && n > 0
@@ -104,6 +105,8 @@ impl Drop for AnsibleSshProxyAdapter {
 pub struct AnsibleConfig {
     /// Path to the playbook file on the host.
     pub playbook_file: String,
+    /// Optional custom path to the `ansible-playbook` executable. Defaults to `"ansible-playbook"`.
+    pub command: Option<PathBuf>,
     /// Extra arguments to pass to `ansible-playbook`.
     pub extra_arguments: Vec<String>,
     /// Optional custom inventory file path.
@@ -152,6 +155,7 @@ impl Default for AnsibleConfig {
     fn default() -> Self {
         Self {
             playbook_file: String::new(),
+            command: None,
             extra_arguments: Vec::new(),
             inventory_file: None,
             inventory_directory: None,
@@ -196,7 +200,8 @@ impl AnsibleProvisioner {
         use std::fmt::Write;
         let host = self.config.host_alias.as_deref().unwrap_or("default");
         let mut content = format!(
-            "[default]\n{host} ansible_host=127.0.0.1 ansible_port={}",
+            "[default]
+{host} ansible_host=127.0.0.1 ansible_port={}",
             port.get()
         );
 
@@ -215,12 +220,12 @@ impl AnsibleProvisioner {
             if let Some(key_file) = &self.config.ssh_host_key_file {
                 let _ = write!(ssh_args, " -i {}", key_file.0.display());
             }
-            let _ = write!(content, " ansible_ssh_common_args=\"{ssh_args}\"");
+            let _ = write!(content, r#" ansible_ssh_common_args="{ssh_args}""#);
         }
         content.push('\n');
 
         for group in &self.config.groups {
-            let _ = write!(content, "\n[{group}]\n{host}\n");
+            let _ = writeln!(content, "\n[{group}]\n{host}");
         }
 
         content
@@ -276,29 +281,20 @@ impl AnsibleProvisioner {
             args.push(collections.0.to_string_lossy().to_string());
         }
 
-        #[cfg(test)]
-        {
-            let _ = (galaxy_cmd, &args);
-            Ok(())
-        }
-
-        #[cfg(not(test))]
-        {
-            let mut cmd = tokio::process::Command::new(galaxy_cmd);
-            cmd.args(&args);
-            for env_var in &self.config.ansible_env_vars {
-                if let Some((k, v)) = env_var.split_once('=') {
-                    cmd.env(k, v);
-                }
+        let mut cmd = tokio::process::Command::new(galaxy_cmd);
+        cmd.args(&args);
+        for env_var in &self.config.ansible_env_vars {
+            if let Some((k, v)) = env_var.split_once('=') {
+                cmd.env(k, v);
             }
-            let status = cmd.status().await.map_err(StampError::Io)?;
-            if !status.success() {
-                return Err(StampError::Provisioner(format!(
-                    "ansible-galaxy install failed with status: {status}"
-                )));
-            }
-            Ok(())
         }
+        let status = cmd.status().await.map_err(StampError::Io)?;
+        if !status.success() {
+            return Err(StampError::Provisioner(format!(
+                "ansible-galaxy install failed with status: {status}"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -369,13 +365,14 @@ impl Provisioner for AnsibleProvisioner {
 
         args.extend(self.config.extra_arguments.clone());
 
-        #[cfg(test)]
-        let status_res: std::io::Result<std::process::ExitStatus> =
-            Ok(std::os::unix::process::ExitStatusExt::from_raw(0));
+        let playbook_bin = self
+            .config
+            .command
+            .as_ref()
+            .map_or_else(|| PathBuf::from("ansible-playbook"), Clone::clone);
 
-        #[cfg(not(test))]
         let status_res = {
-            let mut cmd = tokio::process::Command::new("ansible-playbook");
+            let mut cmd = tokio::process::Command::new(&playbook_bin);
             cmd.args(&args);
             cmd.env("ANSIBLE_HOST_KEY_CHECKING", "False");
             for env_var in &self.config.ansible_env_vars {
@@ -409,7 +406,6 @@ impl Provisioner for AnsibleProvisioner {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
     use crate::communicator::mock::MockCommunicator;
@@ -425,6 +421,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ansible_proxy_adapter_socket_interaction() -> Result<(), StampError> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let comm = std::sync::Arc::new(MockCommunicator::new());
         let mut adapter = AnsibleSshProxyAdapter::start_with_communicator(None, Some(comm)).await?;
         let port = adapter.port().get();
@@ -432,14 +429,16 @@ mod tests {
         let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
             .await
             .map_err(StampError::Io)?;
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut buf = [0u8; 128];
         let n = stream.read(&mut buf).await.map_err(StampError::Io)?;
         let greeting = String::from_utf8_lossy(&buf[..n]);
         assert!(greeting.contains("SSH-2.0-StampAnsibleProxy"));
 
         stream
-            .write_all(b"SSH-2.0-OpenSSH_8.9\r\n")
+            .write_all(
+                b"SSH-2.0-OpenSSH_8.9
+",
+            )
             .await
             .map_err(StampError::Io)?;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -452,6 +451,7 @@ mod tests {
     async fn test_ansible_provision_success() -> Result<(), StampError> {
         let config = AnsibleConfig {
             playbook_file: "playbook.yml".to_string(),
+            command: Some(PathBuf::from("true")),
             ..Default::default()
         };
         let prov = AnsibleProvisioner::new(config);
@@ -492,7 +492,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_ansible_provision_with_user_and_custom_inventory() -> Result<(), StampError> {
-        let tmp_inv = std::env::temp_dir().join("test_inv.ini");
+        let tmp_dir = tempfile::tempdir()?;
+        let tmp_inv = tmp_dir.path().join("test_inv.ini");
         fs::write(
             &tmp_inv,
             "[all]
@@ -506,7 +507,8 @@ localhost",
 
         let config = AnsibleConfig {
             playbook_file: "playbook.yml".to_string(),
-            inventory_file: Some(FilePath::new(tmp_inv.clone())),
+            command: Some(PathBuf::from("echo")),
+            inventory_file: Some(FilePath::new(tmp_inv)),
             user: Some("testuser".to_string()),
             extra_arguments: vec!["-v".to_string()],
             extra_vars: Some(vars),
@@ -528,14 +530,21 @@ localhost",
             )),
         )
         .await?;
-        let _ = fs::remove_file(tmp_inv);
         Ok(())
     }
 
     #[tokio::test]
     async fn test_ansible_provision_with_galaxy_requirements() -> Result<(), StampError> {
+        let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
         let config = AnsibleConfig {
             playbook_file: "playbook.yml".to_string(),
+            command: Some(PathBuf::from("echo")),
+            galaxy_command: Some("echo".to_string()),
+            ansible_env_vars: vec!["ANSIBLE_GALAXY_TOKEN=abc".to_string()],
             galaxy_file: Some(FilePath::new(PathBuf::from("requirements.yml"))),
             roles_path: Some(FilePath::new(PathBuf::from("roles"))),
             collections_path: Some(FilePath::new(PathBuf::from("collections"))),
@@ -544,15 +553,16 @@ localhost",
         };
         let prov = AnsibleProvisioner::new(config);
         let comm = MockCommunicator::new();
-        prov.provision(
-            &comm,
-            std::sync::Arc::new(crate::engine::ui::Ui::new(
-                crate::engine::packer::FeatureState::Disabled,
-                crate::engine::packer::FeatureState::Disabled,
-                crate::engine::packer::FeatureState::Disabled,
-            )),
-        )
-        .await?;
+        prov.provision(&comm, ui.clone()).await?;
+
+        let fail_galaxy = AnsibleProvisioner::new(AnsibleConfig {
+            playbook_file: "playbook.yml".to_string(),
+            galaxy_command: Some("false".to_string()),
+            galaxy_file: Some(FilePath::new(PathBuf::from("requirements.yml"))),
+            install_galaxy_roles: true,
+            ..Default::default()
+        });
+        assert!(fail_galaxy.provision(&comm, ui).await.is_err());
         Ok(())
     }
 
@@ -564,10 +574,11 @@ localhost",
         };
         let config2 = config1.clone();
         assert_eq!(config1, config2);
-        assert_eq!(format!("{config1:?}"), format!("{config2:?}"));
+        assert!(format!("{config1:?}").contains("AnsibleConfig"));
         let st1 = AnsibleProvisioner::new(config1);
         let st2 = st1.clone();
-        assert_eq!(format!("{st1:?}"), format!("{st2:?}"));
+        assert!(format!("{st1:?}").contains("AnsibleProvisioner"));
+        assert_eq!(st1.config, st2.config);
     }
 
     #[test]

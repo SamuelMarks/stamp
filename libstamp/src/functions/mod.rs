@@ -55,15 +55,9 @@ impl TemplateFunction for Vault {
                 "vault requires at least 2 arguments (path, key)".to_string(),
             ));
         }
+        let path = &args[0];
         let key = &args[1];
 
-        if (cfg!(test) && std::env::var("STAMP_DISABLE_MOCK_VAULT").is_err())
-            || std::env::var("STAMP_MOCK_VAULT").is_ok()
-        {
-            return Ok(format!("mock_vault_secret_{key}"));
-        }
-
-        let path = &args[0];
         let vault_addr =
             std::env::var("VAULT_ADDR").unwrap_or_else(|_| "http://127.0.0.1:8200".to_string());
         let vault_token = std::env::var("VAULT_TOKEN").map_err(|_| {
@@ -119,10 +113,6 @@ impl TemplateFunction for Vault {
         };
 
         let run_sync = move || {
-            assert!(
-                !(cfg!(test) && std::env::var("STAMP_TEST_VAULT_PANIC").is_ok()),
-                "Simulated thread panic"
-            );
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -254,6 +244,7 @@ pub fn packer_functions() -> Vec<Function> {
 #[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
+    use crate::utils::{ENV_MUTEX, ScopedEnvVar};
 
     #[test]
     fn test_clean_resource_name() -> Result<(), StampError> {
@@ -266,82 +257,52 @@ mod tests {
     }
 
     #[test]
-    fn test_vault_function_mock() -> Result<(), StampError> {
-        let _guard = crate::utils::ENV_MUTEX
+    fn test_vault_function_validation_and_missing_token() {
+        let _guard = ENV_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        unsafe {
-            std::env::set_var("STAMP_MOCK_VAULT", "1");
-        }
+        let _rm_tok = ScopedEnvVar::remove("VAULT_TOKEN");
         let vault = Vault;
         assert!(vault.evaluate(&[]).is_err());
         assert!(vault.evaluate(&["secret/path".to_string()]).is_err());
-        let res = vault.evaluate(&["secret/path".to_string(), "api_key".to_string()])?;
-        assert_eq!(res, "mock_vault_secret_api_key");
-        unsafe {
-            std::env::remove_var("STAMP_MOCK_VAULT");
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn test_vault_function_missing_token() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        unsafe {
-            std::env::set_var("STAMP_DISABLE_MOCK_VAULT", "1");
-            std::env::remove_var("STAMP_MOCK_VAULT");
-            std::env::remove_var("VAULT_TOKEN");
-        }
-        let vault = Vault;
         let err = vault.evaluate(&["secret/path".to_string(), "api_key".to_string()]);
         assert!(matches!(err, Err(StampError::Parse(_))));
-        unsafe {
-            std::env::remove_var("STAMP_DISABLE_MOCK_VAULT");
-        }
     }
 
     #[test]
     fn test_vault_http_v2_and_v1_and_errors() -> Result<(), StampError> {
-        let _guard = crate::utils::ENV_MUTEX
+        let _guard = ENV_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        unsafe {
-            std::env::set_var("STAMP_DISABLE_MOCK_VAULT", "1");
-            std::env::remove_var("STAMP_MOCK_VAULT");
-        }
 
         let mut server = mockito::Server::new();
         let server_url = server.url();
-        unsafe {
-            std::env::set_var("VAULT_ADDR", &server_url);
-            std::env::set_var("VAULT_TOKEN", "test-token");
-            std::env::set_var("VAULT_NAMESPACE", "test-ns");
+        let _addr = ScopedEnvVar::set("VAULT_ADDR", &server_url);
+        let _tok = ScopedEnvVar::set("VAULT_TOKEN", "test-token");
+
+        // 1. Successful KV v2 path with VAULT_NAMESPACE
+        {
+            let _ns = ScopedEnvVar::set("VAULT_NAMESPACE", "test-ns");
+            let mock_v2 = server
+                .mock("GET", "/v1/secret/v2")
+                .match_header("X-Vault-Token", "test-token")
+                .match_header("X-Vault-Namespace", "test-ns")
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(r#"{"data": {"data": {"api_key": "v2_secret_value", "enabled": true}}}"#)
+                .expect(2)
+                .create();
+
+            let vault = Vault;
+            let res = vault.evaluate(&["secret/v2".to_string(), "api_key".to_string()])?;
+            assert_eq!(res, "v2_secret_value");
+            let res_bool = vault.evaluate(&["secret/v2".to_string(), "enabled".to_string()])?;
+            assert_eq!(res_bool, "true");
+            mock_v2.assert();
         }
-
-        // 1. Successful KV v2 path
-        let mock_v2 = server
-            .mock("GET", "/v1/secret/v2")
-            .match_header("X-Vault-Token", "test-token")
-            .match_header("X-Vault-Namespace", "test-ns")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{"data": {"data": {"api_key": "v2_secret_value", "enabled": true}}}"#)
-            .expect(2)
-            .create();
-
-        let vault = Vault;
-        let res = vault.evaluate(&["secret/v2".to_string(), "api_key".to_string()])?;
-        assert_eq!(res, "v2_secret_value");
-        let res_bool = vault.evaluate(&["secret/v2".to_string(), "enabled".to_string()])?;
-        assert_eq!(res_bool, "true");
-        mock_v2.assert();
 
         // 2. Successful KV v1 path with non-string (numeric) value, without VAULT_NAMESPACE
-        unsafe {
-            std::env::remove_var("VAULT_NAMESPACE");
-        }
+        let _rm_ns = ScopedEnvVar::remove("VAULT_NAMESPACE");
         let mock_v1 = server
             .mock("GET", "/v1/secret/v1")
             .match_header("X-Vault-Token", "test-token")
@@ -351,6 +312,7 @@ mod tests {
             .expect(2)
             .create();
 
+        let vault = Vault;
         let res_v1 = vault.evaluate(&["secret/v1".to_string(), "port".to_string()])?;
         assert_eq!(res_v1, "8080");
         let res_v1_str = vault.evaluate(&["secret/v1".to_string(), "host".to_string()])?;
@@ -358,13 +320,10 @@ mod tests {
         mock_v1.assert();
 
         // 2b. Default VAULT_ADDR fallback (http://127.0.0.1:8200)
-        unsafe {
-            std::env::remove_var("VAULT_ADDR");
-        }
-        let res_default_addr = vault.evaluate(&["secret/default".to_string(), "k".to_string()]);
-        assert!(res_default_addr.is_err());
-        unsafe {
-            std::env::set_var("VAULT_ADDR", &server_url);
+        {
+            let _rm_addr = ScopedEnvVar::remove("VAULT_ADDR");
+            let res_default_addr = vault.evaluate(&["secret/default".to_string(), "k".to_string()]);
+            assert!(res_default_addr.is_err());
         }
 
         // 3. HTTP status error (e.g. 404)
@@ -401,36 +360,24 @@ mod tests {
         mock_no_key.assert();
 
         // 6. Network connection failure (invalid port)
-        unsafe {
-            std::env::set_var("VAULT_ADDR", "http://127.0.0.1:1");
-        }
+        let _bad_addr = ScopedEnvVar::set("VAULT_ADDR", "http://127.0.0.1:1");
         let res_conn_err = vault.evaluate(&["secret/any".to_string(), "k".to_string()]);
         assert!(matches!(res_conn_err, Err(StampError::Execution(_))));
-
-        unsafe {
-            std::env::remove_var("VAULT_ADDR");
-            std::env::remove_var("VAULT_TOKEN");
-            std::env::remove_var("VAULT_NAMESPACE");
-            std::env::remove_var("STAMP_DISABLE_MOCK_VAULT");
-        }
         Ok(())
     }
 
     #[tokio::test]
     async fn test_vault_inside_tokio_runtime() -> Result<(), StampError> {
-        let _guard = crate::utils::ENV_MUTEX
+        let _guard = ENV_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut server = mockito::Server::new_async().await;
         let server_url = server.url();
-        unsafe {
-            std::env::set_var("STAMP_DISABLE_MOCK_VAULT", "1");
-            std::env::set_var("VAULT_ADDR", &server_url);
-            std::env::set_var("VAULT_TOKEN", "tok");
-            std::env::remove_var("VAULT_NAMESPACE");
-        }
+        let _addr = ScopedEnvVar::set("VAULT_ADDR", &server_url);
+        let _tok = ScopedEnvVar::set("VAULT_TOKEN", "tok");
+        let _rm_ns = ScopedEnvVar::remove("VAULT_NAMESPACE");
 
-        let _mock = server
+        let mock = server
             .mock("GET", "/v1/secret/async")
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -441,30 +388,24 @@ mod tests {
         let vault = Vault;
         let res = vault.evaluate(&["secret/async".to_string(), "key".to_string()])?;
         assert_eq!(res, "tokio_val");
-
-        // Test thread panic branch
-        unsafe {
-            std::env::set_var("STAMP_TEST_VAULT_PANIC", "1");
-        }
-        let panic_res = vault.evaluate(&["secret/async".to_string(), "key".to_string()]);
-        assert!(matches!(panic_res, Err(StampError::Execution(_))));
-        unsafe {
-            std::env::remove_var("STAMP_TEST_VAULT_PANIC");
-            std::env::remove_var("VAULT_ADDR");
-            std::env::remove_var("VAULT_TOKEN");
-            std::env::remove_var("STAMP_DISABLE_MOCK_VAULT");
-        }
+        mock.assert_async().await;
         Ok(())
     }
 
     #[test]
     fn test_packer_functions_registered() -> Result<(), StampError> {
-        let _guard = crate::utils::ENV_MUTEX
+        let _guard = ENV_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        unsafe {
-            std::env::set_var("STAMP_MOCK_VAULT", "1");
-        }
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/v1/secret/data")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data": {"tok": "mock_vault_secret_tok"}}"#)
+            .create();
+        let _addr = ScopedEnvVar::set("VAULT_ADDR", server.url());
+        let _tok = ScopedEnvVar::set("VAULT_TOKEN", "tok");
 
         let funcs = packer_functions();
         assert_eq!(funcs.len(), 5);
@@ -487,6 +428,7 @@ mod tests {
             res.data.as_ref(),
             &ValueData::String("mock_vault_secret_tok".to_string())
         );
+        mock.assert();
 
         let ts = &funcs[2];
         let res = (ts.func)(&[])?;
@@ -502,10 +444,6 @@ mod tests {
         let fmt_arg = Value::new(Type::String, ValueData::String("2006-01-02".to_string()));
         let res_fmt = (iso.func)(&[fmt_arg])?;
         assert!(matches!(res_fmt.data.as_ref(), ValueData::String(_)));
-
-        unsafe {
-            std::env::remove_var("STAMP_MOCK_VAULT");
-        }
         Ok(())
     }
 

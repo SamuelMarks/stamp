@@ -21,6 +21,8 @@ pub struct FabricConfig {
     pub extra_arguments: Vec<String>,
     /// Staging directory on the remote machine. Defaults to `/tmp/packer-fabric`.
     pub staging_directory: Option<String>,
+    /// Optional custom path to the `fab` executable. Defaults to `"fab"`.
+    pub fab_binary: Option<PathBuf>,
 }
 
 /// The Fabric provisioner.
@@ -75,7 +77,16 @@ impl Provisioner for FabricProvisioner {
             &format!("Running Fabric tasks: {:?}", self.config.tasks),
         );
 
-        let mut cmd_str = format!("fab -f {fabfile_path} {}", self.config.tasks.join(" "));
+        let fab_bin = self
+            .config
+            .fab_binary
+            .as_ref()
+            .map_or_else(|| "fab".to_string(), |p| p.to_string_lossy().to_string());
+
+        let mut cmd_str = format!(
+            "{fab_bin} -f {fabfile_path} {}",
+            self.config.tasks.join(" ")
+        );
         if !self.config.extra_arguments.is_empty() {
             cmd_str.push(' ');
             cmd_str.push_str(&self.config.extra_arguments.join(" "));
@@ -114,6 +125,7 @@ mod tests {
             tasks: vec!["deploy".into()],
             extra_arguments: vec!["--show=debug".to_string()],
             staging_directory: Some("/tmp/custom-fabric".to_string()),
+            fab_binary: Some(PathBuf::from("/usr/local/bin/fab")),
         };
         let prov = FabricProvisioner::new(cfg);
 
@@ -134,6 +146,7 @@ mod tests {
             tasks: vec!["deploy".into()],
             extra_arguments: vec![],
             staging_directory: Some("/tmp/fail_staging".to_string()),
+            fab_binary: None,
         };
         let prov = FabricProvisioner::new(cfg);
 

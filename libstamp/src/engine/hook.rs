@@ -240,7 +240,6 @@ impl RemoteHookClient {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
     use crate::communicator::{Command, mock::MockCommunicator};
@@ -350,12 +349,12 @@ mod tests {
         };
         let comm = Arc::new(MockCommunicator::default());
         let ctx = BuildContext {
-            build_id: "".into(),
-            host: "".into(),
-            user: "".into(),
-            packer_run_uuid: "".into(),
-            source_name: "".into(),
-            source_type: "".into(),
+            build_id: String::new(),
+            host: String::new(),
+            user: String::new(),
+            packer_run_uuid: String::new(),
+            source_name: String::new(),
+            source_type: String::new(),
             ..Default::default()
         };
         let ui = Arc::new(crate::engine::ui::Ui::new(
@@ -408,7 +407,7 @@ mod tests {
         assert!(client.run_hook("step_error", b"payload").await.is_err());
 
         // Test with http prefix
-        let mut client2 = RemoteHookClient::connect_tcp(&format!("http://{}", local_addr)).await?;
+        let mut client2 = RemoteHookClient::connect_tcp(&format!("http://{local_addr}")).await?;
         assert!(client2.run_hook("step_pre", b"payload").await.is_ok());
 
         // Test connect error
@@ -416,8 +415,8 @@ mod tests {
         assert!(bad_client.is_err());
 
         // Test new
-        let channel = Endpoint::from_shared(format!("http://{}", local_addr))
-            .unwrap()
+        let channel = Endpoint::from_shared(format!("http://{local_addr}"))
+            .map_err(|e| StampError::Execution(e.to_string()))?
             .connect_lazy();
         let _client3 = RemoteHookClient::new(channel);
 

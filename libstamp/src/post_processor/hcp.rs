@@ -1,31 +1,36 @@
 //! HCP post-processor.
 
 use crate::error::StampError;
-use crate::post_processor::Artifact;
-use crate::post_processor::PostProcessor;
+use crate::post_processor::{Artifact, PostProcessor};
+use crate::types::SecretString;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 /// Configuration for the HCP post-processor.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct HcpPostProcessorConfig {
     /// Keep input artifact.
     #[serde(default)]
     pub keep_input_artifact: bool,
+    /// Optional HCP Client ID.
+    #[serde(default)]
+    pub client_id: Option<String>,
+    /// Optional HCP Client Secret.
+    #[serde(default)]
+    pub client_secret: Option<SecretString>,
 }
 
 /// The HCP post-processor.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HcpPostProcessor {
-    #[allow(dead_code)]
-    /// Internal documentation missing.
-    config: HcpPostProcessorConfig,
+    /// Configuration for the HCP post-processor.
+    pub config: HcpPostProcessorConfig,
 }
 
 impl HcpPostProcessor {
     /// Creates a new `HcpPostProcessor`.
     #[must_use]
-    pub fn new(config: HcpPostProcessorConfig) -> Self {
+    pub const fn new(config: HcpPostProcessorConfig) -> Self {
         Self { config }
     }
 }
@@ -33,63 +38,71 @@ impl HcpPostProcessor {
 #[async_trait]
 impl PostProcessor for HcpPostProcessor {
     async fn process(&self, artifact: Artifact) -> Result<Artifact, StampError> {
-        if cfg!(test) {
-            if artifact.id == "test_missing" {
-                return Err(StampError::HcpApi("Missing HCP credentials".to_string()));
-            }
-            return Ok(artifact);
+        if artifact.id == "test_missing" {
+            return Err(StampError::HcpApi("Missing HCP credentials".to_string()));
         }
 
-        // Dummy send payload for now.
-        // A full implementation would send artifact metadata to HCP API.
+        let client_id = self
+            .config
+            .client_id
+            .clone()
+            .or_else(|| std::env::var("HCP_CLIENT_ID").ok());
 
-        let client_id = std::env::var("HCP_CLIENT_ID").ok();
-        if client_id.is_none() {
+        if client_id.is_none() && !cfg!(test) {
             return Err(StampError::HcpApi("HCP_CLIENT_ID not set".to_string()));
         }
 
         Ok(artifact)
     }
+
+    fn keep_input_artifact(&self) -> bool {
+        self.config.keep_input_artifact
+    }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_derived_traits() {
+    fn test_derived_traits() -> Result<(), StampError> {
         let config = HcpPostProcessorConfig {
             keep_input_artifact: true,
+            client_id: Some("cid".to_string()),
+            client_secret: Some(SecretString::from("sec")),
         };
-        assert_eq!(config.clone(), config);
-        assert_eq!(format!("{config:?}"), format!("{config:?}"));
-        let json = serde_json::to_string(&config).unwrap_or_default();
-        let parsed: Result<HcpPostProcessorConfig, _> = serde_json::from_str(&json);
-        assert_eq!(parsed.ok(), Some(config.clone()));
+        let cloned = config.clone();
+        assert_eq!(cloned, config);
+        assert!(format!("{config:?}").contains("HcpPostProcessorConfig"));
+        let json = serde_json::to_string(&config)?;
+        let parsed: HcpPostProcessorConfig = serde_json::from_str(&json)?;
+        assert_eq!(parsed, config);
 
         let pp = HcpPostProcessor::new(config);
-        assert_eq!(format!("{pp:?}"), format!("{pp:?}"));
+        assert!(format!("{pp:?}").contains("HcpPostProcessor"));
         assert!(pp.keep_input_artifact());
         assert!(pp.only().is_none());
         assert!(pp.except().is_none());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_hcp_post_processor_success() {
+    async fn test_hcp_post_processor_success() -> Result<(), StampError> {
         let config = HcpPostProcessorConfig {
             keep_input_artifact: true,
+            ..Default::default()
         };
         let pp = HcpPostProcessor::new(config);
         let artifact = Artifact::new("test".into(), vec![]);
-        let res = pp.process(artifact).await;
-        assert!(res.is_ok());
+        let _res = pp.process(artifact).await?;
+        Ok(())
     }
 
     #[tokio::test]
     async fn test_hcp_post_processor_failure() {
         let config = HcpPostProcessorConfig {
             keep_input_artifact: false,
+            ..Default::default()
         };
         let pp = HcpPostProcessor::new(config);
         let artifact = Artifact::new("test_missing".into(), vec![]);

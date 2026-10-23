@@ -7,6 +7,7 @@ pub use super::virtualbox_iso::{
     char_to_vbox_scancodes, discover_guest_additions_iso, execute_vboxmanage_commands,
     execute_vboxmanage_commands_with_output, query_vbox_version, vboxmanage,
 };
+use crate::artifact::BuildArtifact;
 use crate::builder::Builder;
 use crate::communicator::Communicator;
 use crate::communicator::ssh::{SshCommunicator, SshConfig};
@@ -842,7 +843,7 @@ impl Step for StepProvision {
             build_id: self.name.clone(),
             host: "vbox".to_string(),
             user: "root".to_string(),
-            packer_run_uuid: "mocked-uuid".to_string(),
+            packer_run_uuid: uuid::Uuid::new_v4().to_string(),
             source_name: self.name.clone(),
             source_type: "virtualbox-ovf".to_string(),
             ..Default::default()
@@ -981,11 +982,6 @@ impl Builder for VirtualboxOvfBuilder {
         ui: Arc<crate::engine::ui::Ui>,
         on_error: crate::engine::packer::OnErrorStrategy,
     ) -> Result<Box<dyn crate::artifact::Artifact>, StampError> {
-        if cfg!(test) && (self.config.name == "test_bad_exit" || self.config.name == "test_missing")
-        {
-            return Err(StampError::Execution("test triggered error".to_string()));
-        }
-
         let mut http_cfg = crate::builder::http_server::HttpServerConfig::new();
         if let Some(ref dir) = self.config.http_directory {
             http_cfg = http_cfg.with_dir(std::path::PathBuf::from(dir));
@@ -1041,45 +1037,20 @@ impl Builder for VirtualboxOvfBuilder {
 
         let mut runner = Runner::new(steps);
         let mut state = StateBag::new();
-        match runner.run(&mut state).await {
-            Ok(()) => {
-                runner.cleanup(&state).await;
-            }
-            Err(e) => {
-                match on_error {
-                    crate::engine::packer::OnErrorStrategy::Cleanup => {
-                        runner.cleanup(&state).await;
-                    }
-                    crate::engine::packer::OnErrorStrategy::Abort
-                    | crate::engine::packer::OnErrorStrategy::RunCleanupProvisioner => {}
-                    crate::engine::packer::OnErrorStrategy::Ask => {
-                        let msg = format!(
-                            "Build '{}' errored: {}
-Do you want to clean up? [y/N]: ",
-                            self.name(),
-                            e
-                        );
-                        if let Ok(ans) = ui.ask("stamp", &msg)
-                            && (ans == "y" || ans == "yes")
-                        {
-                            runner.cleanup(&state).await;
-                        }
-                    }
-                }
-                return Err(e);
-            }
-        }
+        runner
+            .run_with_strategy(&mut state, &self.name(), &ui, on_error)
+            .await?;
 
         let export_path = state
             .get::<String>("export_path")
             .cloned()
             .unwrap_or_default();
 
-        Ok(Box::new(crate::artifact::MockArtifact {
-            builder_id: self.name(),
-            id: format!("virtualbox-ovf:{export_path}"),
-            files: vec![],
-        }))
+        Ok(Box::new(BuildArtifact::with_builder(
+            self.name(),
+            format!("virtualbox-ovf:{export_path}"),
+            vec![],
+        )))
     }
 
     async fn cancel(&self) -> Result<(), StampError> {
@@ -1092,7 +1063,6 @@ Do you want to clean up? [y/N]: ",
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
     use crate::engine::hook::DefaultProvisionHook;
@@ -1116,16 +1086,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_virtualboxovfbuilder_run() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let temp_dir = tempfile::tempdir().unwrap();
+    async fn test_virtualboxovfbuilder_run() -> Result<(), StampError> {
+        let temp_dir = tempfile::tempdir()?;
         let src_file = temp_dir.path().join("source.ovf");
-        tokio::fs::write(&src_file, b"OVF_SOURCE_CONTENT")
-            .await
-            .unwrap();
-        let data = tokio::fs::read(&src_file).await.unwrap();
+        tokio::fs::write(&src_file, b"OVF_SOURCE_CONTENT").await?;
+        let data = tokio::fs::read(&src_file).await?;
         let checksum = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&data)));
 
         let config = VirtualboxOvfConfig {
@@ -1155,7 +1120,13 @@ mod tests {
             winrm_host_port: Some(Port::new(5985)),
             communicator: Some("winrm".to_string()),
             export_format: VBoxExportFormat::Ovf,
-            output_directory: Some("custom-vbox-out".to_string()),
+            output_directory: Some(
+                temp_dir
+                    .path()
+                    .join("vbox-out")
+                    .to_string_lossy()
+                    .to_string(),
+            ),
             boot_command: Some(vec!["install<enter>".to_string()]),
             vboxmanage: vec![vec![
                 "modifyvm".to_string(),
@@ -1173,7 +1144,7 @@ mod tests {
         };
         let builder = VirtualboxOvfBuilder::new(config.clone());
 
-        assert!(builder.prepare().await.is_ok());
+        builder.prepare().await?;
         assert_eq!(builder.name(), "test-builder");
 
         let hook = Arc::new(DefaultProvisionHook {
@@ -1188,28 +1159,29 @@ mod tests {
 
         let res = builder
             .run(hook.clone(), ui.clone(), OnErrorStrategy::Cleanup)
-            .await;
-        assert!(
-            res.as_ref()
-                .map(|a| a.id())
-                .ok()
-                .unwrap_or_default()
-                .contains("test-vm-ovf.ovf")
-        );
-        assert!(builder.cancel().await.is_ok());
+            .await?;
+        assert!(res.id().contains("test-vm-ovf.ovf"));
+        assert_eq!(res.builder_id(), "test-builder");
+        builder.cancel().await?;
 
-        // Default run without export_format, output_directory, vm_name
+        // Default run without export_format, vm_name
         let b_default = VirtualboxOvfBuilder::new(VirtualboxOvfConfig {
             name: "default-vbox".to_string(),
             guest_additions_mode: VBoxGuestAdditionsMode::Attach,
             communicator: Some("winrm".to_string()),
             winrm_host_port: Some(Port::new(5985)),
+            output_directory: Some(
+                temp_dir
+                    .path()
+                    .join("default-out")
+                    .to_string_lossy()
+                    .to_string(),
+            ),
             ..Default::default()
         });
-        let res_default = b_default
+        let _ = b_default
             .run(hook.clone(), ui.clone(), OnErrorStrategy::Cleanup)
-            .await;
-        assert!(res_default.is_ok());
+            .await?;
 
         // Test step cleanups and execution (both without and with vm_ip/ssh_port)
         let mut empty_state = StateBag::new();
@@ -1219,12 +1191,12 @@ mod tests {
             hook,
             config: config.clone(),
         };
-        assert!(prov_step.run(&mut empty_state).await.is_ok());
+        prov_step.run(&mut empty_state).await?;
 
         let mut state = StateBag::new();
         state.put("vm_ip", "10.0.0.1".to_string());
         state.put("ssh_port", 2222u16);
-        assert!(prov_step.run(&mut state).await.is_ok());
+        prov_step.run(&mut state).await?;
         prov_step.cleanup(&state).await;
 
         let mut import_step = StepImportVM {
@@ -1249,61 +1221,38 @@ mod tests {
             config,
         };
         export_step.cleanup(&state).await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_verify_appliance_checksum_variations() {
-        let temp_dir = tempfile::tempdir().unwrap();
+    async fn test_verify_appliance_checksum_variations() -> Result<(), StampError> {
+        let temp_dir = tempfile::tempdir()?;
         let file_path = temp_dir.path().join("test.ova");
-        tokio::fs::write(&file_path, b"APPLIANCE_CONTENT")
-            .await
-            .unwrap();
+        tokio::fs::write(&file_path, b"APPLIANCE_CONTENT").await?;
 
         let sha256_hash = hex::encode(sha2::Sha256::digest(b"APPLIANCE_CONTENT"));
         let mut hasher = Md5::default();
         Md5Digest::update(&mut hasher, b"APPLIANCE_CONTENT");
         let md5_hash = hex::encode(Md5Digest::finalize(hasher));
 
-        // Match with sha256: prefix
-        assert!(
-            verify_appliance_checksum(&file_path, &format!("sha256:{sha256_hash}"))
-                .await
-                .is_ok()
-        );
-        // Match with md5: prefix
-        assert!(
-            verify_appliance_checksum(&file_path, &format!("md5:{md5_hash}"))
-                .await
-                .is_ok()
-        );
-        // Match bare 64-char sha256
-        assert!(
-            verify_appliance_checksum(&file_path, &sha256_hash)
-                .await
-                .is_ok()
-        );
-        // Match bare 32-char md5
-        assert!(
-            verify_appliance_checksum(&file_path, &md5_hash)
-                .await
-                .is_ok()
-        );
-        // "none" ignores
-        assert!(verify_appliance_checksum(&file_path, "none").await.is_ok());
-        // empty ignores
-        assert!(verify_appliance_checksum(&file_path, "").await.is_ok());
+        verify_appliance_checksum(&file_path, &format!("sha256:{sha256_hash}")).await?;
+        verify_appliance_checksum(&file_path, &format!("md5:{md5_hash}")).await?;
+        verify_appliance_checksum(&file_path, &sha256_hash).await?;
+        verify_appliance_checksum(&file_path, &md5_hash).await?;
+        verify_appliance_checksum(&file_path, "none").await?;
+        verify_appliance_checksum(&file_path, "").await?;
 
-        // Mismatch
         let mismatch_res = verify_appliance_checksum(
             &file_path,
             "0000000000000000000000000000000000000000000000000000000000000000",
         )
         .await;
         assert!(mismatch_res.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_virtualbox_ovf_fallback_config_aliases() {
+    fn test_virtualbox_ovf_fallback_config_aliases() -> Result<(), StampError> {
         let mut builder_cfg = crate::template::BuilderConfig {
             builder_type: "virtualbox-ovf".to_string(),
             name: "test-vbox".to_string(),
@@ -1343,7 +1292,7 @@ mod tests {
             .config
             .insert("http_content".to_string(), "invalid json".to_string());
 
-        let cfg = VirtualboxOvfConfig::from_builder_config(&builder_cfg).expect("parse");
+        let cfg = VirtualboxOvfConfig::from_builder_config(&builder_cfg)?;
         assert_eq!(cfg.gfx_accelerate_3d, Some(true));
         assert!(cfg.nic_type.is_some());
         assert_eq!(cfg.nested_virt, Some(true));
@@ -1353,17 +1302,14 @@ mod tests {
         assert_eq!(cfg.http_port_min, Some(8000));
         assert_eq!(cfg.http_port_max, Some(8010));
         assert!(cfg.http_content.is_empty());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_vbox_ovf_run_without_sizes_and_ports() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let temp_dir = tempfile::tempdir().unwrap();
-
+    async fn test_vbox_ovf_run_without_sizes_and_ports() -> Result<(), StampError> {
+        let temp_dir = tempfile::tempdir()?;
         let f_path = temp_dir.path().join("source.ovf");
-        tokio::fs::write(&f_path, b"dummy").await.unwrap();
+        tokio::fs::write(&f_path, b"dummy").await?;
 
         let config = super::VirtualboxOvfConfig {
             name: "test-vbox-ovf-default-ports".to_string(),
@@ -1379,20 +1325,6 @@ mod tests {
 
         let builder = super::VirtualboxOvfBuilder::new(config);
 
-        let script = temp_dir.path().join("VBoxManage");
-        tokio::fs::write(&script, b"#!/bin/sh\nexit 0")
-            .await
-            .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-
-        unsafe {
-            std::env::set_var("VBOXMANAGE_PATH", script.to_string_lossy().to_string());
-        }
-
         let hook = Arc::new(crate::engine::hook::DefaultProvisionHook {
             provisioners: Arc::new(vec![]),
             error_cleanup_provisioners: Arc::new(vec![]),
@@ -1403,30 +1335,14 @@ mod tests {
             crate::engine::packer::FeatureState::Disabled,
         ));
 
-        builder
+        let _ = builder
             .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
-            .await
-            .unwrap();
-
-        unsafe {
-            std::env::remove_var("VBOXMANAGE_PATH");
-        }
-    }
-
-    #[test]
-    fn test_virtualboxovfbuilder_derived_traits() {
-        let config1 = VirtualboxOvfConfig::default();
-        let config2 = config1.clone();
-        assert_eq!(config1, config2);
-        assert_eq!(format!("{config1:?}"), format!("{config2:?}"));
-
-        let b1 = VirtualboxOvfBuilder::new(config1);
-        let b2 = b1.clone();
-        assert_eq!(format!("{b1:?}"), format!("{b2:?}"));
+            .await?;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_virtualbox_ovf_from_builder_config() {
+    async fn test_virtualbox_ovf_from_builder_config() -> Result<(), StampError> {
         let mut builder_cfg = crate::template::BuilderConfig {
             builder_type: "virtualbox-ovf".to_string(),
             name: "bento-ovf".to_string(),
@@ -1501,7 +1417,7 @@ mod tests {
             r#"{"/seed.cfg": "seed data"}"#.to_string(),
         );
 
-        let cfg = VirtualboxOvfConfig::from_builder_config(&builder_cfg).unwrap();
+        let cfg = VirtualboxOvfConfig::from_builder_config(&builder_cfg)?;
         assert_eq!(cfg.name, "bento-ovf");
         assert_eq!(cfg.source_path.as_deref(), Some("/tmp/base.ova"));
         assert_eq!(cfg.checksum.as_deref(), Some("sha256:abc"));
@@ -1525,46 +1441,26 @@ mod tests {
         assert!(cfg.headless);
         assert_eq!(cfg.serial_ports.len(), 1);
         assert_eq!(cfg.vboxmanage.len(), 1);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_virtualbox_ovf_enhanced_options_and_helpers() {
-        let temp_dir = tempfile::tempdir().unwrap();
+    async fn test_virtualbox_ovf_enhanced_options_and_helpers() -> Result<(), StampError> {
+        let temp_dir = tempfile::tempdir()?;
         let file_path = temp_dir.path().join("test.ova");
-        tokio::fs::write(&file_path, b"APPLIANCE_CONTENT")
-            .await
-            .unwrap();
+        tokio::fs::write(&file_path, b"APPLIANCE_CONTENT").await?;
 
-        // SHA1 verification
         let mut sha1_hasher = Sha1::default();
         Sha1Digest::update(&mut sha1_hasher, b"APPLIANCE_CONTENT");
         let sha1_hash = hex::encode(Sha1Digest::finalize(sha1_hasher));
 
-        assert!(
-            verify_appliance_checksum(&file_path, &format!("sha1:{sha1_hash}"))
-                .await
-                .is_ok()
-        );
-        assert!(
-            verify_appliance_checksum(&file_path, &sha1_hash)
-                .await
-                .is_ok()
-        );
+        verify_appliance_checksum(&file_path, &format!("sha1:{sha1_hash}")).await?;
+        verify_appliance_checksum(&file_path, &sha1_hash).await?;
 
-        // SHA512 verification
         let sha512_hash = hex::encode(Sha512::digest(b"APPLIANCE_CONTENT"));
-        assert!(
-            verify_appliance_checksum(&file_path, &format!("sha512:{sha512_hash}"))
-                .await
-                .is_ok()
-        );
-        assert!(
-            verify_appliance_checksum(&file_path, &sha512_hash)
-                .await
-                .is_ok()
-        );
+        verify_appliance_checksum(&file_path, &format!("sha512:{sha512_hash}")).await?;
+        verify_appliance_checksum(&file_path, &sha512_hash).await?;
 
-        // Non-existent file
         let non_existent = temp_dir.path().join("does_not_exist.ova");
         assert!(
             verify_appliance_checksum(&non_existent, "sha256:abc")
@@ -1572,17 +1468,22 @@ mod tests {
                 .is_err()
         );
 
-        // Parse nested string list HCL tuple
-        use hashicorp_configuration_language_rs::ast::expr::Expression;
-        use hashicorp_configuration_language_rs::span::Span;
-        let dummy = Span::default();
-        let tuple_expr = Expression::Tuple(
+        let dummy = hashicorp_configuration_language_rs::span::Span::default();
+        let tuple_expr = hashicorp_configuration_language_rs::ast::expr::Expression::Tuple(
             vec![
-                Expression::Tuple(
-                    vec![Expression::String("ovf_arg1".to_string(), dummy.clone())],
+                hashicorp_configuration_language_rs::ast::expr::Expression::Tuple(
+                    vec![
+                        hashicorp_configuration_language_rs::ast::expr::Expression::String(
+                            "ovf_arg1".to_string(),
+                            dummy.clone(),
+                        ),
+                    ],
                     dummy.clone(),
                 ),
-                Expression::String("ovf_flat".to_string(), dummy.clone()),
+                hashicorp_configuration_language_rs::ast::expr::Expression::String(
+                    "ovf_flat".to_string(),
+                    dummy.clone(),
+                ),
             ],
             dummy,
         );
@@ -1591,20 +1492,17 @@ mod tests {
         assert_eq!(parsed_nested[0], vec!["ovf_arg1"]);
         assert_eq!(parsed_nested[1], vec!["ovf_flat"]);
 
-        // Flat JSON string and invalid JSON string
         let flat_json = "[\"argA\", \"argB\"]".to_string();
         let parsed_flat = parse_nested_string_list(Some(&flat_json), None);
         assert_eq!(parsed_flat, vec![vec!["argA", "argB"]]);
 
         let invalid = "not-valid-json".to_string();
         let parsed_inv = parse_nested_string_list(Some(&invalid), None);
-        assert!(parsed_inv.is_empty());
+        assert_eq!(parsed_inv.len(), 0);
 
-        // CSV string list
         let csv_res = parse_string_list("item1, item2, 'item3', \"item4\"");
         assert_eq!(csv_res, vec!["item1", "item2", "item3", "item4"]);
 
-        // Test parse_serial_ports variants
         let mut port_cfg = std::collections::HashMap::new();
         port_cfg.insert("uart1".to_string(), "0x3f8 4".to_string());
         port_cfg.insert("uartmode1".to_string(), "file".to_string());
@@ -1621,7 +1519,6 @@ mod tests {
         assert_eq!(ports[2].io_base, None);
         assert_eq!(ports[3].mode, VBoxSerialMode::Disconnected);
 
-        // BuilderConfig parsing with all enhanced options
         let mut bento_cfg = crate::template::BuilderConfig {
             builder_type: "virtualbox-ovf".to_string(),
             name: "bento-ovf-test".to_string(),
@@ -1650,7 +1547,7 @@ mod tests {
             .config
             .insert("shutdown_timeout".to_string(), "5m".to_string());
 
-        let cfg = VirtualboxOvfConfig::from_builder_config(&bento_cfg).unwrap();
+        let cfg = VirtualboxOvfConfig::from_builder_config(&bento_cfg)?;
         assert_eq!(cfg.nested_virt, Some(true));
         assert_eq!(cfg.rtc_time_base.as_deref(), Some("utc"));
         assert_eq!(cfg.usb, Some(true));
@@ -1659,7 +1556,6 @@ mod tests {
         assert_eq!(cfg.shutdown_command.as_deref(), Some("shutdown /s"));
         assert_eq!(cfg.shutdown_timeout.as_deref(), Some("5m"));
 
-        // StepShutdown testing with shutdown_command and virtualbox_version_file
         let ui = Arc::new(Ui::new(
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
@@ -1683,68 +1579,46 @@ mod tests {
             Arc::new(crate::communicator::mock::MockCommunicator::new());
         state.put("communicator", comm);
 
-        assert!(step_shutdown.run(&mut state).await.is_ok());
+        step_shutdown.run(&mut state).await?;
         step_shutdown.cleanup(&state).await;
 
-        // Test error strategies on VirtualboxOvfBuilder
         let err_builder = VirtualboxOvfBuilder::new(VirtualboxOvfConfig {
-            name: "test_bad_exit".to_string(),
+            name: "test-err".to_string(),
+            output_directory: Some(temp_dir.path().to_string_lossy().to_string()),
             ..Default::default()
         });
-        let hook = Arc::new(DefaultProvisionHook {
-            provisioners: Arc::new(vec![]),
+        let fail_hook = Arc::new(DefaultProvisionHook {
+            provisioners: Arc::new(vec![Box::new(FailingProvisioner)]),
             error_cleanup_provisioners: Arc::new(vec![]),
         });
 
         assert!(
             err_builder
-                .run(hook.clone(), ui.clone(), OnErrorStrategy::Abort)
+                .run(fail_hook.clone(), ui.clone(), OnErrorStrategy::Abort)
                 .await
                 .is_err()
         );
         assert!(
             err_builder
                 .run(
-                    hook.clone(),
+                    fail_hook.clone(),
                     ui.clone(),
                     OnErrorStrategy::RunCleanupProvisioner
                 )
                 .await
                 .is_err()
         );
-
-        let mut queue = std::collections::VecDeque::new();
-        queue.push_back("yes".to_string());
-        let ui_ask = Arc::new(
-            Ui::new(
-                crate::engine::packer::FeatureState::Disabled,
-                crate::engine::packer::FeatureState::Disabled,
-                crate::engine::packer::FeatureState::Disabled,
-            )
-            .with_mock_inputs(Arc::new(std::sync::Mutex::new(queue))),
-        );
         assert!(
             err_builder
-                .run(hook.clone(), ui_ask, OnErrorStrategy::Ask)
+                .run(fail_hook, ui.clone(), OnErrorStrategy::Ask)
                 .await
                 .is_err()
         );
 
-        assert!(
-            err_builder
-                .run(hook, ui.clone(), OnErrorStrategy::Ask)
-                .await
-                .is_err()
-        );
-
-        // Test parse_string_list variants
         assert_eq!(parse_string_list("[\"single\"]"), vec!["single"]);
         assert_eq!(parse_string_list("a,,b"), vec!["a", "b"]);
-
-        // Test verify_appliance_checksum fallback algorithm
         assert!(verify_appliance_checksum(&file_path, "1234").await.is_err());
 
-        // Test StepUploadGuestAdditions
         let mut upload_step = StepUploadGuestAdditions {
             ui: ui.clone(),
             name: "upload-step".to_string(),
@@ -1753,10 +1627,9 @@ mod tests {
                 ..Default::default()
             },
         };
-        assert!(upload_step.run(&mut state).await.is_ok());
+        upload_step.run(&mut state).await?;
         upload_step.cleanup(&state).await;
 
-        // Test StepRunVM with wait action
         let mut run_step = StepRunVM {
             ui: ui.clone(),
             name: "run-step".to_string(),
@@ -1765,10 +1638,9 @@ mod tests {
                 ..Default::default()
             },
         };
-        assert!(run_step.run(&mut state).await.is_ok());
+        run_step.run(&mut state).await?;
         run_step.cleanup(&state).await;
 
-        // Test StepProvision failure and cleanup
         let mut prov_failing = StepProvision {
             ui,
             name: "fail-step".to_string(),
@@ -1780,5 +1652,9 @@ mod tests {
         };
         assert!(prov_failing.run(&mut state).await.is_err());
         prov_failing.cleanup(&state).await;
+
+        let empty_b = VirtualboxOvfBuilder::new(VirtualboxOvfConfig::default());
+        assert!(empty_b.prepare().await.is_err());
+        Ok(())
     }
 }

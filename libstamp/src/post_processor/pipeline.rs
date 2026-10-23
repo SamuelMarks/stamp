@@ -127,7 +127,6 @@ impl PostProcessorPipeline {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
@@ -141,9 +140,12 @@ mod tests {
     impl PostProcessor for MockTransformer {
         async fn process(&self, mut artifact: Artifact) -> Result<Artifact, StampError> {
             artifact.id = format!("{}-{}", artifact.id, self.suffix);
-            artifact
-                .files
-                .push(format!("generated_{}.txt", self.suffix));
+            let new_file = format!("generated_{}.txt", self.suffix);
+            if self.keep {
+                artifact.files.push(new_file);
+            } else {
+                artifact.files = vec![new_file];
+            }
             Ok(artifact)
         }
 
@@ -178,8 +180,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_pipeline_sequential_branching_and_cleanup() -> Result<(), StampError> {
-        let tmp_dir = std::env::temp_dir();
-        let intermediate_file = tmp_dir.join(format!("stamp_pipe_{}.raw", uuid::Uuid::new_v4()));
+        let tmp_dir = tempfile::tempdir()?;
+        let intermediate_file = tmp_dir.path().join("stamp_pipe.raw");
         fs::write(&intermediate_file, "raw disk content").map_err(StampError::Io)?;
 
         // Branch 1: step 1 (keep=false), step 2 (keep=true)
@@ -216,11 +218,7 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].id, "vm-step1-step2");
         assert_eq!(results[1].id, "vm-stepA");
-
-        // Clean up temporary file if still existing
-        if intermediate_file.exists() {
-            let _ = fs::remove_file(intermediate_file);
-        }
+        assert!(!intermediate_file.exists());
 
         Ok(())
     }

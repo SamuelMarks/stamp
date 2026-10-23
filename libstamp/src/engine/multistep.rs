@@ -476,13 +476,11 @@ impl Runner {
             #[cfg(unix)]
             {
                 use tokio::signal::unix::{SignalKind, signal};
-                let mut sigint = match signal(SignalKind::interrupt()) {
-                    Ok(s) => s,
-                    Err(_) => return,
+                let Ok(mut sigint) = signal(SignalKind::interrupt()) else {
+                    return;
                 };
-                let mut sigterm = match signal(SignalKind::terminate()) {
-                    Ok(s) => s,
-                    Err(_) => return,
+                let Ok(mut sigterm) = signal(SignalKind::terminate()) else {
+                    return;
                 };
                 tokio::select! {
                     _ = sigint.recv() => {},
@@ -871,10 +869,313 @@ impl Runner {
     }
 }
 
+/// Reusable provisioning step for multistep builders.
+///
+/// Connects via the configured [`crate::types::CommunicatorKind`] (or an existing communicator
+/// stored in the [`StateBag`]), populates a [`crate::engine::hook::BuildContext`] with a real
+/// run UUID, invokes [`crate::engine::hook::ProvisionHook::run_provisioners`], and shuts down
+/// any active [`crate::builder::http_server::HttpServerHandle`] after provisioning completes.
+#[derive(Clone)]
+pub struct StepProvision {
+    /// UI reference for terminal output.
+    pub ui: std::sync::Arc<crate::engine::ui::Ui>,
+    /// Builder instance name.
+    pub name: String,
+    /// Builder type identifier (e.g., `"alicloud-ecs"`, `"vmware-iso"`).
+    pub builder_type: String,
+    /// Provisioning hook.
+    pub hook: std::sync::Arc<dyn crate::engine::hook::ProvisionHook>,
+    /// Primary state bag key used to look up the guest IP address.
+    pub ip_state_key: String,
+    /// Whether an absent IP in the state bag should return an error instead of defaulting to `127.0.0.1`.
+    pub require_ip: bool,
+    /// Communicator protocol kind.
+    pub communicator_kind: crate::types::CommunicatorKind,
+    /// SSH username.
+    pub ssh_username: String,
+    /// Optional SSH password.
+    pub ssh_password: Option<String>,
+    /// Optional SSH port override.
+    pub ssh_port: Option<u16>,
+    /// Optional SSH private key file path.
+    pub ssh_private_key_path: Option<crate::types::FilePath>,
+    /// Optional `WinRM` username.
+    pub winrm_username: Option<String>,
+    /// Optional `WinRM` password.
+    pub winrm_password: Option<String>,
+    /// Optional `WinRM` port override.
+    pub winrm_port: Option<u16>,
+    /// Whether `WinRM` uses HTTPS/SSL.
+    pub winrm_use_ssl: bool,
+    /// Whether `WinRM` skips TLS certificate verification.
+    pub winrm_insecure: bool,
+    /// Optional custom status message logged when provisioning begins.
+    pub message: Option<String>,
+}
+
+impl StepProvision {
+    /// Creates a new [`StepProvision`] with sensible SSH defaults.
+    ///
+    /// # Arguments
+    /// * `ui` - UI logger handle.
+    /// * `name` - Builder instance name.
+    /// * `builder_type` - Builder type string.
+    /// * `hook` - Provisioning hook.
+    #[must_use]
+    pub fn new(
+        ui: std::sync::Arc<crate::engine::ui::Ui>,
+        name: impl Into<String>,
+        builder_type: impl Into<String>,
+        hook: std::sync::Arc<dyn crate::engine::hook::ProvisionHook>,
+    ) -> Self {
+        Self {
+            ui,
+            name: name.into(),
+            builder_type: builder_type.into(),
+            hook,
+            ip_state_key: "instance_ip".to_string(),
+            require_ip: false,
+            communicator_kind: crate::types::CommunicatorKind::Ssh,
+            ssh_username: "root".to_string(),
+            ssh_password: None,
+            ssh_port: None,
+            ssh_private_key_path: None,
+            winrm_username: None,
+            winrm_password: None,
+            winrm_port: None,
+            winrm_use_ssl: false,
+            winrm_insecure: false,
+            message: None,
+        }
+    }
+
+    /// Sets the primary state bag key used to look up the guest IP address.
+    #[must_use]
+    pub fn with_ip_key(mut self, key: impl Into<String>) -> Self {
+        self.ip_state_key = key.into();
+        self
+    }
+
+    /// Requires the IP address to be present in the state bag under `ip_state_key`.
+    #[must_use]
+    pub fn with_require_ip(mut self, require: bool) -> Self {
+        self.require_ip = require;
+        self
+    }
+
+    /// Sets the communicator protocol kind.
+    #[must_use]
+    pub fn with_communicator_kind(mut self, kind: crate::types::CommunicatorKind) -> Self {
+        self.communicator_kind = kind;
+        self
+    }
+
+    /// Sets the SSH username and optional password.
+    #[must_use]
+    pub fn with_ssh_credentials(
+        mut self,
+        username: impl Into<String>,
+        password: Option<String>,
+    ) -> Self {
+        self.ssh_username = username.into();
+        self.ssh_password = password;
+        self
+    }
+
+    /// Sets the SSH port override.
+    #[must_use]
+    pub fn with_ssh_port(mut self, port: u16) -> Self {
+        self.ssh_port = Some(port);
+        self
+    }
+
+    /// Sets the SSH private key path.
+    #[must_use]
+    pub fn with_ssh_private_key(mut self, path: Option<crate::types::FilePath>) -> Self {
+        self.ssh_private_key_path = path;
+        self
+    }
+
+    /// Sets `WinRM` credentials and connection options.
+    #[must_use]
+    pub fn with_winrm_options(
+        mut self,
+        username: Option<String>,
+        password: Option<String>,
+        port: Option<u16>,
+        use_ssl: bool,
+        insecure: bool,
+    ) -> Self {
+        self.winrm_username = username;
+        self.winrm_password = password;
+        self.winrm_port = port;
+        self.winrm_use_ssl = use_ssl;
+        self.winrm_insecure = insecure;
+        self
+    }
+
+    /// Sets the status message displayed when provisioning starts.
+    #[must_use]
+    pub fn with_message(mut self, message: impl Into<String>) -> Self {
+        self.message = Some(message.into());
+        self
+    }
+}
+
+#[async_trait::async_trait]
+impl Step for StepProvision {
+    async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, crate::error::StampError> {
+        let ip = if self.require_ip {
+            state
+                .get::<String>(&self.ip_state_key)
+                .cloned()
+                .ok_or_else(|| {
+                    crate::error::StampError::Builder(format!("Missing {}", self.ip_state_key))
+                })?
+        } else {
+            state
+                .get::<String>(&self.ip_state_key)
+                .or_else(|| state.get::<String>("instance_ip"))
+                .or_else(|| state.get::<String>("vm_ip"))
+                .or_else(|| state.get::<String>("server_ip"))
+                .or_else(|| state.get::<String>("server_addr"))
+                .or_else(|| state.get::<String>("guest_ip"))
+                .or_else(|| state.get::<String>("machine_ip"))
+                .or_else(|| state.get::<String>("linode_ip"))
+                .or_else(|| state.get::<String>("container_ip"))
+                .cloned()
+                .unwrap_or_else(|| "127.0.0.1".to_string())
+        };
+
+        let msg = self
+            .message
+            .clone()
+            .unwrap_or_else(|| format!("Provisioning {}...", self.name));
+        self.ui.say(&self.name, &msg);
+
+        let port = match self.communicator_kind {
+            crate::types::CommunicatorKind::WinRm => self
+                .winrm_port
+                .or_else(|| state.get::<u16>("winrm_port").copied())
+                .unwrap_or(if self.winrm_use_ssl { 5986 } else { 5985 }),
+            _ => self.ssh_port.or_else(|| state.ssh_port()).unwrap_or(22),
+        };
+
+        let comm: std::sync::Arc<dyn crate::communicator::Communicator> = if let Some(existing) =
+            state
+                .get::<std::sync::Arc<dyn crate::communicator::Communicator>>("communicator")
+                .cloned()
+        {
+            existing
+        } else if self.communicator_kind == crate::types::CommunicatorKind::WinRm {
+            let winrm_cfg = crate::communicator::winrm::WinRmConfig {
+                host: ip.clone(),
+                port: crate::types::Port::new(port),
+                username: self
+                    .winrm_username
+                    .clone()
+                    .unwrap_or_else(|| "Administrator".to_string()),
+                password: self.winrm_password.clone(),
+                tls: crate::communicator::winrm::WinRmTlsConfig {
+                    use_https: self.winrm_use_ssl,
+                    insecure_skip_verify: self.winrm_insecure,
+                    winrm_insecure: self.winrm_insecure,
+                },
+                timeout: crate::types::Timeout::new(std::time::Duration::from_secs(10)),
+                ..Default::default()
+            };
+            std::sync::Arc::new(crate::communicator::winrm::WinRmCommunicator::new(
+                winrm_cfg,
+            ))
+        } else {
+            let priv_key = self.ssh_private_key_path.clone().or_else(|| {
+                state
+                    .get::<crate::types::FilePath>("private_key_path")
+                    .cloned()
+            });
+            let ssh_cfg = crate::communicator::ssh::SshConfig {
+                host: ip.clone(),
+                port: crate::types::Port::new(port),
+                username: self.ssh_username.clone(),
+                password: self.ssh_password.clone(),
+                private_key_path: priv_key,
+                timeout: crate::types::Timeout::new(std::time::Duration::from_secs(10)),
+                ..Default::default()
+            };
+            std::sync::Arc::new(crate::communicator::ssh::SshCommunicator::new(ssh_cfg))
+        };
+
+        state.put("communicator", comm.clone());
+        state.put("provision_hook", self.hook.clone());
+
+        let run_uuid = state
+            .packer_run_uuid()
+            .map_or_else(|| uuid::Uuid::new_v4().to_string(), ToString::to_string);
+        let mut conn_info = state.conn_info().cloned().unwrap_or_default();
+        if let Some(http_ip) = state.http_ip() {
+            conn_info.insert("packer_http_ip".to_string(), http_ip.to_string());
+        }
+        if let Some(http_port) = state.http_port() {
+            conn_info.insert("packer_http_port".to_string(), http_port.to_string());
+        }
+
+        let build_ctx = crate::engine::hook::BuildContext {
+            build_id: self.name.clone(),
+            build_name: self.name.clone(),
+            build_type: self.builder_type.clone(),
+            host: ip,
+            port,
+            user: if self.communicator_kind == crate::types::CommunicatorKind::WinRm {
+                self.winrm_username
+                    .clone()
+                    .unwrap_or_else(|| "Administrator".to_string())
+            } else {
+                self.ssh_username.clone()
+            },
+            password: if self.communicator_kind == crate::types::CommunicatorKind::WinRm {
+                self.winrm_password.clone()
+            } else {
+                self.ssh_password.clone()
+            },
+            conn_type: self.communicator_kind.to_string(),
+            conn_info,
+            packer_run_uuid: run_uuid,
+            source_name: self.name.clone(),
+            source_type: self.builder_type.clone(),
+            ssh_public_key: state.ssh_public_key().map(ToString::to_string),
+            ssh_private_key: state.ssh_private_key().map(ToString::to_string),
+            ..Default::default()
+        };
+        state.set_build_context(build_ctx.clone());
+
+        let prov_res = self
+            .hook
+            .run_provisioners(comm, &build_ctx, self.ui.clone())
+            .await;
+
+        if let Some(handle) =
+            state.get::<crate::builder::http_server::HttpServerHandle>("http_server_handle")
+        {
+            handle.abort();
+        }
+
+        prov_res?;
+        Ok(StepAction::Continue)
+    }
+
+    async fn cleanup(&mut self, state: &StateBag) {
+        if let Some(handle) =
+            state.get::<crate::builder::http_server::HttpServerHandle>("http_server_handle")
+        {
+            handle.abort();
+        }
+    }
+}
+
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
+    use crate::error::StampError;
     use std::sync::{Arc, Mutex};
 
     struct TestStep {
@@ -908,8 +1209,14 @@ mod tests {
         }
     }
 
+    struct SampleTypedKey;
+    impl TypedStateKey for SampleTypedKey {
+        type Value = u32;
+        const KEY: &'static str = "sample_typed_u32";
+    }
+
     #[test]
-    fn test_state_bag() {
+    fn test_state_bag() -> Result<(), StampError> {
         let mut bag = StateBag::new();
         bag.put("key1", 42i32);
         bag.put("key2", "hello".to_string());
@@ -918,6 +1225,20 @@ mod tests {
         assert_eq!(bag.get::<String>("key2"), Some(&"hello".to_string()));
         assert_eq!(bag.get::<i32>("key2"), None); // Wrong type
         assert_eq!(bag.get::<i32>("missing"), None);
+
+        assert_eq!(bag.try_get::<i32>("key1")?, &42);
+        assert!(matches!(
+            bag.try_get::<i32>("missing"),
+            Err(StampError::StateBagMissingKey { .. })
+        ));
+        assert!(matches!(
+            bag.try_get::<i32>("key2"),
+            Err(StampError::StateBagTypeMismatch { .. })
+        ));
+
+        bag.put_typed::<SampleTypedKey>(99);
+        assert_eq!(bag.get_typed::<SampleTypedKey>(), Some(&99));
+        assert_eq!(bag.try_get_typed::<SampleTypedKey>()?, &99);
 
         if let Some(v) = bag.get_mut::<i32>("key1") {
             *v = 100;
@@ -936,12 +1257,15 @@ mod tests {
 
         bag.record_step("StepOne");
         bag.record_step("StepTwo");
-        let history = bag.execution_history().unwrap();
+        let history = bag
+            .execution_history()
+            .ok_or_else(|| StampError::Execution("missing history".to_string()))?;
         assert_eq!(history, &["StepOne", "StepTwo"]);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_runner_success() {
+    async fn test_runner_success() -> Result<(), StampError> {
         let log = Arc::new(Mutex::new(Vec::new()));
 
         let step1 = TestStep {
@@ -958,11 +1282,14 @@ mod tests {
         let mut runner = Runner::new(vec![Box::new(step1), Box::new(step2)]);
         let mut state = StateBag::new();
 
-        runner.run(&mut state).await.unwrap();
+        runner.run(&mut state).await?;
         runner.cleanup(&state).await;
 
-        let log_data = log.lock().unwrap();
+        let log_data = log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(*log_data, vec!["run 1", "run 2", "cleanup 2", "cleanup 1"]);
+        Ok(())
     }
 
     #[tokio::test]
@@ -992,16 +1319,18 @@ mod tests {
         assert!(res.is_err());
         runner.cleanup(&state).await;
 
-        let log_data = log.lock().unwrap();
+        let log_data = log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // step3 should not be run, but step1 and step2 should be cleaned up.
         assert_eq!(*log_data, vec!["run 1", "run 2", "cleanup 2", "cleanup 1"]);
     }
 
     #[tokio::test]
-    async fn test_runner_empty() {
+    async fn test_runner_empty() -> Result<(), StampError> {
         let mut runner = Runner::new(vec![]);
         let mut state = StateBag::new();
-        runner.run(&mut state).await.unwrap();
+        runner.run(&mut state).await
     }
 
     #[tokio::test]
@@ -1028,14 +1357,14 @@ mod tests {
         assert!(res.is_err());
         runner.cleanup(&state).await;
 
-        let log_data = log.lock().unwrap();
+        let log_data = log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(log_data.is_empty());
     }
 
     #[tokio::test]
     async fn test_runner_cancel_during_run() {
-        let log = Arc::new(Mutex::new(Vec::new()));
-
         struct CancelStep {
             log: Arc<Mutex<Vec<String>>>,
             cancel_tx: watch::Sender<bool>,
@@ -1047,7 +1376,10 @@ mod tests {
                 &mut self,
                 _state: &mut StateBag,
             ) -> Result<StepAction, crate::error::StampError> {
-                self.log.lock().unwrap().push("run cancel_step".to_string());
+                self.log
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push("run cancel_step".to_string());
                 let _ = self.cancel_tx.send(true);
                 Ok(StepAction::Continue)
             }
@@ -1055,11 +1387,12 @@ mod tests {
             async fn cleanup(&mut self, _state: &StateBag) {
                 self.log
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push("cleanup cancel_step".to_string());
             }
         }
 
+        let log = Arc::new(Mutex::new(Vec::new()));
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let step1 = CancelStep {
             log: log.clone(),
@@ -1087,13 +1420,27 @@ mod tests {
         assert!(res.is_err());
         runner.cleanup(&state).await;
 
-        let log_data = log.lock().unwrap();
+        let log_data = log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // step2 shouldn't run because it's cancelled
         assert_eq!(*log_data, vec!["run cancel_step", "cleanup cancel_step"]);
     }
 
     #[tokio::test]
     async fn test_runner_debug_and_on_error_modes() {
+        struct FailingStep;
+        #[async_trait::async_trait]
+        impl Step for FailingStep {
+            async fn run(
+                &mut self,
+                _state: &mut StateBag,
+            ) -> Result<StepAction, crate::error::StampError> {
+                Err(crate::error::StampError::Execution("fail".to_string()))
+            }
+            async fn cleanup(&mut self, _state: &StateBag) {}
+        }
+
         let mut state = StateBag::new();
         state.put("instance_ip", "10.0.0.1".to_string());
         state.put("ssh_user", "ubuntu".to_string());
@@ -1119,18 +1466,6 @@ mod tests {
         assert!(runner.run(&mut state).await.is_ok());
 
         // Test with Abort strategy
-        struct FailingStep;
-        #[async_trait::async_trait]
-        impl Step for FailingStep {
-            async fn run(
-                &mut self,
-                _state: &mut StateBag,
-            ) -> Result<StepAction, crate::error::StampError> {
-                Err(crate::error::StampError::Execution("fail".to_string()))
-            }
-            async fn cleanup(&mut self, _state: &StateBag) {}
-        }
-
         let mut abort_runner = Runner::new(vec![Box::new(FailingStep)])
             .with_on_error(crate::engine::packer::OnErrorStrategy::Abort);
         assert!(abort_runner.run(&mut state).await.is_err());
@@ -1225,13 +1560,18 @@ mod tests {
             .with_on_error(crate::engine::packer::OnErrorStrategy::Ask);
 
         assert!(runner.run(&mut state).await.is_ok());
-        assert_eq!(*attempts.lock().unwrap(), 2);
+        assert_eq!(
+            *attempts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            2
+        );
         let mut mut_step = RetryStep {
             attempts,
             action_on_retry: StepAction::Continue,
         };
         let _ = mut_step.run(&mut state).await;
-        mut_step.cleanup(&mut state).await;
+        mut_step.cleanup(&state).await;
     }
 
     #[tokio::test]
@@ -1252,7 +1592,7 @@ mod tests {
 
         let attempts = Arc::new(Mutex::new(0));
         let step = RetryStep {
-            attempts: attempts.clone(),
+            attempts,
             action_on_retry: StepAction::Halt,
         };
 
@@ -1265,6 +1605,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_runner_on_error_ask_abort() {
+        struct FailingStep;
+        #[async_trait::async_trait]
+        impl Step for FailingStep {
+            async fn run(
+                &mut self,
+                _state: &mut StateBag,
+            ) -> Result<StepAction, crate::error::StampError> {
+                Err(crate::error::StampError::Execution("fail".to_string()))
+            }
+            async fn cleanup(&mut self, _state: &StateBag) {}
+        }
+
         let mut state = StateBag::new();
         let queue = Arc::new(Mutex::new(std::collections::VecDeque::new()));
         if let Ok(mut q) = queue.lock() {
@@ -1279,18 +1631,6 @@ mod tests {
             .with_mock_inputs(queue),
         );
 
-        struct FailingStep;
-        #[async_trait::async_trait]
-        impl Step for FailingStep {
-            async fn run(
-                &mut self,
-                _state: &mut StateBag,
-            ) -> Result<StepAction, crate::error::StampError> {
-                Err(crate::error::StampError::Execution("fail".to_string()))
-            }
-            async fn cleanup(&mut self, _state: &StateBag) {}
-        }
-
         let mut runner = Runner::new(vec![Box::new(FailingStep)])
             .with_ui(ui)
             .with_on_error(crate::engine::packer::OnErrorStrategy::Ask);
@@ -1298,7 +1638,121 @@ mod tests {
         assert!(runner.run(&mut state).await.is_err());
         let mut mut_step = FailingStep;
         let _ = mut_step.run(&mut state).await;
-        mut_step.cleanup(&mut state).await;
+        mut_step.cleanup(&state).await;
+    }
+
+    #[tokio::test]
+    async fn test_run_with_strategy_and_step_provision() -> Result<(), StampError> {
+        let ui = Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+        let hook = Arc::new(crate::engine::hook::DefaultProvisionHook {
+            provisioners: Arc::new(vec![]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+
+        let step_prov = StepProvision::new(ui.clone(), "test-b", "custom", hook.clone())
+            .with_ip_key("vm_ip")
+            .with_require_ip(false)
+            .with_communicator_kind(crate::types::CommunicatorKind::Ssh)
+            .with_ssh_credentials("ubuntu", Some("pass".to_string()))
+            .with_ssh_port(2222)
+            .with_ssh_private_key(None)
+            .with_message("Custom provisioning...");
+
+        let mut runner = Runner::new(vec![Box::new(step_prov)]);
+        let mut state = StateBag::new();
+        state.put("vm_ip", "10.0.0.5".to_string());
+        runner
+            .run_with_strategy(
+                &mut state,
+                "test-b",
+                &ui,
+                crate::engine::packer::OnErrorStrategy::Cleanup,
+            )
+            .await?;
+
+        let ctx = state
+            .build_context()
+            .ok_or_else(|| StampError::Execution("missing ctx".to_string()))?;
+        assert_eq!(ctx.host, "10.0.0.5");
+        assert_eq!(ctx.port, 2222);
+        assert_eq!(ctx.user, "ubuntu");
+        assert_ne!(ctx.packer_run_uuid, "mocked-uuid");
+
+        // WinRM path + require_ip failure path
+        let mut step_winrm = StepProvision::new(ui.clone(), "test-win", "hyperv", hook)
+            .with_ip_key("win_ip")
+            .with_require_ip(true)
+            .with_communicator_kind(crate::types::CommunicatorKind::WinRm)
+            .with_winrm_options(
+                Some("Admin".to_string()),
+                Some("secret".to_string()),
+                Some(5986),
+                true,
+                true,
+            );
+        let mut empty_state = StateBag::new();
+        assert!(step_winrm.run(&mut empty_state).await.is_err());
+
+        empty_state.put("win_ip", "10.0.0.9".to_string());
+        step_winrm.run(&mut empty_state).await?;
+        step_winrm.cleanup(&empty_state).await;
+
+        // Test run_with_strategy error paths (Cleanup, Abort, Ask)
+        let mut fail_runner_cleanup = Runner::new(vec![Box::new(FailingStep2)]);
+        assert!(
+            fail_runner_cleanup
+                .run_with_strategy(
+                    &mut empty_state,
+                    "test-b",
+                    &ui,
+                    crate::engine::packer::OnErrorStrategy::Cleanup
+                )
+                .await
+                .is_err()
+        );
+
+        let mut fail_runner_abort = Runner::new(vec![Box::new(FailingStep2)]);
+        assert!(
+            fail_runner_abort
+                .run_with_strategy(
+                    &mut empty_state,
+                    "test-b",
+                    &ui,
+                    crate::engine::packer::OnErrorStrategy::Abort
+                )
+                .await
+                .is_err()
+        );
+
+        let queue = Arc::new(Mutex::new(std::collections::VecDeque::from([
+            "y".to_string()
+        ])));
+        let ask_ui = Arc::new(
+            crate::engine::ui::Ui::new(
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+                crate::engine::packer::FeatureState::Disabled,
+            )
+            .with_mock_inputs(queue),
+        );
+        let mut fail_runner_ask = Runner::new(vec![Box::new(FailingStep2)]);
+        assert!(
+            fail_runner_ask
+                .run_with_strategy(
+                    &mut empty_state,
+                    "test-b",
+                    &ask_ui,
+                    crate::engine::packer::OnErrorStrategy::Ask
+                )
+                .await
+                .is_err()
+        );
+
+        Ok(())
     }
 
     struct FailingComm;
@@ -1484,7 +1938,7 @@ mod tests_err {
         let mut state = StateBag::new();
         let res = runner.run(&mut state).await;
         assert!(res.is_err());
-        ErrorStep.cleanup(&mut state).await;
+        ErrorStep.cleanup(&state).await;
     }
 
     struct RecoveringStep {
@@ -1523,7 +1977,7 @@ mod tests_err {
         let res = runner.run(&mut state).await;
         assert!(res.is_ok());
         let mut mut_step = RecoveringStep { recovered: true };
-        mut_step.cleanup(&mut state).await;
+        mut_step.cleanup(&state).await;
     }
 
     #[tokio::test]
@@ -1542,27 +1996,6 @@ mod tests_err {
         let mock_comm: std::sync::Arc<dyn crate::communicator::Communicator> =
             std::sync::Arc::new(crate::communicator::mock::MockCommunicator::default());
         state.put("communicator", mock_comm.clone());
-
-        struct MockProvHookNoUi;
-        #[async_trait::async_trait]
-        impl crate::engine::hook::ProvisionHook for MockProvHookNoUi {
-            async fn run_provisioners(
-                &self,
-                _c: std::sync::Arc<dyn crate::communicator::Communicator>,
-                _ctx: &crate::engine::hook::BuildContext,
-                _ui: std::sync::Arc<crate::engine::ui::Ui>,
-            ) -> Result<(), crate::error::StampError> {
-                Ok(())
-            }
-            async fn run_error_cleanup_provisioners(
-                &self,
-                _c: std::sync::Arc<dyn crate::communicator::Communicator>,
-                _ctx: &crate::engine::hook::BuildContext,
-                _ui: std::sync::Arc<crate::engine::ui::Ui>,
-            ) -> Result<(), crate::error::StampError> {
-                Ok(())
-            }
-        }
         let hook: std::sync::Arc<dyn crate::engine::hook::ProvisionHook> =
             std::sync::Arc::new(MockProvHookNoUi);
         state.put("provision_hook", hook.clone());
@@ -1592,6 +2025,48 @@ mod tests_err {
             .await;
     }
 
+    struct MockProvHookNoUi;
+    #[async_trait::async_trait]
+    impl crate::engine::hook::ProvisionHook for MockProvHookNoUi {
+        async fn run_provisioners(
+            &self,
+            _c: std::sync::Arc<dyn crate::communicator::Communicator>,
+            _ctx: &crate::engine::hook::BuildContext,
+            _ui: std::sync::Arc<crate::engine::ui::Ui>,
+        ) -> Result<(), crate::error::StampError> {
+            Ok(())
+        }
+        async fn run_error_cleanup_provisioners(
+            &self,
+            _c: std::sync::Arc<dyn crate::communicator::Communicator>,
+            _ctx: &crate::engine::hook::BuildContext,
+            _ui: std::sync::Arc<crate::engine::ui::Ui>,
+        ) -> Result<(), crate::error::StampError> {
+            Ok(())
+        }
+    }
+
+    struct MockProvHookNoUi2;
+    #[async_trait::async_trait]
+    impl crate::engine::hook::ProvisionHook for MockProvHookNoUi2 {
+        async fn run_provisioners(
+            &self,
+            _c: std::sync::Arc<dyn crate::communicator::Communicator>,
+            _ctx: &crate::engine::hook::BuildContext,
+            _ui: std::sync::Arc<crate::engine::ui::Ui>,
+        ) -> Result<(), crate::error::StampError> {
+            Ok(())
+        }
+        async fn run_error_cleanup_provisioners(
+            &self,
+            _c: std::sync::Arc<dyn crate::communicator::Communicator>,
+            _ctx: &crate::engine::hook::BuildContext,
+            _ui: std::sync::Arc<crate::engine::ui::Ui>,
+        ) -> Result<(), crate::error::StampError> {
+            Ok(())
+        }
+    }
+
     #[tokio::test]
     async fn test_runner_on_error_run_cleanup_provisioner_no_ui_but_with_comm_and_hook() {
         let step = ErrorStep;
@@ -1603,27 +2078,6 @@ mod tests_err {
             std::sync::Arc::new(crate::communicator::mock::MockCommunicator::default())
                 as std::sync::Arc<dyn crate::communicator::Communicator>,
         );
-
-        struct MockProvHookNoUi2;
-        #[async_trait::async_trait]
-        impl crate::engine::hook::ProvisionHook for MockProvHookNoUi2 {
-            async fn run_provisioners(
-                &self,
-                _c: std::sync::Arc<dyn crate::communicator::Communicator>,
-                _ctx: &crate::engine::hook::BuildContext,
-                _ui: std::sync::Arc<crate::engine::ui::Ui>,
-            ) -> Result<(), crate::error::StampError> {
-                Ok(())
-            }
-            async fn run_error_cleanup_provisioners(
-                &self,
-                _c: std::sync::Arc<dyn crate::communicator::Communicator>,
-                _ctx: &crate::engine::hook::BuildContext,
-                _ui: std::sync::Arc<crate::engine::ui::Ui>,
-            ) -> Result<(), crate::error::StampError> {
-                Ok(())
-            }
-        }
         let hook: std::sync::Arc<dyn crate::engine::hook::ProvisionHook> =
             std::sync::Arc::new(MockProvHookNoUi2);
         state.put("provision_hook", hook.clone());
@@ -1834,7 +2288,7 @@ mod tests_err {
         assert!(hook.pre.load(std::sync::atomic::Ordering::SeqCst));
         let mut mut_step = SuccessStep;
         let _ = mut_step.run(&mut state).await;
-        mut_step.cleanup(&mut state).await;
+        mut_step.cleanup(&state).await;
     }
 
     #[tokio::test]

@@ -190,7 +190,6 @@ pub fn fix_template(template_path: &str, config: &FixConfig) -> Result<String, S
 }
 
 #[cfg(test)]
-#[allow(clippy::all, clippy::pedantic)]
 mod tests {
     use super::*;
 

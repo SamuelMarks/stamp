@@ -316,7 +316,6 @@ impl Provisioner for WindowsShellProvisioner {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
     use crate::communicator::mock::MockCommunicator;
@@ -527,9 +526,10 @@ mod tests {
         };
         let config2 = config1.clone();
         assert_eq!(config1, config2);
-        assert_eq!(format!("{config1:?}"), format!("{config2:?}"));
+        assert!(format!("{config1:?}").contains("WindowsShellConfig"));
         let st1 = WindowsShellProvisioner::new(config1);
         let st2 = st1.clone();
-        assert_eq!(format!("{st1:?}"), format!("{st2:?}"));
+        assert!(format!("{st1:?}").contains("WindowsShellProvisioner"));
+        assert_eq!(st1.config, st2.config);
     }
 }

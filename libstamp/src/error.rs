@@ -314,7 +314,8 @@ mod tests {
             assert!(stamp_err.source().is_some());
         }
 
-        let regex_res = regex::Regex::new("[unclosed");
+        let bad_regex_pattern = String::from("[unclosed");
+        let regex_res = regex::Regex::new(&bad_regex_pattern);
         if let Err(e) = regex_res {
             let stamp_err = StampError::from(e);
             assert!(stamp_err.to_string().starts_with("Regex error:"));
@@ -385,6 +386,32 @@ mod tests {
         let zip_err = StampError::from(zip::result::ZipError::FileNotFound);
         assert!(zip_err.to_string().starts_with("ZIP error:"));
         assert!(zip_err.source().is_some());
+
+        let russh_err = StampError::from(russh::Error::Disconnected);
+        assert!(russh_err.to_string().starts_with("SSH error:"));
+        assert!(russh_err.source().is_some());
+
+        let russh_keys_err = StampError::from(russh::keys::Error::KeyIsCorrupt);
+        assert!(russh_keys_err.to_string().starts_with("SSH key error:"));
+        assert!(russh_keys_err.source().is_some());
+
+        let ssh_key_err = StampError::from(russh::keys::ssh_key::Error::Encoding(
+            ssh_encoding::Error::Length,
+        ));
+        assert!(ssh_key_err.to_string().starts_with("SSH key format error:"));
+        assert!(ssh_key_err.source().is_some());
+
+        let sftp_err = StampError::from(russh_sftp::client::error::Error::Timeout);
+        assert!(sftp_err.to_string().starts_with("SFTP error:"));
+        assert!(sftp_err.source().is_some());
+
+        let rsa_err = StampError::from(rsa::Error::Verification);
+        assert!(rsa_err.to_string().starts_with("RSA error:"));
+        assert!(rsa_err.source().is_some());
+
+        let bcrypt_err = StampError::from(bcrypt::BcryptError::CostNotAllowed(1));
+        assert!(bcrypt_err.to_string().starts_with("Bcrypt error:"));
+        assert!(bcrypt_err.source().is_some());
 
         assert_eq!(
             StampError::Parse("invalid syntax".to_string()).to_string(),

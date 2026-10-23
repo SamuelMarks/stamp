@@ -1204,7 +1204,6 @@ pub fn plugin_list() -> Result<(), StampError> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -1227,7 +1226,7 @@ mod tests {
         assert_eq!(TargetOs::Solaris.as_str(), "solaris");
 
         let current_os = TargetOs::current();
-        assert!(!current_os.as_str().is_empty());
+        assert_ne!(current_os.as_str(), "");
 
         assert_eq!(TargetArch::parse("amd64")?, TargetArch::Amd64);
         assert_eq!(TargetArch::parse("x86_64")?, TargetArch::Amd64);
@@ -1243,7 +1242,7 @@ mod tests {
         assert_eq!(TargetArch::Arm.as_str(), "arm");
 
         let current_arch = TargetArch::current();
-        assert!(!current_arch.as_str().is_empty());
+        assert_ne!(current_arch.as_str(), "");
 
         let platform = TargetPlatform::new(TargetOs::Linux, TargetArch::Amd64);
         assert_eq!(platform.os, TargetOs::Linux);
@@ -1290,16 +1289,13 @@ mod tests {
     }
 
     #[test]
-    fn test_checksum_verification() -> Result<(), StampError> {
+    fn test_checksum_verification() {
         let data = b"sample_archive_data";
         let mut hasher = Sha256::new();
         hasher.update(data);
         let actual_hash = hex::encode(hasher.finalize());
 
-        let manifest = format!(
-            "{actual_hash}  packer-plugin-amazon_v1.2.8_linux_amd64.zip
-"
-        );
+        let manifest = format!("{actual_hash}  packer-plugin-amazon_v1.2.8_linux_amd64.zip\n");
         assert!(
             verify_checksum(
                 data,
@@ -1309,19 +1305,15 @@ mod tests {
             .is_ok()
         );
 
-        let wrong_hash_manifest = format!(
-            "1234567890abcdef  packer-plugin-amazon_v1.2.8_linux_amd64.zip
-"
-        );
+        let wrong_hash_manifest = "1234567890abcdef  packer-plugin-amazon_v1.2.8_linux_amd64.zip\n";
         let err = verify_checksum(
             data,
-            &wrong_hash_manifest,
+            wrong_hash_manifest,
             "packer-plugin-amazon_v1.2.8_linux_amd64.zip",
         );
         assert!(matches!(err, Err(StampError::ChecksumMismatch { .. })));
 
-        let missing_manifest = "deadbeef  other-file.zip
-";
+        let missing_manifest = "deadbeef  other-file.zip\n";
         let err2 = verify_checksum(
             data,
             missing_manifest,
@@ -1330,31 +1322,20 @@ mod tests {
         assert!(matches!(err2, Err(StampError::Validation(..))));
 
         // Test fallback match when manifest contains hash directly
-        let direct_manifest = format!(
-            "Some header
-{actual_hash}
-"
-        );
+        let direct_manifest = format!("Some header\n{actual_hash}\n");
         assert!(verify_checksum(data, &direct_manifest, "any_file.zip").is_ok());
-
-        Ok(())
     }
 
     #[test]
     fn test_unpack_plugin_safe_and_atomic() -> Result<(), StampError> {
         let temp_dir = tempfile::tempdir().map_err(StampError::Io)?;
-        let zip_bytes = create_mock_zip(
-            "packer-plugin-test",
-            b"#!/bin/sh
-echo test
-",
-        )?;
+        let zip_bytes = create_mock_zip("packer-plugin-test", b"#!/bin/sh\necho test\n")?;
 
         let installed = unpack_plugin(&zip_bytes, temp_dir.path(), "test")?;
         assert!(installed.exists());
         assert_eq!(
-            installed.file_name().unwrap().to_str().unwrap(),
-            "packer-plugin-test"
+            installed.file_name().and_then(|n| n.to_str()),
+            Some("packer-plugin-test")
         );
 
         // Test empty zip
@@ -1411,15 +1392,11 @@ echo test
         let plugins_dir = temp_dir.path().join(".packer.d").join("plugins");
         std::fs::create_dir_all(&plugins_dir).map_err(StampError::Io)?;
 
-        let old_home = std::env::var("HOME").ok();
         let home = temp_dir.path().to_path_buf();
-        unsafe {
-            std::env::set_var(
-                "HOME",
-                home.to_str()
-                    .ok_or_else(|| StampError::Parse("failed".to_string()))?,
-            )
-        };
+        let home_str = home
+            .to_str()
+            .ok_or_else(|| StampError::Parse("failed".to_string()))?;
+        let _env = crate::utils::ScopedEnvVar::set("HOME", home_str);
 
         let opts = PluginInstallOptions {
             skip_signature_verification: false,
@@ -1430,25 +1407,15 @@ echo test
         };
 
         let installed =
-            install_plugin_with_options("mock/amazon", Some(">= 1.0.0, < 2.0.0"), &opts).await;
+            install_plugin_with_options("mock/amazon", Some(">= 1.0.0, < 2.0.0"), &opts).await?;
 
-        if let Ok(ref inst_path) = installed {
-            assert!(inst_path.exists());
-            let _ = plugin_list();
-            let _ = plugin_remove("amazon");
-            let _ = plugin_remove("amazon");
-            let _ = plugin_list();
-        }
+        assert!(installed.exists());
+        let _ = plugin_list();
+        let _ = plugin_remove("amazon");
+        let _ = plugin_remove("amazon");
+        let _ = plugin_list();
 
-        unsafe {
-            if let Some(h) = old_home {
-                std::env::set_var("HOME", h);
-            } else {
-                std::env::remove_var("HOME");
-            }
-        };
-
-        installed.map(|_| ())
+        Ok(())
     }
 
     #[test]
@@ -1483,9 +1450,8 @@ echo test
     }
 
     #[test]
-    fn test_verify_gpg_mock() -> Result<(), StampError> {
+    fn test_verify_gpg_mock() {
         assert!(verify_gpg_signature(b"manifest", b"mock-sig", b"key").is_ok());
-        Ok(())
     }
 
     #[test]
@@ -1505,9 +1471,9 @@ echo test
         reg.scan_directory(temp_dir.path())?;
 
         let id = PluginId::new("amazon");
-        let manifest = reg.get(&id);
-        assert!(manifest.is_some());
-        let m = manifest.unwrap();
+        let m = reg
+            .get(&id)
+            .ok_or_else(|| StampError::Validation("missing amazon plugin".to_string()))?;
         assert_eq!(m.version, Some(semver::Version::new(1, 2, 3)));
 
         // find_matching tests
@@ -1583,15 +1549,11 @@ echo test
 
         // Test plugin_install wrapper
         let home = temp_dir.path().to_path_buf();
-        unsafe {
-            std::env::set_var(
-                "HOME",
-                home.to_str()
-                    .ok_or_else(|| StampError::Parse("failed".to_string()))?,
-            )
-        };
+        let home_str = home
+            .to_str()
+            .ok_or_else(|| StampError::Parse("failed".to_string()))?;
+        let _env = crate::utils::ScopedEnvVar::set("HOME", home_str);
         let res = plugin_install("mock/amazon", Some("1.0.0")).await;
-        unsafe { std::env::remove_var("HOME") };
         assert!(res.is_ok());
 
         Ok(())

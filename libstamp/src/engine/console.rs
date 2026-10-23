@@ -625,6 +625,39 @@ pub(crate) fn process_console_input(line: &str, ctx: &mut Context<'static>) -> C
     }
 }
 
+/// Runs the interactive console session over generic `BufRead` and `Write` streams.
+///
+/// # Errors
+/// Returns `StampError` if preparing context or I/O fails.
+pub fn run_console_with_io<R: std::io::BufRead, W: std::io::Write>(
+    template_path: Option<&str>,
+    config: &ConsoleConfig,
+    mut reader: R,
+    mut writer: W,
+) -> Result<(), StampError> {
+    let (mut ctx, _var_completions) = prepare_console_context(template_path, config)?;
+    writeln!(writer, "Stamp Console REPL")?;
+    writeln!(
+        writer,
+        "Type an expression to evaluate, 'help' for guidance, or 'exit' to quit."
+    )?;
+
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let bytes_read = reader.read_line(&mut line)?;
+        if bytes_read == 0 {
+            break;
+        }
+        match process_console_input(&line, &mut ctx) {
+            ConsoleAction::Break => break,
+            ConsoleAction::Continue => {}
+            ConsoleAction::Print(msg) => writeln!(writer, "{msg}")?,
+        }
+    }
+    Ok(())
+}
+
 /// Runs the interactive console REPL loop.
 ///
 /// # Errors
@@ -640,7 +673,7 @@ pub fn run_console(template_path: Option<&str>, config: &ConsoleConfig) -> Resul
         for cmd in cmds.split(';') {
             match process_console_input(cmd, &mut ctx) {
                 ConsoleAction::Break => break,
-                ConsoleAction::Continue => continue,
+                ConsoleAction::Continue => {}
                 ConsoleAction::Print(msg) => println!("{msg}"),
             }
         }
@@ -673,7 +706,7 @@ pub fn run_console(template_path: Option<&str>, config: &ConsoleConfig) -> Resul
                 }
                 match process_console_input(&line, &mut ctx) {
                     ConsoleAction::Break => break,
-                    ConsoleAction::Continue => continue,
+                    ConsoleAction::Continue => {}
                     ConsoleAction::Print(msg) => println!("{msg}"),
                 }
             }
@@ -700,12 +733,11 @@ pub fn run_console(template_path: Option<&str>, config: &ConsoleConfig) -> Resul
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_console_helper_completion_and_hint() {
+    fn test_console_helper_completion_and_hint() -> Result<(), StampError> {
         let vars = vec!["var.ami_id".to_string(), "var.instance_type".to_string()];
         let funcs = vec!["timestamp()".to_string(), "uuidv4()".to_string()];
         let helper = ConsoleHelper::new(vars, funcs);
@@ -714,22 +746,30 @@ mod tests {
         let ctx = rustyline::Context::new(&history);
 
         // Test completion
-        let (start, matches) = helper.complete("v", 1, &ctx).unwrap();
+        let (start, matches) = helper
+            .complete("v", 1, &ctx)
+            .map_err(|e| StampError::Execution(e.to_string()))?;
         assert_eq!(start, 0);
         assert!(!matches.is_empty());
 
-        let (start_var, matches_var) = helper.complete("var.a", 5, &ctx).unwrap();
+        let (start_var, matches_var) = helper
+            .complete("var.a", 5, &ctx)
+            .map_err(|e| StampError::Execution(e.to_string()))?;
         assert_eq!(start_var, 0);
         assert_eq!(matches_var.len(), 1);
         assert_eq!(matches_var[0].replacement, "var.ami_id");
 
-        let (start_func, matches_func) = helper.complete("time", 4, &ctx).unwrap();
+        let (start_func, matches_func) = helper
+            .complete("time", 4, &ctx)
+            .map_err(|e| StampError::Execution(e.to_string()))?;
         assert_eq!(start_func, 0);
         assert_eq!(matches_func.len(), 1);
         assert_eq!(matches_func[0].replacement, "timestamp()");
 
         // Test empty completion
-        let (_, empty_matches) = helper.complete("", 0, &ctx).unwrap();
+        let (_, empty_matches) = helper
+            .complete("", 0, &ctx)
+            .map_err(|e| StampError::Execution(e.to_string()))?;
         assert!(empty_matches.is_empty());
 
         // Test hint
@@ -744,6 +784,7 @@ mod tests {
 
         let hint_mid = helper.hint("var.ami_id", 3, &ctx);
         assert_eq!(hint_mid, None);
+        Ok(())
     }
 
     #[test]
@@ -799,7 +840,7 @@ mod tests {
     }
 
     #[test]
-    fn test_eval_console_expr() {
+    fn test_eval_console_expr() -> Result<(), StampError> {
         let mut ctx = Context::new();
         crate::engine::evaluator::register_stdlib(&mut ctx);
         crate::engine::evaluator::register_packer_funcs(&mut ctx);
@@ -817,28 +858,31 @@ mod tests {
         );
 
         // Variable evaluation
-        let res = eval_console_expr("var.foo", &ctx).unwrap();
+        let res = eval_console_expr("var.foo", &ctx).map_err(StampError::Execution)?;
         assert_eq!(res, "\"bar\"");
 
         // Template interpolation syntax ${...}
-        let res_interp = eval_console_expr("${var.foo}", &ctx).unwrap();
+        let res_interp = eval_console_expr("${var.foo}", &ctx).map_err(StampError::Execution)?;
         assert_eq!(res_interp, "\"bar\"");
 
         // Function call
-        let res_lower = eval_console_expr(r#"lower("WORLD")"#, &ctx).unwrap();
+        let res_lower =
+            eval_console_expr(r#"lower("WORLD")"#, &ctx).map_err(StampError::Execution)?;
         assert_eq!(res_lower, "\"world\"");
 
         // String function
-        let res_func = eval_console_expr(r#"upper("hello")"#, &ctx).unwrap();
+        let res_func =
+            eval_console_expr(r#"upper("hello")"#, &ctx).map_err(StampError::Execution)?;
         assert_eq!(res_func, "\"HELLO\"");
 
         // Empty line
-        let res_empty = eval_console_expr("   ", &ctx).unwrap();
+        let res_empty = eval_console_expr("   ", &ctx).map_err(StampError::Execution)?;
         assert_eq!(res_empty, "");
 
         // Parse error
         let res_err = eval_console_expr("1 + + *", &ctx);
         assert!(res_err.is_err());
+        Ok(())
     }
 
     #[test]
@@ -869,12 +913,9 @@ mod tests {
         assert_eq!(format_hcl_value(&val_obj), "{\n  key = 42\n}");
     }
 
-    static TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
-    fn test_prepare_console_context_and_run() {
-        let _guard = TEST_MUTEX.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap();
+    fn test_prepare_console_context_and_run() -> Result<(), StampError> {
+        let dir = tempfile::tempdir()?;
         let tmpl_file = dir.path().join("template.pkr.hcl");
         std::fs::write(
             &tmpl_file,
@@ -883,11 +924,10 @@ mod tests {
                 default = "us-east-1"
             }
         "#,
-        )
-        .unwrap();
+        )?;
 
         let var_file = dir.path().join("vars.json");
-        std::fs::write(&var_file, r#"{"extra": "val"}"#).unwrap();
+        std::fs::write(&var_file, r#"{"extra": "val"}"#)?;
 
         let mut config = ConsoleConfig::default();
         config
@@ -895,27 +935,29 @@ mod tests {
             .push(var_file.to_string_lossy().to_string());
         config.vars.insert("cmdline".to_string(), "123".to_string());
 
-        let (_ctx, vars) =
-            prepare_console_context(Some(&tmpl_file.to_string_lossy()), &config).unwrap();
+        let (_ctx, vars) = prepare_console_context(Some(&tmpl_file.to_string_lossy()), &config)?;
         assert!(vars.contains(&"var.region".to_string()));
         assert!(vars.contains(&"var.extra".to_string()));
         assert!(vars.contains(&"var.cmdline".to_string()));
 
-        // Run with STAMP_CONSOLE_MOCK_CMDS set
-        unsafe {
-            std::env::set_var("STAMP_CONSOLE_MOCK_CMDS", "exit");
-        }
-        let run_res = run_console(Some(&tmpl_file.to_string_lossy()), &config);
-        assert!(run_res.is_ok());
-        unsafe {
-            std::env::remove_var("STAMP_CONSOLE_MOCK_CMDS");
-        }
+        // Test run_console_with_io directly without env vars
+        let input = std::io::Cursor::new(b"var.region\nhelp\nexit\n");
+        let mut output = Vec::new();
+        run_console_with_io(
+            Some(&tmpl_file.to_string_lossy()),
+            &config,
+            input,
+            &mut output,
+        )?;
+        let out_str = String::from_utf8_lossy(&output);
+        assert!(out_str.contains("\"us-east-1\""));
+        assert!(out_str.contains("Available commands:"));
+        Ok(())
     }
 
     #[test]
-    fn test_mutate_variable_and_history_path() {
-        let (mut ctx, _) = prepare_console_context(None, &ConsoleConfig::default())
-            .unwrap_or_else(|e| panic!("{e:?}"));
+    fn test_mutate_variable_and_history_path() -> Result<(), StampError> {
+        let (mut ctx, _) = prepare_console_context(None, &ConsoleConfig::default())?;
         let res =
             mutate_variable(&mut ctx, "var.my_custom_key = \"mutated_value\"").unwrap_or_default();
         assert!(res.contains("var.my_custom_key"));
@@ -923,12 +965,12 @@ mod tests {
 
         assert!(mutate_variable(&mut ctx, "invalid_assignment").is_err());
         let _ = resolve_history_path();
+        Ok(())
     }
 
     #[test]
-    fn test_console_mock_cmds_and_repl_paths() {
-        let _guard = TEST_MUTEX.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+    fn test_console_mock_cmds_and_repl_paths() -> Result<(), StampError> {
+        let dir = tempfile::tempdir()?;
         let tmpl_file = dir.path().join("template.json");
         let _ = std::fs::write(
             &tmpl_file,
@@ -945,29 +987,24 @@ mod tests {
         let hcl_var_file = dir.path().join("test_extra.hcl");
         let _ = std::fs::write(&hcl_var_file, "variable \"hcl_k\" { default = \"hcl_v\" }");
 
-        let mut config = ConsoleConfig::default();
-        config.config_type = Some("json".to_string());
-        config
-            .var_files
-            .push(hcl_var_file.to_string_lossy().to_string());
+        let config = ConsoleConfig {
+            config_type: Some("json".to_string()),
+            var_files: vec![hcl_var_file.to_string_lossy().to_string()],
+            vars: HashMap::new(),
+            ..Default::default()
+        };
 
-        unsafe {
-            std::env::set_var("PKR_VAR_TEST_ENV_VAR", "env_val");
-            std::env::set_var(
-                "STAMP_CONSOLE_MOCK_CMDS",
-                "help;vars;funcs;;var.new_k = \"val\";var.env_name;exit",
-            );
-        }
+        let _env1 = crate::utils::ScopedEnvVar::set("PKR_VAR_TEST_ENV_VAR", "env_val");
+        let _env2 = crate::utils::ScopedEnvVar::set(
+            "STAMP_CONSOLE_MOCK_CMDS",
+            "help;vars;funcs;;var.new_k = \"val\";var.env_name;exit",
+        );
 
         let res = run_console(Some(&tmpl_file.to_string_lossy()), &config);
         assert!(res.is_ok());
 
-        unsafe {
-            std::env::remove_var("PKR_VAR_TEST_ENV_VAR");
-            std::env::remove_var("STAMP_CONSOLE_MOCK_CMDS");
-        }
-
         let _ = std::fs::remove_file(auto_vars);
+        Ok(())
     }
 
     #[test]

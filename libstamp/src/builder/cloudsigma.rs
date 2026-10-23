@@ -3,16 +3,15 @@
 //! Provides a REST client for `CloudSigma` (`https://{region}.cloudsigma.com/api/2.0/`),
 //! managing drive cloning, server orchestration, communicator execution, and drive snapshots.
 
+use crate::artifact::BuildArtifact;
 use crate::builder::Builder;
-use crate::communicator::ssh::{SshCommunicator, SshConfig};
-use crate::engine::hook::{BuildContext, ProvisionHook};
-use crate::engine::multistep::{Runner, StateBag, Step, StepAction};
+use crate::engine::hook::ProvisionHook;
+use crate::engine::multistep::{Runner, StateBag, Step, StepAction, StepProvision};
 use crate::error::StampError;
-use crate::types::{Port, Timeout};
+use crate::types::SecretString;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::Duration;
 
 /// Configuration for the `cloudsigma` builder.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -22,7 +21,7 @@ pub struct CloudSigmaConfig {
     /// `CloudSigma` account email / username.
     pub username: Option<String>,
     /// `CloudSigma` account password.
-    pub password: Option<String>,
+    pub password: Option<SecretString>,
     /// `CloudSigma` API endpoint URL (e.g. `https://zrh.cloudsigma.com/api/2.0/`).
     pub api_endpoint: Option<String>,
     /// Source drive UUID to clone from.
@@ -40,7 +39,7 @@ pub struct CloudSigmaConfig {
     /// SSH username for provisioner connection.
     pub ssh_username: Option<String>,
     /// SSH password.
-    pub ssh_password: Option<String>,
+    pub ssh_password: Option<SecretString>,
 }
 
 /// `CloudSigma` API 2.0 client.
@@ -51,7 +50,7 @@ pub struct CloudSigmaClient {
     /// Username.
     pub username: Option<String>,
     /// Password.
-    pub password: Option<String>,
+    pub password: Option<SecretString>,
 }
 
 /// Drive response payload.
@@ -85,7 +84,11 @@ struct SnapResp {
 impl CloudSigmaClient {
     /// Creates a new `CloudSigmaClient`.
     #[must_use]
-    pub const fn new(endpoint: String, username: Option<String>, password: Option<String>) -> Self {
+    pub const fn new(
+        endpoint: String,
+        username: Option<String>,
+        password: Option<SecretString>,
+    ) -> Self {
         Self {
             endpoint,
             username,
@@ -116,7 +119,7 @@ impl CloudSigmaClient {
 
         let mut req = client.post(&url).json(&payload);
         if let (Some(u), Some(p)) = (&self.username, &self.password) {
-            req = req.basic_auth(u, Some(p));
+            req = req.basic_auth(u, Some(p.expose()));
         }
 
         let resp = req
@@ -161,7 +164,7 @@ impl CloudSigmaClient {
 
         let mut req = client.post(&url).json(&payload);
         if let (Some(u), Some(p)) = (&self.username, &self.password) {
-            req = req.basic_auth(u, Some(p));
+            req = req.basic_auth(u, Some(p.expose()));
         }
 
         let resp = req
@@ -194,7 +197,7 @@ impl CloudSigmaClient {
         );
         let mut req = client.post(&url);
         if let (Some(u), Some(p)) = (&self.username, &self.password) {
-            req = req.basic_auth(u, Some(p));
+            req = req.basic_auth(u, Some(p.expose()));
         }
         let _ = req.send().await;
         Ok(())
@@ -213,7 +216,7 @@ impl CloudSigmaClient {
         );
         let mut req = client.post(&url);
         if let (Some(u), Some(p)) = (&self.username, &self.password) {
-            req = req.basic_auth(u, Some(p));
+            req = req.basic_auth(u, Some(p.expose()));
         }
         let _ = req.send().await;
         Ok(())
@@ -236,7 +239,7 @@ impl CloudSigmaClient {
 
         let mut req = client.post(&url).json(&payload);
         if let (Some(u), Some(p)) = (&self.username, &self.password) {
-            req = req.basic_auth(u, Some(p));
+            req = req.basic_auth(u, Some(p.expose()));
         }
 
         let resp = req
@@ -264,7 +267,7 @@ impl CloudSigmaClient {
         );
         let mut req = client.delete(&url);
         if let (Some(u), Some(p)) = (&self.username, &self.password) {
-            req = req.basic_auth(u, Some(p));
+            req = req.basic_auth(u, Some(p.expose()));
         }
         let _ = req.send().await;
         Ok(())
@@ -345,73 +348,6 @@ impl Step for StepCreateCloudSigmaInfrastructure {
             let _ = self.client.delete_server(srv_id).await;
         }
     }
-}
-
-/// Step to provision the `CloudSigma` server over SSH.
-#[derive(Clone)]
-struct StepProvisionCloudSigma {
-    /// UI reference.
-    ui: Arc<crate::engine::ui::Ui>,
-    /// Builder name.
-    name: String,
-    /// Hook.
-    hook: Arc<dyn ProvisionHook>,
-    /// SSH username.
-    ssh_username: Option<String>,
-    /// SSH password.
-    ssh_password: Option<String>,
-}
-
-#[async_trait]
-impl Step for StepProvisionCloudSigma {
-    async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
-        self.ui.say(&self.name, "Provisioning CloudSigma server...");
-        let ip = state
-            .get::<String>("server_ip")
-            .cloned()
-            .unwrap_or_else(|| "127.0.0.1".to_string());
-
-        let ssh_config = SshConfig {
-            host: ip,
-            port: Port::new(22),
-            username: self
-                .ssh_username
-                .clone()
-                .unwrap_or_else(|| "cloudsigma".to_string()),
-            password: self.ssh_password.clone(),
-            timeout: Timeout::new(Duration::from_secs(10)),
-            ..Default::default()
-        };
-
-        let comm = Arc::new(SshCommunicator::new(ssh_config));
-        let build_ctx = BuildContext {
-            build_id: self.name.clone(),
-            host: "cloudsigma".to_string(),
-            user: "cloudsigma".to_string(),
-            packer_run_uuid: "mocked-uuid".to_string(),
-            source_name: self.name.clone(),
-            source_type: "cloudsigma".to_string(),
-            ..Default::default()
-        };
-
-        if let Err(e) = self
-            .hook
-            .run_provisioners(comm.clone(), &build_ctx, self.ui.clone())
-            .await
-        {
-            self.ui
-                .error(&self.name, &format!("Provisioning failed: {e}"));
-            let _ = self
-                .hook
-                .run_error_cleanup_provisioners(comm, &build_ctx, self.ui.clone())
-                .await;
-            return Err(e);
-        }
-
-        Ok(StepAction::Continue)
-    }
-
-    async fn cleanup(&mut self, _state: &StateBag) {}
 }
 
 /// Step to stop server and capture drive snapshot in `CloudSigma`.
@@ -503,6 +439,16 @@ impl Builder for CloudSigmaBuilder {
             self.config.username.clone(),
             self.config.password.clone(),
         );
+        let ssh_user = self
+            .config
+            .ssh_username
+            .clone()
+            .unwrap_or_else(|| "cloudsigma".to_string());
+        let ssh_pass = self
+            .config
+            .ssh_password
+            .as_ref()
+            .map(|s| s.expose().to_string());
 
         let steps: Vec<Box<dyn Step>> = vec![
             Box::new(StepCreateCloudSigmaInfrastructure {
@@ -511,13 +457,12 @@ impl Builder for CloudSigmaBuilder {
                 client: client.clone(),
                 config: self.config.clone(),
             }),
-            Box::new(StepProvisionCloudSigma {
-                ui: ui.clone(),
-                name: self.name(),
-                hook,
-                ssh_username: self.config.ssh_username.clone(),
-                ssh_password: self.config.ssh_password.clone(),
-            }),
+            Box::new(
+                StepProvision::new(ui.clone(), self.name(), "cloudsigma", hook)
+                    .with_ip_key("server_ip")
+                    .with_ssh_credentials(ssh_user, ssh_pass)
+                    .with_message("Provisioning CloudSigma server..."),
+            ),
             Box::new(StepCaptureCloudSigmaSnapshot {
                 ui: ui.clone(),
                 name: self.name(),
@@ -529,28 +474,20 @@ impl Builder for CloudSigmaBuilder {
         let mut runner = Runner::new(steps);
         let mut state = StateBag::new();
 
-        match runner.run(&mut state).await {
-            Ok(()) => {
-                runner.cleanup(&state).await;
-            }
-            Err(e) => {
-                if on_error == crate::engine::packer::OnErrorStrategy::Cleanup {
-                    runner.cleanup(&state).await;
-                }
-                return Err(e);
-            }
-        }
+        runner
+            .run_with_strategy(&mut state, &self.name(), &ui, on_error)
+            .await?;
 
         let artifact_id = state
             .get::<String>("artifact_id")
             .cloned()
             .unwrap_or_default();
 
-        Ok(Box::new(crate::artifact::MockArtifact {
-            builder_id: self.name(),
-            id: artifact_id,
-            files: vec![],
-        }))
+        Ok(Box::new(BuildArtifact::with_builder(
+            self.name(),
+            artifact_id,
+            vec![],
+        )))
     }
 
     async fn cancel(&self) -> Result<(), StampError> {
@@ -559,7 +496,6 @@ impl Builder for CloudSigmaBuilder {
 }
 
 #[cfg(test)]
-#[allow(clippy::pedantic, clippy::all, for_loops_over_fallibles)]
 mod tests {
     use super::*;
 
@@ -588,7 +524,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cloudsigma_prepare() {
+    async fn test_cloudsigma_prepare() -> Result<(), StampError> {
         let mut c = CloudSigmaConfig::default();
         let b = CloudSigmaBuilder::new(c.clone());
         assert!(b.prepare().await.is_err());
@@ -603,11 +539,11 @@ mod tests {
 
         c.image_name = "new-img".to_string();
         let b = CloudSigmaBuilder::new(c);
-        assert!(b.prepare().await.is_ok());
+        b.prepare().await
     }
 
     #[tokio::test]
-    async fn test_cloudsigma_client_mocked() {
+    async fn test_cloudsigma_client_mocked() -> Result<(), StampError> {
         let mut server = mockito::Server::new_async().await;
 
         let _m_clone = server
@@ -652,41 +588,30 @@ mod tests {
         let client = CloudSigmaClient::new(
             server.url(),
             Some("user".to_string()),
-            Some("pass".to_string()),
+            Some(SecretString::new("pass")),
         );
 
-        let mut drive_id = String::new();
-        for id in client
+        let drive_id = client
             .clone_drive("drive-123", "boot", 20 * 1024 * 1024 * 1024)
-            .await
-        {
-            drive_id = id;
-        }
+            .await?;
         assert_eq!(drive_id, "drive-uuid-1");
 
-        let mut srv_id = String::new();
-        for id in client
+        let srv_id = client
             .create_server("srv", 2000, 2048 * 1024 * 1024, &drive_id)
-            .await
-        {
-            srv_id = id;
-        }
+            .await?;
         assert_eq!(srv_id, "srv-uuid-1");
 
-        assert!(client.start_server(&srv_id).await.is_ok());
-        assert!(client.stop_server(&srv_id).await.is_ok());
+        client.start_server(&srv_id).await?;
+        client.stop_server(&srv_id).await?;
 
-        let mut snap_id = String::new();
-        for id in client.snapshot_drive(&drive_id, "gold-snap").await {
-            snap_id = id;
-        }
+        let snap_id = client.snapshot_drive(&drive_id, "gold-snap").await?;
         assert_eq!(snap_id, "snap-uuid-1");
 
-        assert!(client.delete_server(&srv_id).await.is_ok());
+        client.delete_server(&srv_id).await
     }
 
     #[tokio::test]
-    async fn test_cloudsigma_client_no_auth() {
+    async fn test_cloudsigma_client_no_auth() -> Result<(), StampError> {
         let mut server = mockito::Server::new_async().await;
 
         let _m_clone = server
@@ -730,35 +655,25 @@ mod tests {
 
         let client = CloudSigmaClient::new(server.url(), None, None);
 
-        let mut drive_id = String::new();
-        for id in client.clone_drive("drive-456", "boot2", 1024).await {
-            drive_id = id;
-        }
+        let drive_id = client.clone_drive("drive-456", "boot2", 1024).await?;
         assert_eq!(drive_id, "drive-uuid-2");
 
-        let mut srv_id = String::new();
-        for id in client.create_server("srv2", 1000, 1024, &drive_id).await {
-            srv_id = id;
-        }
+        let srv_id = client.create_server("srv2", 1000, 1024, &drive_id).await?;
         assert_eq!(srv_id, "srv-uuid-2");
 
-        assert!(client.start_server(&srv_id).await.is_ok());
-        assert!(client.stop_server(&srv_id).await.is_ok());
+        client.start_server(&srv_id).await?;
+        client.stop_server(&srv_id).await?;
 
-        let mut snap_id = String::new();
-        for id in client.snapshot_drive(&drive_id, "snap2").await {
-            snap_id = id;
-        }
+        let snap_id = client.snapshot_drive(&drive_id, "snap2").await?;
         assert_eq!(snap_id, "snap-uuid-2");
 
-        assert!(client.delete_server(&srv_id).await.is_ok());
+        client.delete_server(&srv_id).await
     }
 
     #[tokio::test]
     async fn test_cloudsigma_client_errors() {
         let mut server = mockito::Server::new_async().await;
 
-        // clone_drive invalid json
         let _m_clone_bad = server
             .mock("POST", "/drives/bad/action/?action=clone")
             .with_status(200)
@@ -766,14 +681,12 @@ mod tests {
             .create_async()
             .await;
 
-        // clone_drive 500 error
         let _m_clone_500 = server
             .mock("POST", "/drives/err/action/?action=clone")
             .with_status(500)
             .create_async()
             .await;
 
-        // create_server empty objects
         let _m_srv_empty = server
             .mock("POST", "/servers/")
             .with_status(200)
@@ -787,7 +700,6 @@ mod tests {
         assert!(client.clone_drive("err", "e", 100).await.is_err());
         assert!(client.create_server("s", 100, 100, "d").await.is_err());
 
-        // Snapshot invalid json
         let _m_snap_bad = server
             .mock("POST", "/drives/bad-snap/action/?action=snapshot")
             .with_status(200)
@@ -796,7 +708,6 @@ mod tests {
             .await;
         assert!(client.snapshot_drive("bad-snap", "s").await.is_err());
 
-        // Snapshot 500 error
         let _m_snap_err = server
             .mock("POST", "/drives/err-snap/action/?action=snapshot")
             .with_status(500)
@@ -804,7 +715,6 @@ mod tests {
             .await;
         assert!(client.snapshot_drive("err-snap", "s").await.is_err());
 
-        // Create server bad json
         let mut server2 = mockito::Server::new_async().await;
         let _m_srv_bad = server2
             .mock("POST", "/servers/")
@@ -815,7 +725,6 @@ mod tests {
         let client2 = CloudSigmaClient::new(server2.url(), None, None);
         assert!(client2.create_server("s", 100, 100, "d").await.is_err());
 
-        // Network error with invalid URL
         let client_invalid = CloudSigmaClient::new("http://127.0.0.1:1".to_string(), None, None);
         assert!(client_invalid.clone_drive("d", "n", 10).await.is_err());
         assert!(
@@ -828,7 +737,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cloudsigma_builder_run_success() {
+    async fn test_cloudsigma_builder_run_success() -> Result<(), StampError> {
         let mut server = mockito::Server::new_async().await;
 
         let _m_clone = server
@@ -854,7 +763,7 @@ mod tests {
         let _m_stop = server
             .mock("POST", "/servers/srv-uuid-run/action/?action=stop")
             .with_status(200)
-            .expect(2) // once in capture step, once in cleanup
+            .expect(2)
             .create_async()
             .await;
 
@@ -874,7 +783,7 @@ mod tests {
         let config = CloudSigmaConfig {
             name: "test-cloudsigma".to_string(),
             username: Some("u".to_string()),
-            password: Some("p".to_string()),
+            password: Some(SecretString::new("p")),
             api_endpoint: Some(server.url()),
             source_drive: "src-drive".to_string(),
             vcpus: Some(4),
@@ -883,7 +792,7 @@ mod tests {
             image_name: "custom-img".to_string(),
             image_description: Some("desc".to_string()),
             ssh_username: Some("admin".to_string()),
-            ssh_password: Some("adminpass".to_string()),
+            ssh_password: Some(SecretString::new("adminpass")),
         };
         let b = CloudSigmaBuilder::new(config);
         let hook = Arc::new(crate::engine::hook::DefaultProvisionHook {
@@ -896,23 +805,20 @@ mod tests {
             crate::engine::packer::FeatureState::Disabled,
         ));
 
-        let res = b
+        let artifact = b
             .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
-            .await;
-        assert!(res.is_ok());
-        for artifact in res {
-            assert_eq!(artifact.id(), "cloudsigma:snap-uuid-run");
-            assert_eq!(artifact.builder_id(), "test-cloudsigma");
-            assert!(artifact.files().is_empty());
-            assert!(artifact.state("dummy").is_none());
-            assert!(artifact.destroy().is_ok());
-        }
+            .await?;
+        assert_eq!(artifact.id(), "cloudsigma:snap-uuid-run");
+        assert_eq!(artifact.builder_id(), "test-cloudsigma");
+        assert_eq!(artifact.files().len(), 0);
+        assert!(artifact.state("dummy").is_none());
+        artifact.destroy()?;
 
-        assert!(b.cancel().await.is_ok());
+        b.cancel().await
     }
 
     #[tokio::test]
-    async fn test_cloudsigma_builder_run_default_options() {
+    async fn test_cloudsigma_builder_run_default_options() -> Result<(), StampError> {
         let mut server = mockito::Server::new_async().await;
 
         let _m_clone = server
@@ -973,14 +879,14 @@ mod tests {
             crate::engine::packer::FeatureState::Disabled,
         ));
 
-        let res = b
+        let _ = b
             .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
-            .await;
-        assert!(res.is_ok());
+            .await?;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_cloudsigma_builder_run_failure() {
+    async fn test_cloudsigma_builder_run_failure_and_cleanups() {
         let mut server = mockito::Server::new_async().await;
 
         let _m_clone = server
@@ -998,7 +904,7 @@ mod tests {
         };
         let b = CloudSigmaBuilder::new(config);
         let hook = Arc::new(crate::engine::hook::DefaultProvisionHook {
-            provisioners: Arc::new(vec![]),
+            provisioners: Arc::new(vec![Box::new(FailingProvisioner)]),
             error_cleanup_provisioners: Arc::new(vec![]),
         });
         let ui = Arc::new(crate::engine::ui::Ui::new(
@@ -1007,7 +913,6 @@ mod tests {
             crate::engine::packer::FeatureState::Disabled,
         ));
 
-        // Test with Cleanup strategy
         let res_cleanup = b
             .run(
                 hook.clone(),
@@ -1017,87 +922,29 @@ mod tests {
             .await;
         assert!(res_cleanup.is_err());
 
-        // Test with Abort strategy
         let res_abort = b
             .run(
-                hook.clone(),
+                hook,
                 ui.clone(),
                 crate::engine::packer::OnErrorStrategy::Abort,
             )
             .await;
         assert!(res_abort.is_err());
 
-        // Test with default api_endpoint (None)
-        let b_no_endpoint = CloudSigmaBuilder::new(CloudSigmaConfig {
-            name: "fail-no-endpoint".to_string(),
-            api_endpoint: None,
-            source_drive: "src-drive".to_string(),
-            image_name: "img".to_string(),
-            ..Default::default()
-        });
-        let res_no_endpoint = b_no_endpoint
-            .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
-            .await;
-        assert!(res_no_endpoint.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_cloudsigma_provision_failure() {
-        let ui = Arc::new(crate::engine::ui::Ui::new(
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-        ));
-        let hook: Arc<dyn ProvisionHook> = Arc::new(crate::engine::hook::DefaultProvisionHook {
-            provisioners: Arc::new(vec![Box::new(FailingProvisioner)]),
-            error_cleanup_provisioners: Arc::new(vec![]),
-        });
-
-        let mut step = StepProvisionCloudSigma {
-            ui,
-            name: "test-step".to_string(),
-            hook,
-            ssh_username: None,
-            ssh_password: None,
-        };
-
-        let mut state = StateBag::new();
-        // Missing server_ip triggers fallback to "127.0.0.1"
-        let res = step.run(&mut state).await;
-        assert!(res.is_err());
-        step.cleanup(&state).await;
-
-        // When server_ip is set
-        state.put("server_ip", "192.168.1.100".to_string());
-        let res2 = step.run(&mut state).await;
-        assert!(res2.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_cloudsigma_step_cleanups_and_edges() {
-        let ui = Arc::new(crate::engine::ui::Ui::new(
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-        ));
-
         let client = CloudSigmaClient::new(
             "https://zrh.cloudsigma.com/api/2.0/".to_string(),
             None,
             None,
         );
-
-        // StepCreateCloudSigmaInfrastructure cleanup without server_id
         let mut infra_step = StepCreateCloudSigmaInfrastructure {
             ui: ui.clone(),
             name: "test-infra".to_string(),
             client: client.clone(),
             config: CloudSigmaConfig::default(),
         };
-        let mut state = StateBag::new();
+        let state = StateBag::new();
         infra_step.cleanup(&state).await;
 
-        // StepCaptureCloudSigmaSnapshot cleanup
         let mut snap_step = StepCaptureCloudSigmaSnapshot {
             ui,
             name: "test-snap".to_string(),
@@ -1105,45 +952,5 @@ mod tests {
             config: CloudSigmaConfig::default(),
         };
         snap_step.cleanup(&state).await;
-
-        // State with existing artifact_id
-        state.put("artifact_id", "custom:art-123".to_string());
-        assert_eq!(
-            state.get::<String>("artifact_id"),
-            Some(&"custom:art-123".to_string())
-        );
-    }
-
-    #[test]
-    fn test_derived_traits() {
-        let config = CloudSigmaConfig {
-            name: "test".to_string(),
-            ..Default::default()
-        };
-        assert_eq!(config.clone(), config);
-        assert_eq!(format!("{config:?}"), format!("{config:?}"));
-
-        let json = serde_json::to_string(&config).unwrap_or_default();
-        let decoded: Result<CloudSigmaConfig, _> = serde_json::from_str(&json);
-        assert!(decoded.is_ok());
-
-        let client = CloudSigmaClient::new("https://zrh".to_string(), None, None);
-        assert_eq!(format!("{client:?}"), format!("{client:?}"));
-
-        let drive_resp: Result<DriveResp, _> = serde_json::from_str(r#"{"uuid":"d-1"}"#);
-        assert_eq!(
-            drive_resp.as_ref().map(|d| d.uuid.as_str()).ok(),
-            Some("d-1")
-        );
-
-        let snap_resp: Result<SnapResp, _> = serde_json::from_str(r#"{"uuid":"s-1"}"#);
-        assert_eq!(
-            snap_resp.as_ref().map(|s| s.uuid.as_str()).ok(),
-            Some("s-1")
-        );
-
-        let server_list_resp: Result<ServerListResp, _> =
-            serde_json::from_str(r#"{"objects":[{"uuid":"srv-1"}]}"#);
-        assert!(server_list_resp.is_ok());
     }
 }

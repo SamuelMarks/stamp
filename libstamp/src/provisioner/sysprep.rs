@@ -19,8 +19,7 @@ pub struct SysprepConfig {
 impl Default for SysprepConfig {
     fn default() -> Self {
         Self {
-            command: "C:\\Windows\\System32\\Sysprep\\sysprep.exe /generalize /oobe /quit"
-                .to_string(),
+            command: r"C:\Windows\System32\Sysprep\sysprep.exe /generalize /oobe /quit".to_string(),
             unattend_xml: None,
         }
     }
@@ -29,14 +28,14 @@ impl Default for SysprepConfig {
 /// The Sysprep provisioner.
 #[derive(Debug)]
 pub struct SysprepProvisioner {
-    /// Internal documentation missing.
+    /// Configuration for the `sysprep` provisioner.
     config: SysprepConfig,
 }
 
 impl SysprepProvisioner {
     /// Creates a new `SysprepProvisioner`.
     #[must_use]
-    pub fn new(config: SysprepConfig) -> Self {
+    pub const fn new(config: SysprepConfig) -> Self {
         Self { config }
     }
 }
@@ -53,41 +52,43 @@ impl Provisioner for SysprepProvisioner {
             &format!("Running sysprep command: {}", self.config.command),
         );
 
-        if self.config.command == "fail_cmd" {
-            return Err(StampError::Execution("Sysprep failed".to_string()));
-        }
-
         let cmd = crate::communicator::Command::new(self.config.command.clone());
 
-        communicator.execute(&cmd).await?;
+        let res = communicator.execute(&cmd).await?;
+        if res.exit_code != 0 {
+            return Err(StampError::Execution(format!(
+                "Sysprep failed with exit code {}",
+                res.exit_code
+            )));
+        }
         ui.say("sysprep", "Sysprep completed");
         Ok(())
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
-
     use super::*;
     use crate::communicator::mock::MockCommunicator;
 
     #[test]
-    fn test_derived_traits() {
+    fn test_derived_traits() -> Result<(), StampError> {
         let cfg = SysprepConfig::default();
-        assert_eq!(cfg.clone(), cfg);
-        assert_eq!(format!("{cfg:?}"), format!("{cfg:?}"));
+        let cloned = cfg.clone();
+        assert_eq!(cloned, cfg);
+        assert!(format!("{cfg:?}").contains("SysprepConfig"));
 
         let prov = SysprepProvisioner::new(cfg.clone());
-        assert_eq!(format!("{prov:?}"), format!("{prov:?}"));
+        assert!(format!("{prov:?}").contains("SysprepProvisioner"));
 
-        let json = serde_json::to_string(&cfg).unwrap();
-        let deser: SysprepConfig = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&cfg)?;
+        let deser: SysprepConfig = serde_json::from_str(&json)?;
         assert_eq!(deser, cfg);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_sysprep_provision_success() {
+    async fn test_sysprep_provision_success() -> Result<(), StampError> {
         let comm = MockCommunicator::new();
         let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
             crate::engine::packer::FeatureState::Disabled,
@@ -97,8 +98,8 @@ mod tests {
         let cfg = SysprepConfig::default();
         let prov = SysprepProvisioner::new(cfg);
 
-        let res = prov.provision(&comm, ui).await;
-        assert!(res.is_ok());
+        prov.provision(&comm, ui).await?;
+        Ok(())
     }
 
     #[tokio::test]
@@ -109,8 +110,10 @@ mod tests {
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
         ));
-        let mut cfg = SysprepConfig::default();
-        cfg.command = "fail_cmd".to_string();
+        let cfg = SysprepConfig {
+            command: "fail_cmd".to_string(),
+            unattend_xml: None,
+        };
         let prov = SysprepProvisioner::new(cfg);
 
         let res = prov.provision(&comm, ui).await;

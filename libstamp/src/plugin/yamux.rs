@@ -540,12 +540,11 @@ impl YamuxSession {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_header_encode_decode_roundtrip() {
+    fn test_header_encode_decode_roundtrip() -> Result<(), StampError> {
         let header = Header::new(
             FrameType::Data,
             FrameFlags(FrameFlags::SYN | FrameFlags::ACK),
@@ -557,7 +556,7 @@ mod tests {
         assert_eq!(encoded[0], 0);
         assert_eq!(encoded[1], 0);
 
-        let decoded = Header::decode(&encoded).unwrap();
+        let decoded = Header::decode(&encoded)?;
         assert_eq!(decoded.version, YAMUX_VERSION);
         assert_eq!(decoded.frame_type, FrameType::Data);
         assert!(decoded.flags.is_syn());
@@ -566,6 +565,7 @@ mod tests {
         assert!(!decoded.flags.is_rst());
         assert_eq!(decoded.stream_id, 42);
         assert_eq!(decoded.length, 1024);
+        Ok(())
     }
 
     #[test]
@@ -594,7 +594,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_yamux_session_ping_and_stream_exchange() {
+    async fn test_yamux_session_ping_and_stream_exchange() -> Result<(), StampError> {
         let (client_io, server_io) = tokio::io::duplex(64 * 1024);
 
         let client_session =
@@ -604,42 +604,43 @@ mod tests {
             YamuxSession::new(server_io, SessionRole::Server, YamuxConfig::default());
 
         // Ping test
-        assert!(client_session.ping(12345).await.is_ok());
+        client_session.ping(12345).await?;
 
         // Open stream from client
-        let mut client_stream = client_session.open_stream().await.unwrap();
+        let mut client_stream = client_session.open_stream().await?;
         assert_eq!(client_stream.id(), 1);
 
         // Write from client
-        client_stream.write_all(b"hello yamux").await.unwrap();
+        client_stream.write_all(b"hello yamux").await?;
 
         // Server accepts stream
-        let mut server_stream = server_session.accept_stream().await.unwrap();
+        let mut server_stream = server_session.accept_stream().await?;
         assert_eq!(server_stream.id(), 1);
 
         let mut read_buf = [0u8; 32];
-        let n = server_stream.read(&mut read_buf).await.unwrap();
+        let n = server_stream.read(&mut read_buf).await?;
         assert_eq!(&read_buf[..n], b"hello yamux");
 
         // Close stream
-        client_stream.close().await.unwrap();
+        client_stream.close().await?;
 
         // Write after close returns error
         assert!(client_stream.write_all(b"fail").await.is_err());
 
         // Zero-length read
         let mut empty = [0u8; 0];
-        assert_eq!(server_stream.read(&mut empty).await.unwrap(), 0);
+        assert_eq!(server_stream.read(&mut empty).await?, 0);
 
         // Send window check
         assert_eq!(client_stream.send_window().await, INITIAL_STREAM_WINDOW);
 
         client_session.shutdown();
         server_session.shutdown();
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_yamux_stream_read_closed() {
+    async fn test_yamux_stream_read_closed() -> Result<(), StampError> {
         let (tx, rx) = mpsc::channel(1);
         let (tx_outbound, _rx_outbound) = mpsc::channel(1);
         drop(tx); // Sender dropped immediately
@@ -654,38 +655,41 @@ mod tests {
         };
 
         let mut buf = [0u8; 10];
-        let n = stream.read(&mut buf).await.unwrap();
+        let n = stream.read(&mut buf).await?;
         assert_eq!(n, 0);
+        Ok(())
     }
 
     #[test]
-    fn test_yamux_derived_traits_and_frame_types() {
-        assert_eq!(FrameType::try_from(0).unwrap(), FrameType::Data);
-        assert_eq!(FrameType::try_from(1).unwrap(), FrameType::WindowUpdate);
-        assert_eq!(FrameType::try_from(2).unwrap(), FrameType::Ping);
-        assert_eq!(FrameType::try_from(3).unwrap(), FrameType::GoAway);
+    fn test_yamux_derived_traits_and_frame_types() -> Result<(), StampError> {
+        assert_eq!(FrameType::try_from(0)?, FrameType::Data);
+        assert_eq!(FrameType::try_from(1)?, FrameType::WindowUpdate);
+        assert_eq!(FrameType::try_from(2)?, FrameType::Ping);
+        assert_eq!(FrameType::try_from(3)?, FrameType::GoAway);
         assert!(FrameType::try_from(4).is_err());
 
         let flags = FrameFlags::default();
         assert_eq!(flags.0, 0);
 
         let cfg = YamuxConfig::default();
-        let cfg2 = cfg.clone();
+        let cfg2 = cfg;
         assert_eq!(cfg.initial_stream_window, cfg2.initial_stream_window);
         assert!(format!("{cfg:?}").contains("YamuxConfig"));
 
-        assert_eq!(SessionRole::Client, SessionRole::Client);
         assert_ne!(SessionRole::Client, SessionRole::Server);
         assert_eq!(format!("{:?}", SessionRole::Server), "Server");
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_yamux_stream_partial_buffering_and_debug() {
+    async fn test_yamux_stream_partial_buffering_and_debug() -> Result<(), StampError> {
         let (tx, rx) = mpsc::channel(2);
         let (tx_outbound, _rx_outbound) = mpsc::channel(2);
 
         // Send a 10-byte chunk
-        tx.send(b"0123456789".to_vec()).await.unwrap();
+        tx.send(b"0123456789".to_vec())
+            .await
+            .map_err(|e| StampError::Execution(e.to_string()))?;
 
         let mut stream = YamuxStream {
             id: 7,
@@ -700,20 +704,21 @@ mod tests {
 
         // Read only 4 bytes, leaves 6 in read_buffer
         let mut small_buf = [0u8; 4];
-        let n1 = stream.read(&mut small_buf).await.unwrap();
+        let n1 = stream.read(&mut small_buf).await?;
         assert_eq!(n1, 4);
         assert_eq!(&small_buf, b"0123");
 
         // Read next 4 bytes from read_buffer
-        let n2 = stream.read(&mut small_buf).await.unwrap();
+        let n2 = stream.read(&mut small_buf).await?;
         assert_eq!(n2, 4);
         assert_eq!(&small_buf, b"4567");
 
         // Read final 2 bytes from read_buffer
         let mut final_buf = [0u8; 4];
-        let n3 = stream.read(&mut final_buf).await.unwrap();
+        let n3 = stream.read(&mut final_buf).await?;
         assert_eq!(n3, 2);
         assert_eq!(&final_buf[..2], b"89");
+        Ok(())
     }
 
     #[tokio::test]

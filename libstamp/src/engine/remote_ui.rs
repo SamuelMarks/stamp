@@ -205,7 +205,6 @@ impl RemoteUiClient {
 }
 
 #[cfg(test)]
-#[allow(clippy::all, clippy::pedantic)]
 mod tests {
     use super::*;
     use crate::engine::packer::FeatureState;

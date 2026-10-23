@@ -4,6 +4,7 @@
 
 use crate::data_source::DataSource;
 use crate::error::StampError;
+use crate::types::SecretString;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::fmt::Write;
@@ -16,7 +17,7 @@ pub struct ConsulKeyConfig {
     /// Consul HTTP server address. Defaults to the `CONSUL_HTTP_ADDR` environment variable or `http://127.0.0.1:8500`.
     pub address: Option<String>,
     /// Consul ACL token. Defaults to the `CONSUL_HTTP_TOKEN` environment variable.
-    pub token: Option<String>,
+    pub token: Option<SecretString>,
     /// Target datacenter.
     pub datacenter: Option<String>,
 }
@@ -44,9 +45,6 @@ impl DataSource for ConsulKeyDataSource {
         }
 
         let clean_path = self.config.path.trim_start_matches('/');
-        if clean_path.contains("error") {
-            return Err(StampError::Execution("Consul query failed".to_string()));
-        }
 
         if let Some(ref addr) = self.config.address {
             let client = reqwest::Client::new();
@@ -56,21 +54,23 @@ impl DataSource for ConsulKeyDataSource {
             }
             let mut req = client.get(&url);
             if let Some(ref tok) = self.config.token {
-                req = req.header("X-Consul-Token", tok);
+                req = req.header("X-Consul-Token", tok.expose_secret());
             }
-            if let Ok(resp) = req.send().await {
-                if !resp.status().is_success() {
-                    return Err(StampError::Execution(format!(
-                        "Consul KV request failed with status {}",
-                        resp.status()
-                    )));
-                }
-                let val_str = resp.text().await?;
-                return Ok(serde_json::json!({
-                    "key": clean_path,
-                    "value": val_str
-                }));
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| StampError::Execution(format!("Consul query failed: {e}")))?;
+            if !resp.status().is_success() {
+                return Err(StampError::Execution(format!(
+                    "Consul KV request failed with status {}",
+                    resp.status()
+                )));
             }
+            let val_str = resp.text().await?;
+            return Ok(serde_json::json!({
+                "key": clean_path,
+                "value": val_str
+            }));
         }
 
         Ok(serde_json::json!({
@@ -89,10 +89,11 @@ mod tests {
         let config = ConsulKeyConfig {
             path: "test/path".to_string(),
             address: Some("http://localhost:8500".to_string()),
-            token: Some("tok".to_string()),
+            token: Some(SecretString::new("tok".to_string())),
             datacenter: Some("dc1".to_string()),
         };
-        assert_eq!(config.clone(), config);
+        let cloned = config.clone();
+        assert_eq!(cloned.path, "test/path");
         assert!(format!("{config:?}").contains("ConsulKeyConfig"));
         let ds = ConsulKeyDataSource::new(config);
         assert!(format!("{ds:?}").contains("ConsulKeyDataSource"));
@@ -122,7 +123,7 @@ mod tests {
         let ds_live = ConsulKeyDataSource::new(ConsulKeyConfig {
             path: "/app/config".to_string(),
             address: Some(server.url()),
-            token: Some("secret-tok".to_string()),
+            token: Some(SecretString::new("secret-tok".to_string())),
             datacenter: Some("dc1".to_string()),
         });
         let live_res = ds_live.read().await?;
@@ -150,7 +151,8 @@ mod tests {
         assert!(ds_empty.read().await.is_err());
 
         let ds_err = ConsulKeyDataSource::new(ConsulKeyConfig {
-            path: "error_path".to_string(),
+            path: "some/path".to_string(),
+            address: Some("http://127.0.0.1:1".to_string()),
             ..Default::default()
         });
         assert!(ds_err.read().await.is_err());

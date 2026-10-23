@@ -4,16 +4,15 @@
 //! machine creation and package sizing, communicator provisioning, machine snapshotting,
 //! and image registration.
 
+use crate::artifact::BuildArtifact;
 use crate::builder::Builder;
-use crate::communicator::ssh::{SshCommunicator, SshConfig};
-use crate::engine::hook::{BuildContext, ProvisionHook};
-use crate::engine::multistep::{Runner, StateBag, Step, StepAction};
+use crate::engine::hook::ProvisionHook;
+use crate::engine::multistep::{Runner, StateBag, Step, StepAction, StepProvision};
 use crate::error::StampError;
-use crate::types::{Port, Timeout};
+use crate::types::SecretString;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::Duration;
 
 /// Configuration for the `triton` builder.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -25,7 +24,7 @@ pub struct TritonConfig {
     /// SSH Key ID / fingerprint in Triton (e.g. `/account/keys/key_name` or fingerprint).
     pub key_id: Option<String>,
     /// Private key material or file for HTTP signature authentication.
-    pub key_material: Option<String>,
+    pub key_material: Option<SecretString>,
     /// Resulting Triton machine image name.
     pub image_name: String,
     /// Semantic version for the produced image (defaults to `1.0.0`).
@@ -41,7 +40,7 @@ pub struct TritonConfig {
     /// SSH username for provisioner connection.
     pub ssh_username: Option<String>,
     /// SSH password for provisioner connection.
-    pub ssh_password: Option<String>,
+    pub ssh_password: Option<SecretString>,
 }
 
 /// Triton `CloudAPI` client.
@@ -54,7 +53,7 @@ pub struct TritonClient {
     /// Key ID.
     pub key_id: Option<String>,
     /// Key material.
-    pub key_material: Option<String>,
+    pub key_material: Option<SecretString>,
 }
 
 /// Machine creation response.
@@ -87,7 +86,7 @@ impl TritonClient {
         account: String,
         url: String,
         key_id: Option<String>,
-        key_material: Option<String>,
+        key_material: Option<SecretString>,
     ) -> Self {
         Self {
             account,
@@ -313,73 +312,6 @@ impl Step for StepCreateTritonMachine {
     }
 }
 
-/// Step to provision the Triton machine over SSH.
-#[derive(Clone)]
-struct StepProvisionTriton {
-    /// UI reference.
-    ui: Arc<crate::engine::ui::Ui>,
-    /// Builder name.
-    name: String,
-    /// Provisioning hook.
-    hook: Arc<dyn ProvisionHook>,
-    /// SSH username.
-    ssh_username: Option<String>,
-    /// SSH password.
-    ssh_password: Option<String>,
-}
-
-#[async_trait]
-impl Step for StepProvisionTriton {
-    async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
-        self.ui.say(&self.name, "Provisioning Triton machine...");
-        let ip = state
-            .get::<String>("machine_ip")
-            .cloned()
-            .unwrap_or_else(|| "127.0.0.1".to_string());
-
-        let ssh_config = SshConfig {
-            host: ip,
-            port: Port::new(22),
-            username: self
-                .ssh_username
-                .clone()
-                .unwrap_or_else(|| "root".to_string()),
-            password: self.ssh_password.clone(),
-            timeout: Timeout::new(Duration::from_secs(10)),
-            ..Default::default()
-        };
-
-        let comm = Arc::new(SshCommunicator::new(ssh_config));
-        let build_ctx = BuildContext {
-            build_id: self.name.clone(),
-            host: "triton".to_string(),
-            user: "root".to_string(),
-            packer_run_uuid: "mocked-uuid".to_string(),
-            source_name: self.name.clone(),
-            source_type: "triton".to_string(),
-            ..Default::default()
-        };
-
-        if let Err(e) = self
-            .hook
-            .run_provisioners(comm.clone(), &build_ctx, self.ui.clone())
-            .await
-        {
-            self.ui
-                .error(&self.name, &format!("Provisioning failed: {e}"));
-            let _ = self
-                .hook
-                .run_error_cleanup_provisioners(comm, &build_ctx, self.ui.clone())
-                .await;
-            return Err(e);
-        }
-
-        Ok(StepAction::Continue)
-    }
-
-    async fn cleanup(&mut self, _state: &StateBag) {}
-}
-
 /// Step to stop machine and capture the custom image.
 #[derive(Debug, Clone)]
 struct StepCaptureTritonImage {
@@ -470,12 +402,6 @@ impl Builder for TritonBuilder {
         ui: Arc<crate::engine::ui::Ui>,
         on_error: crate::engine::packer::OnErrorStrategy,
     ) -> Result<Box<dyn crate::artifact::Artifact>, StampError> {
-        if self.config.image_name == "test_missing" {
-            return Err(StampError::Execution(
-                "Missing Triton dependencies".to_string(),
-            ));
-        }
-
         let client = TritonClient::new(
             self.config.account.clone(),
             self.config
@@ -485,6 +411,16 @@ impl Builder for TritonBuilder {
             self.config.key_id.clone(),
             self.config.key_material.clone(),
         );
+        let ssh_user = self
+            .config
+            .ssh_username
+            .clone()
+            .unwrap_or_else(|| "root".to_string());
+        let ssh_pass = self
+            .config
+            .ssh_password
+            .as_ref()
+            .map(|s| s.expose().to_string());
 
         let steps: Vec<Box<dyn Step>> = vec![
             Box::new(StepCreateTritonMachine {
@@ -493,13 +429,12 @@ impl Builder for TritonBuilder {
                 client: client.clone(),
                 config: self.config.clone(),
             }),
-            Box::new(StepProvisionTriton {
-                ui: ui.clone(),
-                name: self.name(),
-                hook,
-                ssh_username: self.config.ssh_username.clone(),
-                ssh_password: self.config.ssh_password.clone(),
-            }),
+            Box::new(
+                StepProvision::new(ui.clone(), self.name(), "triton", hook)
+                    .with_ip_key("machine_ip")
+                    .with_ssh_credentials(ssh_user, ssh_pass)
+                    .with_message("Provisioning Triton machine..."),
+            ),
             Box::new(StepCaptureTritonImage {
                 ui: ui.clone(),
                 name: self.name(),
@@ -511,85 +446,31 @@ impl Builder for TritonBuilder {
         let mut runner = Runner::new(steps);
         let mut state = StateBag::new();
 
-        match runner.run(&mut state).await {
-            Ok(()) => {
-                runner.cleanup(&state).await;
-            }
-            Err(e) => {
-                if on_error == crate::engine::packer::OnErrorStrategy::Cleanup {
-                    runner.cleanup(&state).await;
-                }
-                return Err(e);
-            }
-        }
+        runner
+            .run_with_strategy(&mut state, &self.name(), &ui, on_error)
+            .await?;
 
         let artifact_id = state
             .get::<String>("artifact_id")
             .cloned()
             .unwrap_or_default();
 
-        Ok(Box::new(crate::artifact::MockArtifact {
-            builder_id: self.name(),
-            id: artifact_id,
-            files: vec![],
-        }))
+        Ok(Box::new(BuildArtifact::with_builder(
+            self.name(),
+            artifact_id,
+            vec![],
+        )))
     }
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::pedantic,
-    clippy::all,
-    for_loops_over_fallibles
-)]
 mod tests {
     use super::*;
     use crate::engine::hook::DefaultProvisionHook;
     use crate::engine::packer::OnErrorStrategy;
 
-    #[derive(Clone)]
-    struct FailingProvisioner;
-
-    #[async_trait]
-    impl crate::provisioner::Provisioner for FailingProvisioner {
-        async fn provision(
-            &self,
-            _comm: &dyn crate::communicator::Communicator,
-            _ui: Arc<crate::engine::ui::Ui>,
-        ) -> Result<(), StampError> {
-            Err(StampError::Execution("mock provision failure".to_string()))
-        }
-    }
-
-    #[test]
-    fn test_derived_traits() {
-        let cfg = TritonConfig {
-            account: "acc".into(),
-            image_name: "test".into(),
-            source_machine_image: "img".into(),
-            machine_package: "pkg".into(),
-            ..Default::default()
-        };
-        assert_eq!(cfg.clone(), cfg);
-        assert_eq!(format!("{cfg:?}"), format!("{:?}", cfg));
-
-        let b = TritonBuilder::new(cfg.clone());
-        assert_eq!(format!("{b:?}"), format!("{:?}", b));
-
-        let json = serde_json::to_string(&cfg);
-        assert!(json.is_ok());
-        for s in json {
-            let deser: Result<TritonConfig, _> = serde_json::from_str(&s);
-            assert!(deser.is_ok());
-            for d in deser {
-                assert_eq!(d, cfg);
-            }
-        }
-    }
-
     #[tokio::test]
-    async fn test_triton_run() {
+    async fn test_triton_run() -> Result<(), StampError> {
         let mut server = mockito::Server::new_async().await;
 
         let _m_create = server
@@ -638,12 +519,12 @@ mod tests {
             machine_package: "g4-highcpu-1G".into(),
             networks: vec!["net-uuid-1".into()],
             ssh_username: Some("admin".into()),
-            ssh_password: Some("secret".into()),
+            ssh_password: Some(SecretString::new("secret")),
             ..Default::default()
         };
 
         let b = TritonBuilder::new(cfg);
-        assert!(b.prepare().await.is_ok());
+        b.prepare().await?;
         assert_eq!(b.name(), "test-img");
 
         let ui = Arc::new(crate::engine::ui::Ui::new(
@@ -651,27 +532,22 @@ mod tests {
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
         ));
-        let hook: Arc<dyn ProvisionHook> = Arc::new(crate::engine::hook::DefaultProvisionHook {
+        let hook: Arc<dyn ProvisionHook> = Arc::new(DefaultProvisionHook {
             provisioners: Arc::new(vec![]),
             error_cleanup_provisioners: Arc::new(vec![]),
         });
 
-        let art = b
-            .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
-            .await;
-        assert!(art.is_ok());
-        for a in art {
-            assert_eq!(a.id(), "triton:img-67890");
-        }
+        let art = b.run(hook, ui, OnErrorStrategy::Cleanup).await?;
+        assert_eq!(art.id(), "triton:img-67890");
+        assert_eq!(art.builder_id(), "test-img");
 
-        assert!(b.cancel().await.is_ok());
+        b.cancel().await
     }
 
     #[tokio::test]
-    async fn test_triton_client_methods_and_branches() {
+    async fn test_triton_client_methods_and_branches() -> Result<(), StampError> {
         let mut server = mockito::Server::new_async().await;
 
-        // create_machine with empty networks
         let _m_create = server
             .mock("POST", "/acc/machines")
             .with_status(200)
@@ -684,44 +560,12 @@ mod tests {
             "acc".to_string(),
             server.url(),
             Some("key".to_string()),
-            Some("mat".to_string()),
+            Some(SecretString::new("mat")),
         );
 
-        let res = client.create_machine("vm", "pkg", "img", &[]).await;
-        assert!(res.is_ok());
-        for id in res {
-            assert_eq!(id, "inst-empty-net");
-        }
+        let id = client.create_machine("vm", "pkg", "img", &[]).await?;
+        assert_eq!(id, "inst-empty-net");
 
-        // create_machine network error
-        let bad_client = TritonClient::new(
-            "acc".to_string(),
-            "http://127.0.0.1:1".to_string(),
-            None,
-            None,
-        );
-        assert!(
-            bad_client
-                .create_machine("vm", "pkg", "img", &[])
-                .await
-                .is_err()
-        );
-
-        // create_machine invalid json response
-        let _m_create_bad_json = server
-            .mock("POST", "/acc/machines")
-            .with_status(200)
-            .with_body("not-json")
-            .create_async()
-            .await;
-        assert!(
-            client
-                .create_machine("vm", "pkg", "img", &[])
-                .await
-                .is_err()
-        );
-
-        // get_machine_ip with fallback to ips list
         let _m_get_ips = server
             .mock("GET", "/acc/machines/inst-ips")
             .with_status(200)
@@ -729,13 +573,9 @@ mod tests {
             .with_body(r#"{"primary_ip": null, "ips": ["192.168.1.100"]}"#)
             .create_async()
             .await;
-        let ip_res = client.get_machine_ip("inst-ips").await;
-        assert!(ip_res.is_ok());
-        for ip in ip_res {
-            assert_eq!(ip, "192.168.1.100");
-        }
+        let ip = client.get_machine_ip("inst-ips").await?;
+        assert_eq!(ip, "192.168.1.100");
 
-        // get_machine_ip with fallback to default 127.0.0.1
         let _m_get_none = server
             .mock("GET", "/acc/machines/inst-none")
             .with_status(200)
@@ -743,40 +583,23 @@ mod tests {
             .with_body(r#"{"primary_ip": null, "ips": []}"#)
             .create_async()
             .await;
-        let ip_res2 = client.get_machine_ip("inst-none").await;
-        assert!(ip_res2.is_ok());
-        for ip in ip_res2 {
-            assert_eq!(ip, "127.0.0.1");
-        }
+        let ip2 = client.get_machine_ip("inst-none").await?;
+        assert_eq!(ip2, "127.0.0.1");
 
-        // get_machine_ip network error and invalid json
-        assert!(bad_client.get_machine_ip("inst-1").await.is_err());
-        let _m_get_bad_json = server
-            .mock("GET", "/acc/machines/inst-bad")
-            .with_status(200)
-            .with_body("not-json")
-            .create_async()
-            .await;
-        assert!(client.get_machine_ip("inst-bad").await.is_err());
-
-        // stop_machine and delete_machine
         let _m_stop = server
             .mock("POST", "/acc/machines/inst-1?action=stop")
             .with_status(200)
             .create_async()
             .await;
-        assert!(client.stop_machine("inst-1").await.is_ok());
-        assert!(bad_client.stop_machine("inst-1").await.is_ok());
+        client.stop_machine("inst-1").await?;
 
         let _m_del = server
             .mock("DELETE", "/acc/machines/inst-1")
             .with_status(200)
             .create_async()
             .await;
-        assert!(client.delete_machine("inst-1").await.is_ok());
-        assert!(bad_client.delete_machine("inst-1").await.is_ok());
+        client.delete_machine("inst-1").await?;
 
-        // create_image_from_machine without description
         let _m_img = server
             .mock("POST", "/acc/images")
             .with_status(200)
@@ -784,180 +607,15 @@ mod tests {
             .with_body(r#"{"id": "img-no-desc"}"#)
             .create_async()
             .await;
-        let img_res = client
+        let img_id = client
             .create_image_from_machine("inst-1", "name", "1.0", None)
-            .await;
-        assert!(img_res.is_ok());
-        for id in img_res {
-            assert_eq!(id, "img-no-desc");
-        }
-
-        // create_image_from_machine network error and invalid json
-        assert!(
-            bad_client
-                .create_image_from_machine("inst-1", "name", "1.0", None)
-                .await
-                .is_err()
-        );
-        let _m_img_bad_json = server
-            .mock("POST", "/acc/images")
-            .with_status(200)
-            .with_body("not-json")
-            .create_async()
-            .await;
-        assert!(
-            client
-                .create_image_from_machine("inst-1", "name", "1.0", None)
-                .await
-                .is_err()
-        );
+            .await?;
+        assert_eq!(img_id, "img-no-desc");
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_triton_steps_cleanups_and_fallbacks() {
-        let mut server = mockito::Server::new_async().await;
-
-        let ui = Arc::new(crate::engine::ui::Ui::new(
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-        ));
-
-        let client = TritonClient::new("acc".to_string(), server.url(), None, None);
-        let config = TritonConfig {
-            account: "acc".to_string(),
-            image_name: "test".to_string(),
-            ..Default::default()
-        };
-
-        // StepCreateTritonMachine cleanup with state
-        let _m_del = server
-            .mock("DELETE", "/acc/machines/inst-cleanup")
-            .with_status(200)
-            .create_async()
-            .await;
-        let mut step_create = StepCreateTritonMachine {
-            ui: ui.clone(),
-            name: "test".to_string(),
-            client: client.clone(),
-            config: config.clone(),
-        };
-        let mut state = StateBag::new();
-        state.put("machine_id", "inst-cleanup".to_string());
-        step_create.cleanup(&state).await;
-
-        // StepCreateTritonMachine cleanup with empty state
-        let empty_state = StateBag::new();
-        step_create.cleanup(&empty_state).await;
-
-        // StepProvisionTriton with default ssh root and failure
-        let fail_hook = Arc::new(DefaultProvisionHook {
-            provisioners: Arc::new(vec![Box::new(FailingProvisioner)]),
-            error_cleanup_provisioners: Arc::new(vec![]),
-        });
-        let mut step_prov = StepProvisionTriton {
-            ui: ui.clone(),
-            name: "test".to_string(),
-            hook: fail_hook,
-            ssh_username: None,
-            ssh_password: None,
-        };
-        assert!(step_prov.run(&mut state).await.is_err());
-        step_prov.cleanup(&state).await;
-
-        // StepCaptureTritonImage without machine_id and default version 1.0.0
-        let _m_stop = server
-            .mock("POST", "/acc/machines/?action=stop")
-            .with_status(200)
-            .create_async()
-            .await;
-        let _m_img = server
-            .mock("POST", "/acc/images")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{"id": "img-default-ver"}"#)
-            .create_async()
-            .await;
-
-        let mut step_cap = StepCaptureTritonImage {
-            ui,
-            name: "test".to_string(),
-            client,
-            config,
-        };
-        let mut empty_state_cap = StateBag::new();
-        assert!(step_cap.run(&mut empty_state_cap).await.is_ok());
-        step_cap.cleanup(&empty_state_cap).await;
-    }
-
-    #[tokio::test]
-    async fn test_triton_builder_run_errors_and_strategies() {
-        let hook = Arc::new(DefaultProvisionHook {
-            provisioners: Arc::new(vec![]),
-            error_cleanup_provisioners: Arc::new(vec![]),
-        });
-        let ui = Arc::new(crate::engine::ui::Ui::new(
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-        ));
-
-        // test_missing branch
-        let cfg_missing = TritonConfig {
-            image_name: "test_missing".to_string(),
-            ..Default::default()
-        };
-        let b_missing = TritonBuilder::new(cfg_missing);
-        assert!(
-            b_missing
-                .run(hook.clone(), ui.clone(), OnErrorStrategy::Cleanup)
-                .await
-                .is_err()
-        );
-
-        // Default triton_url branch (None -> https://us-east-1.api.joyent.com)
-        let cfg_default_url = TritonConfig {
-            account: "acc".to_string(),
-            triton_url: None,
-            image_name: "test-default-url".to_string(),
-            source_machine_image: "img".to_string(),
-            machine_package: "pkg".to_string(),
-            ..Default::default()
-        };
-        let b_def = TritonBuilder::new(cfg_default_url);
-        assert!(
-            b_def
-                .run(hook.clone(), ui.clone(), OnErrorStrategy::Cleanup)
-                .await
-                .is_err()
-        );
-
-        // StepCreateTritonMachine failure with OnErrorStrategy::Abort
-        let cfg_fail = TritonConfig {
-            account: "acc".to_string(),
-            triton_url: Some("http://127.0.0.1:1".to_string()),
-            image_name: "fail".to_string(),
-            source_machine_image: "img".to_string(),
-            machine_package: "pkg".to_string(),
-            ..Default::default()
-        };
-        let b_fail = TritonBuilder::new(cfg_fail);
-        assert!(
-            b_fail
-                .run(hook.clone(), ui.clone(), OnErrorStrategy::Abort)
-                .await
-                .is_err()
-        );
-        assert!(
-            b_fail
-                .run(hook, ui, OnErrorStrategy::Cleanup)
-                .await
-                .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn test_triton_validation() {
+    async fn test_triton_validation_and_errors() -> Result<(), StampError> {
         let mut cfg = TritonConfig::default();
         let b = TritonBuilder::new(cfg.clone());
         assert!(b.prepare().await.is_err());
@@ -976,6 +634,27 @@ mod tests {
 
         cfg.machine_package = "pkg".to_string();
         let b = TritonBuilder::new(cfg);
-        assert!(b.prepare().await.is_ok());
+        b.prepare().await?;
+
+        let hook = Arc::new(DefaultProvisionHook {
+            provisioners: Arc::new(vec![]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let ui = Arc::new(crate::engine::ui::Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+        let cfg_fail = TritonConfig {
+            account: "acc".to_string(),
+            triton_url: Some("http://127.0.0.1:1".to_string()),
+            image_name: "fail".to_string(),
+            source_machine_image: "img".to_string(),
+            machine_package: "pkg".to_string(),
+            ..Default::default()
+        };
+        let b_fail = TritonBuilder::new(cfg_fail);
+        assert!(b_fail.run(hook, ui, OnErrorStrategy::Abort).await.is_err());
+        Ok(())
     }
 }

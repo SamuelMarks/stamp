@@ -1,14 +1,12 @@
 //! Implementation of the `hyperv-vmcx` builder.
 
-pub use super::hyperv_iso::{extract_hyperv_ip, run_hyperv_ps};
+pub use super::hyperv_iso::{extract_hyperv_ip, run_hyperv_ps, run_hyperv_ps_with_bin};
+use crate::artifact::BuildArtifact;
 use crate::builder::Builder;
-use crate::communicator::ssh::{SshCommunicator, SshConfig};
-use crate::engine::hook::{BuildContext, ProvisionHook};
-use crate::engine::multistep::{Runner, StateBag, Step, StepAction};
+use crate::engine::hook::ProvisionHook;
+use crate::engine::multistep::{Runner, StateBag, Step, StepAction, StepProvision};
 use crate::error::StampError;
-use crate::types::{Port, Timeout};
 use std::sync::Arc;
-use std::time::Duration;
 
 /// Configuration for the `hyperv-vmcx` builder.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -33,6 +31,8 @@ pub struct HypervVmcxConfig {
     pub headless: bool,
     /// Output directory.
     pub output_directory: Option<String>,
+    /// Optional custom PowerShell binary path for execution.
+    pub powershell_binary: Option<String>,
 }
 
 /// The `hyperv-vmcx` builder.
@@ -74,6 +74,7 @@ impl Step for StepCloneVM {
             .output_directory
             .as_deref()
             .unwrap_or("output-hyperv-vmcx");
+        let ps_bin = self.config.powershell_binary.as_deref();
 
         self.ui.say(
             &self.name,
@@ -88,29 +89,30 @@ impl Step for StepCloneVM {
             let import_script = format!(
                 "Import-VM -Path '{vmcx_path}' -Copy -GenerateNewId -DestinationPath '{output_dir}'"
             );
-            run_hyperv_ps(&import_script).await?;
+            run_hyperv_ps_with_bin(&import_script, ps_bin).await?;
         } else if let Some(ref src_name) = self.config.clone_from_vm_name {
             let export_script = format!(
                 "Export-VM -Name '{src_name}' -Path '{output_dir}'; Import-VM -Path '{output_dir}/{src_name}/Virtual Machines' -Copy -GenerateNewId"
             );
-            run_hyperv_ps(&export_script).await?;
+            run_hyperv_ps_with_bin(&export_script, ps_bin).await?;
         }
 
-        // Rename VM to target vm_name if needed
-        let _ = run_hyperv_ps(&format!("Rename-VM -Name '{vm_name}' -NewName '{vm_name}'")).await;
+        let _ = run_hyperv_ps_with_bin(
+            &format!("Rename-VM -Name '{vm_name}' -NewName '{vm_name}'"),
+            ps_bin,
+        )
+        .await;
 
-        // Connect to virtual switch
         if let Some(ref switch) = self.config.switch_name {
             let switch_script =
                 format!("Connect-VMNetworkAdapter -VMName '{vm_name}' -SwitchName '{switch}'");
-            run_hyperv_ps(&switch_script).await?;
+            run_hyperv_ps_with_bin(&switch_script, ps_bin).await?;
         }
 
-        // Configure VLAN if specified
         if let Some(vlan) = self.config.vlan_id {
             let vlan_script =
                 format!("Set-VMNetworkAdapterVlan -VMName '{vm_name}' -Access -VlanId {vlan}");
-            run_hyperv_ps(&vlan_script).await?;
+            run_hyperv_ps_with_bin(&vlan_script, ps_bin).await?;
         }
 
         Ok(StepAction::Continue)
@@ -119,7 +121,11 @@ impl Step for StepCloneVM {
     async fn cleanup(&mut self, state: &StateBag) {
         if let Some(vm_name) = state.get::<String>("vm_name") {
             self.ui.say(&self.name, &format!("Deleting VM: {vm_name}"));
-            let _ = run_hyperv_ps(&format!("Remove-VM -Name '{vm_name}' -Force")).await;
+            let _ = run_hyperv_ps_with_bin(
+                &format!("Remove-VM -Name '{vm_name}' -Force"),
+                self.config.powershell_binary.as_deref(),
+            )
+            .await;
         }
     }
 }
@@ -141,7 +147,11 @@ impl Step for StepRunVM {
         let vm_name = state.get::<String>("vm_name").cloned().unwrap_or_default();
         self.ui.say(&self.name, "Starting Hyper-V VM...");
 
-        run_hyperv_ps(&format!("Start-VM -Name '{vm_name}'")).await?;
+        run_hyperv_ps_with_bin(
+            &format!("Start-VM -Name '{vm_name}'"),
+            self.config.powershell_binary.as_deref(),
+        )
+        .await?;
 
         if let Some(ref cmds) = self.config.boot_command {
             self.ui
@@ -161,72 +171,13 @@ impl Step for StepRunVM {
         if let Some(vm_name) = state.get::<String>("vm_name") {
             self.ui
                 .say(&self.name, &format!("Powering off VM: {vm_name}"));
-            let _ = run_hyperv_ps(&format!("Stop-VM -Name '{vm_name}' -TurnOff -Force")).await;
+            let _ = run_hyperv_ps_with_bin(
+                &format!("Stop-VM -Name '{vm_name}' -TurnOff -Force"),
+                self.config.powershell_binary.as_deref(),
+            )
+            .await;
         }
     }
-}
-
-/// Step to provision the VM over SSH.
-#[derive(Clone)]
-struct StepProvision {
-    /// UI reference for terminal output.
-    ui: Arc<crate::engine::ui::Ui>,
-    /// Step or builder name.
-    name: String,
-    /// Provisioning hook.
-    hook: Arc<dyn ProvisionHook>,
-}
-
-#[async_trait::async_trait]
-impl Step for StepProvision {
-    async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
-        self.ui.say(&self.name, "Provisioning VM...");
-
-        let ip = state
-            .get::<String>("vm_ip")
-            .cloned()
-            .unwrap_or_else(|| "127.0.0.1".to_string());
-        let port = state.get::<u16>("ssh_port").copied().unwrap_or(22);
-
-        let ssh_config = SshConfig {
-            host: ip,
-            port: Port::new(port),
-            username: "packer".to_string(),
-            private_key_path: None,
-            timeout: Timeout::new(Duration::from_secs(10)),
-            ..Default::default()
-        };
-
-        let comm = Arc::new(SshCommunicator::new(ssh_config));
-
-        let build_ctx = BuildContext {
-            build_id: self.name.clone(),
-            host: "hyperv".to_string(),
-            user: "root".to_string(),
-            packer_run_uuid: "mocked-uuid".to_string(),
-            source_name: self.name.clone(),
-            source_type: "hyperv-vmcx".to_string(),
-            ..Default::default()
-        };
-
-        if let Err(e) = self
-            .hook
-            .run_provisioners(comm.clone(), &build_ctx, self.ui.clone())
-            .await
-        {
-            self.ui
-                .error(&self.name, &format!("Provisioning failed: {e}"));
-            let _ = self
-                .hook
-                .run_error_cleanup_provisioners(comm, &build_ctx, self.ui.clone())
-                .await;
-            return Err(e);
-        }
-
-        Ok(StepAction::Continue)
-    }
-
-    async fn cleanup(&mut self, _state: &StateBag) {}
 }
 
 /// Step to shut down the VM.
@@ -236,6 +187,8 @@ struct StepShutdown {
     ui: Arc<crate::engine::ui::Ui>,
     /// Step or builder name.
     name: String,
+    /// Builder configuration.
+    config: HypervVmcxConfig,
 }
 
 #[async_trait::async_trait]
@@ -243,7 +196,11 @@ impl Step for StepShutdown {
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Shutting down Hyper-V VM...");
         let vm_name = state.get::<String>("vm_name").cloned().unwrap_or_default();
-        let _ = run_hyperv_ps(&format!("Stop-VM -Name '{vm_name}' -Force")).await;
+        let _ = run_hyperv_ps_with_bin(
+            &format!("Stop-VM -Name '{vm_name}' -Force"),
+            self.config.powershell_binary.as_deref(),
+        )
+        .await;
         Ok(StepAction::Continue)
     }
 
@@ -265,11 +222,6 @@ impl Builder for HypervVmcxBuilder {
         ui: Arc<crate::engine::ui::Ui>,
         on_error: crate::engine::packer::OnErrorStrategy,
     ) -> Result<Box<dyn crate::artifact::Artifact>, StampError> {
-        if cfg!(test) && (self.config.name == "test_bad_exit" || self.config.name == "test_missing")
-        {
-            return Err(StampError::Execution("test triggered error".to_string()));
-        }
-
         let steps: Vec<Box<dyn Step>> = vec![
             Box::new(StepCloneVM {
                 ui: ui.clone(),
@@ -281,55 +233,32 @@ impl Builder for HypervVmcxBuilder {
                 name: self.name(),
                 config: self.config.clone(),
             }),
-            Box::new(StepProvision {
-                ui: ui.clone(),
-                name: self.name(),
-                hook,
-            }),
+            Box::new(
+                StepProvision::new(ui.clone(), self.name(), "hyperv-vmcx", hook)
+                    .with_ip_key("vm_ip")
+                    .with_ssh_credentials("packer", None)
+                    .with_message("Provisioning VM..."),
+            ),
             Box::new(StepShutdown {
                 ui: ui.clone(),
                 name: self.name(),
+                config: self.config.clone(),
             }),
         ];
 
         let mut runner = Runner::new(steps);
         let mut state = StateBag::new();
-        match runner.run(&mut state).await {
-            Ok(()) => {
-                runner.cleanup(&state).await;
-            }
-            Err(e) => {
-                match on_error {
-                    crate::engine::packer::OnErrorStrategy::Cleanup => {
-                        runner.cleanup(&state).await;
-                    }
-                    crate::engine::packer::OnErrorStrategy::Abort
-                    | crate::engine::packer::OnErrorStrategy::RunCleanupProvisioner => {}
-                    crate::engine::packer::OnErrorStrategy::Ask => {
-                        let msg = format!(
-                            "Build '{}' errored: {}
-Do you want to clean up? [y/N]: ",
-                            self.name(),
-                            e
-                        );
-                        if let Ok(ans) = ui.ask("stamp", &msg)
-                            && (ans == "y" || ans == "yes")
-                        {
-                            runner.cleanup(&state).await;
-                        }
-                    }
-                }
-                return Err(e);
-            }
-        }
+        runner
+            .run_with_strategy(&mut state, &self.name(), &ui, on_error)
+            .await?;
 
         let vm_name = state.get::<String>("vm_name").cloned().unwrap_or_default();
 
-        Ok(Box::new(crate::artifact::MockArtifact {
-            builder_id: self.name(),
-            id: format!("hyperv-vm:{vm_name}"),
-            files: vec![],
-        }))
+        Ok(Box::new(BuildArtifact::with_builder(
+            self.name(),
+            format!("hyperv-vm:{vm_name}"),
+            vec![],
+        )))
     }
 
     async fn cancel(&self) -> Result<(), StampError> {
@@ -342,7 +271,6 @@ Do you want to clean up? [y/N]: ",
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
     use crate::engine::hook::DefaultProvisionHook;
@@ -350,23 +278,22 @@ mod tests {
     use crate::engine::ui::Ui;
 
     #[tokio::test]
-    async fn test_hypervvmcxbuilder_run() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+    async fn test_hypervvmcxbuilder_run() -> Result<(), StampError> {
+        let temp_dir = tempfile::tempdir()?;
         let config = HypervVmcxConfig {
             name: "test-builder".to_string(),
             vm_name: Some("test-vm".to_string()),
             clone_from_vm_name: Some("base-vm".to_string()),
-            clone_from_vmcx_path: Some("C:\\VMs\\vm.vmcx".to_string()),
-            output_directory: Some("custom-output-dir".to_string()),
+            clone_from_vmcx_path: Some(r"C:\VMs\vm.vmcx".to_string()),
+            output_directory: Some(temp_dir.path().to_string_lossy().to_string()),
             switch_name: Some("Default Switch".to_string()),
             vlan_id: Some(20),
+            boot_command: Some(vec!["<enter>".to_string()]),
             ..Default::default()
         };
         let builder = HypervVmcxBuilder::new(config.clone());
 
-        assert!(builder.prepare().await.is_ok());
+        builder.prepare().await?;
         assert_eq!(builder.name(), "test-builder");
 
         let hook = Arc::new(DefaultProvisionHook {
@@ -381,41 +308,27 @@ mod tests {
 
         let res = builder
             .run(hook.clone(), ui.clone(), OnErrorStrategy::Cleanup)
-            .await;
-        assert!(
-            res.as_ref()
-                .map(|a| a.id())
-                .ok()
-                .unwrap_or_default()
-                .contains("test-vm")
-        );
-        assert!(builder.cancel().await.is_ok());
+            .await?;
+        assert!(res.id().contains("test-vm"));
+        assert_eq!(res.builder_id(), "test-builder");
+        builder.cancel().await?;
 
-        // Test default execution (output_directory None, vm_name None, ssh_port in state)
-        let b_default = HypervVmcxBuilder::new(HypervVmcxConfig {
-            name: "default-vmcx".to_string(),
+        // Test clone_from_vm_name branch
+        let b_clone_vm = HypervVmcxBuilder::new(HypervVmcxConfig {
+            name: "clone-vm-builder".to_string(),
+            clone_from_vm_name: Some("base-vm".to_string()),
+            output_directory: Some(temp_dir.path().to_string_lossy().to_string()),
             ..Default::default()
         });
-        let res_default = b_default
+        let _ = b_clone_vm
             .run(hook.clone(), ui.clone(), OnErrorStrategy::Cleanup)
-            .await;
-        assert!(res_default.is_ok());
+            .await?;
 
-        // Test individual step cleanups and execution (both without and with vm_ip/ssh_port)
-        let mut empty_state = StateBag::new();
-        let mut prov_step = StepProvision {
-            ui: ui.clone(),
-            name: "test".to_string(),
-            hook,
-        };
-        assert!(prov_step.run(&mut empty_state).await.is_ok());
+        let b_empty = HypervVmcxBuilder::new(HypervVmcxConfig::default());
+        assert!(b_empty.prepare().await.is_err());
 
+        // Test step cleanups
         let mut state = StateBag::new();
-        state.put("vm_ip", "10.0.0.1".to_string());
-        state.put("ssh_port", 2222u16);
-        assert!(prov_step.run(&mut state).await.is_ok());
-        prov_step.cleanup(&state).await;
-
         let mut clone_step = StepCloneVM {
             ui: ui.clone(),
             name: "test".to_string(),
@@ -435,19 +348,9 @@ mod tests {
         let mut shutdown_step = StepShutdown {
             ui,
             name: "test".to_string(),
+            config,
         };
         shutdown_step.cleanup(&state).await;
-    }
-
-    #[test]
-    fn test_hyperv_vmcx_derived_traits() {
-        let config1 = HypervVmcxConfig::default();
-        let config2 = config1.clone();
-        assert_eq!(config1, config2);
-        assert_eq!(format!("{config1:?}"), format!("{config2:?}"));
-
-        let b1 = HypervVmcxBuilder::new(config1);
-        let b2 = b1.clone();
-        assert_eq!(format!("{b1:?}"), format!("{b2:?}"));
+        Ok(())
     }
 }

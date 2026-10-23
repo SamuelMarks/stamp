@@ -3,158 +3,20 @@
 //! Provides API integration for managing HCP Packer buckets, build iterations,
 //! image artifacts, and release channels, as well as enforcing image revocation policies.
 
+/// Strongly-typed identifiers and domain models for HCP Packer Registry.
+pub mod models;
+
+pub use models::{
+    HcpBucketName, HcpBuildImage, HcpBuildIteration, HcpChannelName, HcpClientConfig, HcpImageId,
+    HcpIterationId, HcpOrganizationId, HcpProjectId, parse_artifact_metadata,
+};
+
 use crate::artifact::Artifact;
 use crate::error::StampError;
 use crate::template::HcpPackerRegistryConfig;
+use crate::types::SecretString;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-
-/// Strongly-typed organization identifier for HCP.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct HcpOrganizationId(pub String);
-
-impl std::fmt::Display for HcpOrganizationId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-/// Strongly-typed project identifier for HCP.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct HcpProjectId(pub String);
-
-impl std::fmt::Display for HcpProjectId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-/// Strongly-typed bucket name for HCP Packer Registry.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct HcpBucketName(pub String);
-
-impl std::fmt::Display for HcpBucketName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-/// Strongly-typed iteration identifier in an HCP bucket.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct HcpIterationId(pub String);
-
-impl std::fmt::Display for HcpIterationId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-/// Strongly-typed release channel name in an HCP bucket.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct HcpChannelName(pub String);
-
-impl std::fmt::Display for HcpChannelName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-/// Strongly-typed image identifier registered within an iteration.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct HcpImageId(pub String);
-
-impl std::fmt::Display for HcpImageId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-/// Configuration settings for connecting to the HCP Packer Registry API.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HcpClientConfig {
-    /// `OAuth2` Client ID from HCP service principal.
-    pub client_id: Option<String>,
-    /// `OAuth2` Client Secret from HCP service principal.
-    pub client_secret: Option<String>,
-    /// Direct Bearer token override, if already obtained.
-    pub auth_token: Option<String>,
-    /// Target HCP organization identifier.
-    pub organization_id: HcpOrganizationId,
-    /// Target HCP project identifier.
-    pub project_id: HcpProjectId,
-    /// Base URL for the HCP Packer API endpoint.
-    pub api_url: String,
-    /// Base URL for the HCP authentication endpoint.
-    pub auth_url: String,
-}
-
-impl Default for HcpClientConfig {
-    fn default() -> Self {
-        Self {
-            client_id: None,
-            client_secret: None,
-            auth_token: None,
-            organization_id: HcpOrganizationId("default-org".to_string()),
-            project_id: HcpProjectId("default-project".to_string()),
-            api_url: "https://api.hashicorp.cloud".to_string(),
-            auth_url: "https://auth.hashicorp.com/oauth/token".to_string(),
-        }
-    }
-}
-
-/// Details of an iteration registered in an HCP Packer bucket.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HcpBuildIteration {
-    /// The unique iteration ID assigned by HCP.
-    pub id: HcpIterationId,
-    /// The name of the bucket containing this iteration.
-    pub bucket_name: HcpBucketName,
-    /// Unique fingerprint identifying this build.
-    pub fingerprint: String,
-    /// Optional human-readable description for the iteration.
-    pub description: Option<String>,
-    /// Labels associated with this iteration.
-    #[serde(default)]
-    pub labels: HashMap<String, String>,
-    /// Status of the iteration (e.g. "BUILDING", "READY", "REVOKED").
-    #[serde(default)]
-    pub status: String,
-    /// Whether the iteration has been marked as revoked.
-    #[serde(default)]
-    pub revoked: bool,
-    /// Optional reason if the iteration was revoked.
-    pub revocation_reason: Option<String>,
-    /// RFC3339 creation timestamp.
-    #[serde(default)]
-    pub created_at: String,
-}
-
-/// Details of a cloud image registered within an HCP Packer iteration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HcpBuildImage {
-    /// Unique image record identifier in HCP.
-    pub id: HcpImageId,
-    /// Iteration ID containing this image.
-    pub iteration_id: HcpIterationId,
-    /// Component / builder name that produced this image.
-    #[serde(default)]
-    pub component_type: String,
-    /// Target cloud provider (e.g. "aws", "azure", "gcp").
-    pub cloud_provider: String,
-    /// Target cloud region (e.g. "us-east-1").
-    pub region: String,
-    /// Cloud provider image ID (e.g. "ami-12345678").
-    pub cloud_image_id: String,
-    /// Labels attached to this registered image.
-    #[serde(default)]
-    pub labels: HashMap<String, String>,
-    /// Whether this image has been revoked in HCP.
-    #[serde(default)]
-    pub revoked: bool,
-    /// Reason explaining why the image was revoked, if applicable.
-    pub revocation_reason: Option<String>,
-}
 
 /// Client for interacting with the HCP Packer Registry API.
 #[derive(Debug, Clone)]
@@ -190,8 +52,10 @@ impl HcpRegistryClient {
     /// Returns `StampError::HcpApi` if required credentials are missing.
     pub fn from_env() -> Result<Self, StampError> {
         let client_id = std::env::var("HCP_CLIENT_ID").ok();
-        let client_secret = std::env::var("HCP_CLIENT_SECRET").ok();
-        let auth_token = std::env::var("HCP_AUTH_TOKEN").ok();
+        let client_secret = std::env::var("HCP_CLIENT_SECRET")
+            .ok()
+            .map(SecretString::new);
+        let auth_token = std::env::var("HCP_AUTH_TOKEN").ok().map(SecretString::new);
 
         if auth_token.is_none() && (client_id.is_none() || client_secret.is_none()) {
             return Err(StampError::HcpApi(
@@ -227,15 +91,22 @@ impl HcpRegistryClient {
     /// Returns `StampError::HcpApi` if authentication fails or token cannot be obtained.
     pub async fn authenticate(&self) -> Result<String, StampError> {
         if let Some(token) = &self.config.auth_token {
-            return Ok(token.clone());
+            return Ok(token.expose_secret().to_string());
         }
 
         let client_id = self.config.client_id.as_deref().ok_or_else(|| {
             StampError::HcpApi("HCP client_id is required for OAuth authentication".to_string())
         })?;
-        let client_secret = self.config.client_secret.as_deref().ok_or_else(|| {
-            StampError::HcpApi("HCP client_secret is required for OAuth authentication".to_string())
-        })?;
+        let client_secret = self
+            .config
+            .client_secret
+            .as_ref()
+            .map(SecretString::expose_secret)
+            .ok_or_else(|| {
+                StampError::HcpApi(
+                    "HCP client_secret is required for OAuth authentication".to_string(),
+                )
+            })?;
 
         let body = serde_json::json!({
             "client_id": client_id,
@@ -775,55 +646,7 @@ impl HcpRegistryClient {
     }
 }
 
-/// Parses artifact identifier strings to infer cloud provider, region, and clean image ID.
-fn parse_artifact_metadata(builder_id: &str, artifact_id: &str) -> (String, String, String) {
-    if let Some((region, ami)) = artifact_id.split_once(':')
-        && ami.starts_with("ami-")
-    {
-        return ("aws".to_string(), region.to_string(), ami.to_string());
-    }
-
-    if artifact_id.starts_with("ami-") {
-        return (
-            "aws".to_string(),
-            "us-east-1".to_string(),
-            artifact_id.to_string(),
-        );
-    }
-
-    if builder_id.contains("azure") {
-        return (
-            "azure".to_string(),
-            "eastus".to_string(),
-            artifact_id.to_string(),
-        );
-    }
-
-    if builder_id.contains("google") || builder_id.contains("gce") {
-        return (
-            "gcp".to_string(),
-            "global".to_string(),
-            artifact_id.to_string(),
-        );
-    }
-
-    if builder_id.contains("docker") {
-        return (
-            "docker".to_string(),
-            "local".to_string(),
-            artifact_id.to_string(),
-        );
-    }
-
-    (
-        "unknown".to_string(),
-        "default".to_string(),
-        artifact_id.to_string(),
-    )
-}
-
 #[cfg(test)]
-#[allow(clippy::all, clippy::pedantic)]
 mod tests {
     use super::*;
 
@@ -898,7 +721,7 @@ mod tests {
 
         let build_iter = HcpBuildIteration {
             id: iter.clone(),
-            bucket_name: bucket.clone(),
+            bucket_name: bucket,
             fingerprint: "fp-1".to_string(),
             description: Some("desc".to_string()),
             labels: HashMap::from([("k".to_string(), "v".to_string())]),
@@ -914,8 +737,8 @@ mod tests {
         assert_eq!(build_iter, bi_de);
 
         let build_img = HcpBuildImage {
-            id: img.clone(),
-            iteration_id: iter.clone(),
+            id: img,
+            iteration_id: iter,
             component_type: "amazon-ebs".to_string(),
             cloud_provider: "aws".to_string(),
             region: "us-east-1".to_string(),
@@ -952,81 +775,80 @@ mod tests {
     /// Tests client initialization from environment variables across all configurations.
     #[test]
     fn test_client_from_env_all_cases() -> Result<(), StampError> {
-        let _guard = crate::utils::ENV_MUTEX.lock();
+        {
+            let _e1 = crate::utils::ScopedEnvVar::remove("HCP_CLIENT_ID");
+            let _e2 = crate::utils::ScopedEnvVar::remove("HCP_CLIENT_SECRET");
+            let _e3 = crate::utils::ScopedEnvVar::remove("HCP_AUTH_TOKEN");
+            let _e4 = crate::utils::ScopedEnvVar::remove("HCP_ORGANIZATION_ID");
+            let _e5 = crate::utils::ScopedEnvVar::remove("HCP_PROJECT_ID");
+            let _e6 = crate::utils::ScopedEnvVar::remove("HCP_API_URL");
+            let _e7 = crate::utils::ScopedEnvVar::remove("HCP_AUTH_URL");
 
-        // Clean env
-        unsafe {
-            std::env::remove_var("HCP_CLIENT_ID");
-            std::env::remove_var("HCP_CLIENT_SECRET");
-            std::env::remove_var("HCP_AUTH_TOKEN");
-            std::env::remove_var("HCP_ORGANIZATION_ID");
-            std::env::remove_var("HCP_PROJECT_ID");
-            std::env::remove_var("HCP_API_URL");
-            std::env::remove_var("HCP_AUTH_URL");
+            // 1. All missing -> error
+            assert!(HcpRegistryClient::from_env().is_err());
         }
 
-        // 1. All missing -> error
-        assert!(HcpRegistryClient::from_env().is_err());
-
-        // 2. Only client_id set -> error
-        unsafe {
-            std::env::set_var("HCP_CLIENT_ID", "my-id");
+        {
+            let _e1 = crate::utils::ScopedEnvVar::set("HCP_CLIENT_ID", "my-id");
+            let _e2 = crate::utils::ScopedEnvVar::remove("HCP_CLIENT_SECRET");
+            let _e3 = crate::utils::ScopedEnvVar::remove("HCP_AUTH_TOKEN");
+            assert!(HcpRegistryClient::from_env().is_err());
         }
-        assert!(HcpRegistryClient::from_env().is_err());
 
-        // 3. Only client_secret set -> error
-        unsafe {
-            std::env::remove_var("HCP_CLIENT_ID");
-            std::env::set_var("HCP_CLIENT_SECRET", "my-secret");
+        {
+            let _e1 = crate::utils::ScopedEnvVar::remove("HCP_CLIENT_ID");
+            let _e2 = crate::utils::ScopedEnvVar::set("HCP_CLIENT_SECRET", "my-secret");
+            let _e3 = crate::utils::ScopedEnvVar::remove("HCP_AUTH_TOKEN");
+            assert!(HcpRegistryClient::from_env().is_err());
         }
-        assert!(HcpRegistryClient::from_env().is_err());
 
-        // 4. Client id and secret set with custom org/proj/urls -> success
-        unsafe {
-            std::env::set_var("HCP_CLIENT_ID", "my-id");
-            std::env::set_var("HCP_CLIENT_SECRET", "my-secret");
-            std::env::set_var("HCP_ORGANIZATION_ID", "my-org");
-            std::env::set_var("HCP_PROJECT_ID", "my-proj");
-            std::env::set_var("HCP_API_URL", "https://custom.api");
-            std::env::set_var("HCP_AUTH_URL", "https://custom.auth");
+        {
+            let _e1 = crate::utils::ScopedEnvVar::set("HCP_CLIENT_ID", "my-id");
+            let _e2 = crate::utils::ScopedEnvVar::set("HCP_CLIENT_SECRET", "my-secret");
+            let _e3 = crate::utils::ScopedEnvVar::remove("HCP_AUTH_TOKEN");
+            let _e4 = crate::utils::ScopedEnvVar::set("HCP_ORGANIZATION_ID", "my-org");
+            let _e5 = crate::utils::ScopedEnvVar::set("HCP_PROJECT_ID", "my-proj");
+            let _e6 = crate::utils::ScopedEnvVar::set("HCP_API_URL", "https://custom.api");
+            let _e7 = crate::utils::ScopedEnvVar::set("HCP_AUTH_URL", "https://custom.auth");
+            let c = HcpRegistryClient::from_env()?;
+            assert_eq!(c.config.client_id.as_deref(), Some("my-id"));
+            assert_eq!(
+                c.config
+                    .client_secret
+                    .as_ref()
+                    .map(SecretString::expose_secret),
+                Some("my-secret")
+            );
+            assert_eq!(c.config.organization_id.0, "my-org");
+            assert_eq!(c.config.project_id.0, "my-proj");
+            assert_eq!(c.config.api_url, "https://custom.api");
+            assert_eq!(c.config.auth_url, "https://custom.auth");
         }
-        let c = HcpRegistryClient::from_env()?;
-        assert_eq!(c.config.client_id.as_deref(), Some("my-id"));
-        assert_eq!(c.config.client_secret.as_deref(), Some("my-secret"));
-        assert_eq!(c.config.organization_id.0, "my-org");
-        assert_eq!(c.config.project_id.0, "my-proj");
-        assert_eq!(c.config.api_url, "https://custom.api");
-        assert_eq!(c.config.auth_url, "https://custom.auth");
 
-        // 5. Auth token set -> success (and tests fallback closures)
-        unsafe {
-            std::env::remove_var("HCP_CLIENT_ID");
-            std::env::remove_var("HCP_CLIENT_SECRET");
-            std::env::remove_var("HCP_ORGANIZATION_ID");
-            std::env::remove_var("HCP_PROJECT_ID");
-            std::env::remove_var("HCP_API_URL");
-            std::env::remove_var("HCP_AUTH_URL");
-            std::env::set_var("HCP_AUTH_TOKEN", "bearer-token-123");
-        }
-        let c_tok = HcpRegistryClient::from_env()?;
-        assert_eq!(c_tok.config.auth_token.as_deref(), Some("bearer-token-123"));
-        assert_eq!(c_tok.config.organization_id.0, "default-org");
-        assert_eq!(c_tok.config.project_id.0, "default-project");
-        assert_eq!(c_tok.config.api_url, "https://api.hashicorp.cloud");
-        assert_eq!(
-            c_tok.config.auth_url,
-            "https://auth.hashicorp.com/oauth/token"
-        );
-
-        // Clean env
-        unsafe {
-            std::env::remove_var("HCP_CLIENT_ID");
-            std::env::remove_var("HCP_CLIENT_SECRET");
-            std::env::remove_var("HCP_AUTH_TOKEN");
-            std::env::remove_var("HCP_ORGANIZATION_ID");
-            std::env::remove_var("HCP_PROJECT_ID");
-            std::env::remove_var("HCP_API_URL");
-            std::env::remove_var("HCP_AUTH_URL");
+        {
+            let _e1 = crate::utils::ScopedEnvVar::remove("HCP_CLIENT_ID");
+            let _e2 = crate::utils::ScopedEnvVar::remove("HCP_CLIENT_SECRET");
+            let _e3 = crate::utils::ScopedEnvVar::set("HCP_AUTH_TOKEN", "bearer-token-123");
+            let _e4 = crate::utils::ScopedEnvVar::remove("HCP_ORGANIZATION_ID");
+            let _e5 = crate::utils::ScopedEnvVar::remove("HCP_PROJECT_ID");
+            let _e6 = crate::utils::ScopedEnvVar::remove("HCP_API_URL");
+            let _e7 = crate::utils::ScopedEnvVar::remove("HCP_AUTH_URL");
+            let c_tok = HcpRegistryClient::from_env()?;
+            assert_eq!(
+                c_tok
+                    .config
+                    .auth_token
+                    .as_ref()
+                    .map(SecretString::expose_secret),
+                Some("bearer-token-123")
+            );
+            assert_eq!(c_tok.config.organization_id.0, "default-org");
+            assert_eq!(c_tok.config.project_id.0, "default-project");
+            assert_eq!(c_tok.config.api_url, "https://api.hashicorp.cloud");
+            assert_eq!(
+                c_tok.config.auth_url,
+                "https://auth.hashicorp.com/oauth/token"
+            );
         }
         Ok(())
     }
@@ -1137,7 +959,7 @@ mod tests {
     async fn test_hcp_auth_flow_and_errors() -> Result<(), StampError> {
         // Direct token cached
         let cached_cfg = HcpClientConfig {
-            auth_token: Some("cached-token".to_string()),
+            auth_token: Some(SecretString::from("cached-token")),
             ..Default::default()
         };
         let cached_client = HcpRegistryClient::new(cached_cfg);
@@ -1147,7 +969,7 @@ mod tests {
         // Missing client_id
         let no_id_cfg = HcpClientConfig {
             client_id: None,
-            client_secret: Some("sec".to_string()),
+            client_secret: Some(SecretString::from("sec")),
             auth_token: None,
             ..Default::default()
         };
@@ -1171,7 +993,7 @@ mod tests {
         // Network connection error
         let net_err_cfg = HcpClientConfig {
             client_id: Some("id".to_string()),
-            client_secret: Some("sec".to_string()),
+            client_secret: Some(SecretString::from("sec")),
             auth_token: None,
             auth_url: "http://127.0.0.1:1/oauth/token".to_string(),
             ..Default::default()
@@ -1183,7 +1005,7 @@ mod tests {
 
         // Invalid Authorization header value
         let bad_token_cfg = HcpClientConfig {
-            auth_token: Some("bad\ntoken\r".to_string()),
+            auth_token: Some(SecretString::from("bad\ntoken\r")),
             ..Default::default()
         };
         let bad_client = HcpRegistryClient::new(bad_token_cfg);
@@ -1206,7 +1028,7 @@ mod tests {
         let auth_url = format!("{}/oauth/token", server.url());
         let client_401 = HcpRegistryClient::new(HcpClientConfig {
             client_id: Some("id".to_string()),
-            client_secret: Some("sec".to_string()),
+            client_secret: Some(SecretString::from("sec")),
             auth_token: None,
             auth_url: auth_url.clone(),
             ..Default::default()
@@ -1273,7 +1095,7 @@ mod tests {
             .await;
 
         let client = HcpRegistryClient::new(HcpClientConfig {
-            auth_token: Some("token".to_string()),
+            auth_token: Some(SecretString::from("token")),
             organization_id: HcpOrganizationId("org".to_string()),
             project_id: HcpProjectId("proj".to_string()),
             api_url: server.url(),
@@ -1358,7 +1180,7 @@ mod tests {
 
         // Network error
         let net_client = HcpRegistryClient::new(HcpClientConfig {
-            auth_token: Some("token".to_string()),
+            auth_token: Some(SecretString::from("token")),
             api_url: "http://127.0.0.1:1".to_string(),
             ..Default::default()
         });
@@ -1385,7 +1207,7 @@ mod tests {
             .await;
 
         let client = HcpRegistryClient::new(HcpClientConfig {
-            auth_token: Some("token".to_string()),
+            auth_token: Some(SecretString::from("token")),
             organization_id: HcpOrganizationId("org".to_string()),
             project_id: HcpProjectId("proj".to_string()),
             api_url: server.url(),
@@ -1499,7 +1321,7 @@ mod tests {
 
         // Network error
         let net_client = HcpRegistryClient::new(HcpClientConfig {
-            auth_token: Some("token".to_string()),
+            auth_token: Some(SecretString::from("token")),
             api_url: "http://127.0.0.1:1".to_string(),
             ..Default::default()
         });
@@ -1536,7 +1358,7 @@ mod tests {
             .await;
 
         let client = HcpRegistryClient::new(HcpClientConfig {
-            auth_token: Some("token".to_string()),
+            auth_token: Some(SecretString::from("token")),
             organization_id: HcpOrganizationId("org".to_string()),
             project_id: HcpProjectId("proj".to_string()),
             api_url: server.url(),
@@ -1556,7 +1378,7 @@ mod tests {
 
         // Network error
         let net_client = HcpRegistryClient::new(HcpClientConfig {
-            auth_token: Some("token".to_string()),
+            auth_token: Some(SecretString::from("token")),
             api_url: "http://127.0.0.1:1".to_string(),
             ..Default::default()
         });
@@ -1572,7 +1394,7 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
 
         let client = HcpRegistryClient::new(HcpClientConfig {
-            auth_token: Some("token".to_string()),
+            auth_token: Some(SecretString::from("token")),
             organization_id: HcpOrganizationId("org".to_string()),
             project_id: HcpProjectId("proj".to_string()),
             api_url: server.url(),
@@ -1663,7 +1485,7 @@ mod tests {
 
         // 6. Network error
         let net_client = HcpRegistryClient::new(HcpClientConfig {
-            auth_token: Some("token".to_string()),
+            auth_token: Some(SecretString::from("token")),
             api_url: "http://127.0.0.1:1".to_string(),
             ..Default::default()
         });
@@ -1682,7 +1504,7 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
 
         let client = HcpRegistryClient::new(HcpClientConfig {
-            auth_token: Some("token".to_string()),
+            auth_token: Some(SecretString::from("token")),
             organization_id: HcpOrganizationId("org".to_string()),
             project_id: HcpProjectId("proj".to_string()),
             api_url: server.url(),
@@ -1794,7 +1616,7 @@ mod tests {
 
         // 8. Network error
         let net_client = HcpRegistryClient::new(HcpClientConfig {
-            auth_token: Some("token".to_string()),
+            auth_token: Some(SecretString::from("token")),
             api_url: "http://127.0.0.1:1".to_string(),
             ..Default::default()
         });
@@ -1829,7 +1651,7 @@ mod tests {
             .await;
 
         let client = HcpRegistryClient::new(HcpClientConfig {
-            auth_token: Some("mock-token".to_string()),
+            auth_token: Some(SecretString::from("mock-token")),
             organization_id: HcpOrganizationId("org".to_string()),
             project_id: HcpProjectId("proj".to_string()),
             api_url: server.url(),
@@ -1876,7 +1698,7 @@ mod tests {
 
         // Network errors
         let net_client = HcpRegistryClient::new(HcpClientConfig {
-            auth_token: Some("token".to_string()),
+            auth_token: Some(SecretString::from("token")),
             api_url: "http://127.0.0.1:1".to_string(),
             ..Default::default()
         });
@@ -1926,7 +1748,7 @@ mod tests {
             .await;
 
         let client = HcpRegistryClient::new(HcpClientConfig {
-            auth_token: Some("mock-token".to_string()),
+            auth_token: Some(SecretString::from("mock-token")),
             organization_id: HcpOrganizationId("org".to_string()),
             project_id: HcpProjectId("proj".to_string()),
             api_url: server.url(),
@@ -1944,36 +1766,36 @@ mod tests {
         };
 
         let artifacts: Vec<Box<dyn Artifact>> = vec![
-            Box::new(crate::artifact::MockArtifact {
-                builder_id: "amazon-ebs.web".to_string(),
-                id: "us-east-1:ami-0123456789abcdef0".to_string(),
-                files: vec![],
-            }),
-            Box::new(crate::artifact::MockArtifact {
-                builder_id: "amazon-ebs".to_string(),
-                id: "ami-99998888".to_string(),
-                files: vec![],
-            }),
-            Box::new(crate::artifact::MockArtifact {
-                builder_id: "azure-arm.app".to_string(),
-                id: "azure-img-123".to_string(),
-                files: vec![],
-            }),
-            Box::new(crate::artifact::MockArtifact {
-                builder_id: "googlecompute.core".to_string(),
-                id: "gcp-img-123".to_string(),
-                files: vec![],
-            }),
-            Box::new(crate::artifact::MockArtifact {
-                builder_id: "docker".to_string(),
-                id: "sha256:1234".to_string(),
-                files: vec![],
-            }),
-            Box::new(crate::artifact::MockArtifact {
-                builder_id: "other".to_string(),
-                id: "custom-file".to_string(),
-                files: vec![],
-            }),
+            Box::new(crate::artifact::BuildArtifact::with_builder(
+                "amazon-ebs.web".to_string(),
+                "us-east-1:ami-0123456789abcdef0".to_string(),
+                vec![],
+            )),
+            Box::new(crate::artifact::BuildArtifact::with_builder(
+                "amazon-ebs".to_string(),
+                "ami-99998888".to_string(),
+                vec![],
+            )),
+            Box::new(crate::artifact::BuildArtifact::with_builder(
+                "azure-arm.app".to_string(),
+                "azure-img-123".to_string(),
+                vec![],
+            )),
+            Box::new(crate::artifact::BuildArtifact::with_builder(
+                "googlecompute.core".to_string(),
+                "gcp-img-123".to_string(),
+                vec![],
+            )),
+            Box::new(crate::artifact::BuildArtifact::with_builder(
+                "docker".to_string(),
+                "sha256:1234".to_string(),
+                vec![],
+            )),
+            Box::new(crate::artifact::BuildArtifact::with_builder(
+                "other".to_string(),
+                "custom-file".to_string(),
+                vec![],
+            )),
         ];
 
         let iter = client.push_build_artifacts(&registry, &artifacts).await?;

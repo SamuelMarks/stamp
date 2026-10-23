@@ -1,5 +1,6 @@
 //! Implementation of the `file` builder.
 
+use crate::artifact::BuildArtifact;
 use crate::builder::Builder;
 use crate::engine::hook::ProvisionHook;
 use crate::error::StampError;
@@ -66,11 +67,11 @@ impl Builder for FileBuilder {
             std::fs::write(&self.config.target, "").map_err(StampError::Io)?;
         }
 
-        Ok(Box::new(crate::artifact::MockArtifact {
-            builder_id: self.name(),
-            id: format!("{}-file", self.name()),
-            files: vec![self.config.target.clone()],
-        }))
+        Ok(Box::new(BuildArtifact::with_builder(
+            self.name(),
+            format!("{}-file", self.name()),
+            vec![self.config.target.clone()],
+        )))
     }
 
     async fn cancel(&self) -> Result<(), StampError> {
@@ -83,12 +84,6 @@ impl Builder for FileBuilder {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::pedantic,
-    clippy::all,
-    for_loops_over_fallibles
-)]
 mod tests {
     use super::*;
 
@@ -100,26 +95,25 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(config.clone(), config);
-        assert_eq!(format!("{config:?}"), format!("{:?}", config));
+        assert!(format!("{config:?}").contains("FileConfig"));
 
         let def = FileConfig::default();
         assert_eq!(def.name, "");
         assert_eq!(def.target, "");
 
         let builder = FileBuilder::new(config);
-        assert_eq!(format!("{:?}", builder.clone()), format!("{:?}", builder));
-        assert_eq!(builder.name(), "test");
+        assert!(format!("{builder:?}").contains("FileBuilder"));
+        assert_eq!(builder.clone().name(), "test");
     }
 
     #[tokio::test]
-    async fn test_prepare_success() {
+    async fn test_prepare_success() -> Result<(), StampError> {
         let builder = FileBuilder::new(FileConfig {
             name: "test".to_string(),
             target: "out.txt".to_string(),
             ..Default::default()
         });
-        let res = builder.prepare().await;
-        assert!(res.is_ok());
+        builder.prepare().await
     }
 
     #[tokio::test]
@@ -146,9 +140,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_with_content() {
-        let tmp = std::env::temp_dir().join("stamp_test_file_content.txt");
-        let target = tmp.to_str().unwrap().to_string();
+    async fn test_run_with_content() -> Result<(), StampError> {
+        let tmp_dir = tempfile::tempdir()?;
+        let tmp = tmp_dir.path().join("stamp_test_file_content.txt");
+        let target = tmp.to_string_lossy().to_string();
 
         let builder = FileBuilder::new(FileConfig {
             name: "test".to_string(),
@@ -167,33 +162,30 @@ mod tests {
             error_cleanup_provisioners: Arc::new(vec![]),
         });
 
-        let res = builder
+        let artifact = builder
             .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
-            .await;
-        assert!(res.is_ok());
-        for artifact in res {
-            assert_eq!(artifact.id(), "test-file");
-            assert_eq!(artifact.files(), vec![target.clone()]);
-        }
+            .await?;
+        assert_eq!(artifact.id(), "test-file");
+        assert_eq!(artifact.files(), vec![target]);
 
-        let read_content = std::fs::read_to_string(&tmp).unwrap();
+        let read_content = std::fs::read_to_string(&tmp)?;
         assert_eq!(read_content, "hello file builder");
-
-        let _ = std::fs::remove_file(tmp);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_run_with_source() {
-        let src = std::env::temp_dir().join("stamp_test_file_src.txt");
-        let dst = std::env::temp_dir().join("stamp_test_file_dst.txt");
+    async fn test_run_with_source() -> Result<(), StampError> {
+        let tmp_dir = tempfile::tempdir()?;
+        let src = tmp_dir.path().join("stamp_test_file_src.txt");
+        let dst = tmp_dir.path().join("stamp_test_file_dst.txt");
 
-        std::fs::write(&src, "copied data").unwrap();
+        std::fs::write(&src, "copied data")?;
 
         let builder = FileBuilder::new(FileConfig {
             name: "test".to_string(),
-            target: dst.to_str().unwrap().to_string(),
+            target: dst.to_string_lossy().to_string(),
             content: None,
-            source: Some(src.to_str().unwrap().to_string()),
+            source: Some(src.to_string_lossy().to_string()),
         });
 
         let ui = Arc::new(crate::engine::ui::Ui::new(
@@ -206,26 +198,24 @@ mod tests {
             error_cleanup_provisioners: Arc::new(vec![]),
         });
 
-        let res = builder
+        builder
             .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
-            .await;
-        assert!(res.is_ok());
+            .await?;
 
-        let read_content = std::fs::read_to_string(&dst).unwrap();
+        let read_content = std::fs::read_to_string(&dst)?;
         assert_eq!(read_content, "copied data");
-
-        let _ = std::fs::remove_file(src);
-        let _ = std::fs::remove_file(dst);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_run_empty() {
-        let tmp = std::env::temp_dir().join("stamp_test_file_empty.txt");
-        let target = tmp.to_str().unwrap().to_string();
+    async fn test_run_empty() -> Result<(), StampError> {
+        let tmp_dir = tempfile::tempdir()?;
+        let tmp = tmp_dir.path().join("stamp_test_file_empty.txt");
+        let target = tmp.to_string_lossy().to_string();
 
         let builder = FileBuilder::new(FileConfig {
             name: "test".to_string(),
-            target: target.clone(),
+            target,
             content: None,
             source: None,
         });
@@ -240,15 +230,13 @@ mod tests {
             error_cleanup_provisioners: Arc::new(vec![]),
         });
 
-        let res = builder
+        builder
             .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
-            .await;
-        assert!(res.is_ok());
+            .await?;
 
-        let read_content = std::fs::read_to_string(&tmp).unwrap();
+        let read_content = std::fs::read_to_string(&tmp)?;
         assert_eq!(read_content, "");
-
-        let _ = std::fs::remove_file(tmp);
+        Ok(())
     }
 
     #[tokio::test]
@@ -302,9 +290,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cancel() {
+    async fn test_cancel() -> Result<(), StampError> {
         let builder = FileBuilder::new(FileConfig::default());
-        let res = builder.cancel().await;
-        assert!(res.is_ok());
+        builder.cancel().await
     }
 }

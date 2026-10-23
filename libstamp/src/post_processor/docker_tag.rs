@@ -3,6 +3,7 @@
 use crate::error::StampError;
 use crate::post_processor::{Artifact, PostProcessor};
 use async_trait::async_trait;
+use std::path::PathBuf;
 
 /// Formats a complete Docker image reference from repository, tag, and optional registry.
 #[must_use]
@@ -25,6 +26,8 @@ pub struct DockerTagConfig {
     pub tags: Vec<String>,
     /// Optional registry hostname to prepend to the repository.
     pub registry: Option<String>,
+    /// Optional custom path to the `docker` executable. Defaults to `"docker"`.
+    pub docker_binary: Option<PathBuf>,
 }
 
 /// The `docker-tag` post-processor.
@@ -49,17 +52,11 @@ impl PostProcessor for DockerTagPostProcessor {
             return Err(StampError::Provisioner("Repository is empty".to_string()));
         }
 
-        let cmd_name = if cfg!(test) {
-            if artifact.id == "test_bad_exit" {
-                "false"
-            } else if artifact.id == "test_missing" {
-                "nonexistent_command_12345"
-            } else {
-                "true"
-            }
-        } else {
-            "docker"
-        };
+        let default_bin = if cfg!(test) { "true" } else { "docker" };
+        let cmd_name = self.config.docker_binary.as_ref().map_or_else(
+            || default_bin.to_string(),
+            |p| p.to_string_lossy().to_string(),
+        );
 
         let tags = if self.config.tags.is_empty() {
             vec!["latest".to_string()]
@@ -73,7 +70,7 @@ impl PostProcessor for DockerTagPostProcessor {
                 tag,
                 self.config.registry.as_deref(),
             );
-            let status = tokio::process::Command::new(cmd_name)
+            let status = tokio::process::Command::new(&cmd_name)
                 .arg("tag")
                 .arg(&artifact.id)
                 .arg(&target_ref)
@@ -83,7 +80,7 @@ impl PostProcessor for DockerTagPostProcessor {
                     StampError::Provisioner(format!("Failed to execute docker tag: {e}"))
                 })?;
 
-            if !status.success() && !cfg!(test) {
+            if !status.success() {
                 return Err(StampError::Provisioner(format!(
                     "docker tag failed with status: {status}"
                 )));
@@ -97,12 +94,6 @@ impl PostProcessor for DockerTagPostProcessor {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::pedantic,
-    clippy::all
-)]
 mod tests {
     use super::*;
 
@@ -116,40 +107,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_docker_tag_process_success() {
+    async fn test_docker_tag_process_success() -> Result<(), StampError> {
         let config = DockerTagConfig {
             repository: "my-repo".to_string(),
             tags: vec!["v1".to_string(), "v2".to_string()],
             registry: Some("docker.io".to_string()),
+            docker_binary: Some(PathBuf::from("true")),
         };
         let processor = DockerTagPostProcessor::new(config);
         let artifact = Artifact::new("sha256:1234".to_string(), vec![]);
 
-        let result = processor
-            .process(artifact)
-            .await
-            .expect("process succeeded");
+        let result = processor.process(artifact).await?;
         assert_eq!(result.id, "sha256:1234");
         assert_eq!(result.files.len(), 2);
         assert_eq!(result.files[0], "docker.io/my-repo:v1");
         assert_eq!(result.files[1], "docker.io/my-repo:v2");
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_docker_tag_process_default_latest() {
+    async fn test_docker_tag_process_default_latest() -> Result<(), StampError> {
         let config = DockerTagConfig {
             repository: "ubuntu".to_string(),
             tags: vec![],
             registry: None,
+            docker_binary: Some(PathBuf::from("true")),
         };
         let processor = DockerTagPostProcessor::new(config);
         let artifact = Artifact::new("base".to_string(), vec![]);
 
-        let result = processor
-            .process(artifact)
-            .await
-            .expect("process succeeded");
+        let result = processor.process(artifact).await?;
         assert_eq!(result.files, vec!["ubuntu:latest"]);
+        Ok(())
     }
 
     #[tokio::test]
@@ -166,6 +155,7 @@ mod tests {
             repository: "my-repo".to_string(),
             tags: vec!["v1".to_string()],
             registry: None,
+            docker_binary: Some(PathBuf::from("nonexistent_command_12345")),
         };
         let processor = DockerTagPostProcessor::new(config);
         let artifact = Artifact::new("test_missing".to_string(), vec![]);
@@ -178,10 +168,11 @@ mod tests {
             repository: "my-repo".to_string(),
             tags: vec!["v1".to_string()],
             registry: None,
+            docker_binary: Some(PathBuf::from("false")),
         };
         let processor = DockerTagPostProcessor::new(config);
         let artifact = Artifact::new("test_bad_exit".to_string(), vec![]);
-        assert!(processor.process(artifact).await.is_ok());
+        assert!(processor.process(artifact).await.is_err());
     }
 
     #[test]
@@ -190,12 +181,14 @@ mod tests {
             repository: "ubuntu".to_string(),
             tags: vec!["latest".to_string()],
             registry: None,
+            docker_binary: None,
         };
         let config2 = config1.clone();
         assert_eq!(config1, config2);
-        assert_eq!(format!("{config1:?}"), format!("{config2:?}"));
+        assert!(format!("{config1:?}").contains("DockerTagConfig"));
         let st1 = DockerTagPostProcessor::new(config1);
         let st2 = st1.clone();
-        assert_eq!(format!("{st1:?}"), format!("{st2:?}"));
+        assert!(format!("{st1:?}").contains("DockerTagPostProcessor"));
+        assert_eq!(st1.config, st2.config);
     }
 }

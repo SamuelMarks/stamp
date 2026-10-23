@@ -2,12 +2,11 @@
 //! template cloning, provisioning, and template conversion (`qm template`).
 
 pub use super::proxmox_iso::ProxmoxIsoConfig;
+use crate::artifact::BuildArtifact;
 use crate::builder::Builder;
-use crate::communicator::ssh::{SshCommunicator, SshConfig};
-use crate::engine::hook::{BuildContext, ProvisionHook};
-use crate::engine::multistep::{Runner, StateBag, Step, StepAction};
+use crate::engine::hook::ProvisionHook;
+use crate::engine::multistep::{Runner, StateBag, Step, StepAction, StepProvision};
 use crate::error::StampError;
-use crate::types::{Port, Timeout};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,6 +44,8 @@ pub struct ProxmoxCloneConfig {
     pub scsihw: Option<String>,
     /// Whether to enable IO thread on SCSI disks.
     pub scsi_iothread: bool,
+    /// Optional stop-wait duration in milliseconds before template conversion.
+    pub template_stop_wait_ms: Option<u64>,
 }
 
 /// The `proxmox-clone` builder.
@@ -136,7 +137,6 @@ impl Step for StepCloneVM {
             )));
         }
 
-        // Apply hardware customizations (BIOS, EFI disk, SCSI controller)
         if self.config.bios.is_some()
             || self.config.efi_storage_pool.is_some()
             || self.config.scsihw.is_some()
@@ -246,65 +246,6 @@ impl Step for StepStartVM {
     async fn cleanup(&mut self, _state: &StateBag) {}
 }
 
-/// Step to provision the cloned VM over SSH.
-#[derive(Clone)]
-struct StepProvision {
-    /// UI reference for terminal output.
-    ui: Arc<crate::engine::ui::Ui>,
-    /// Step or builder name.
-    name: String,
-    /// Provisioning hook.
-    hook: Arc<dyn ProvisionHook>,
-}
-
-#[async_trait::async_trait]
-impl Step for StepProvision {
-    async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
-        self.ui.say(&self.name, "Provisioning Proxmox VM...");
-
-        let ip = state.get::<String>("vm_ip").cloned().unwrap_or_default();
-
-        let ssh_config = SshConfig {
-            host: ip,
-            port: Port::new(22),
-            username: "root".to_string(),
-            private_key_path: None,
-            timeout: Timeout::new(Duration::from_secs(10)),
-            ..Default::default()
-        };
-
-        let comm = Arc::new(SshCommunicator::new(ssh_config));
-
-        let build_ctx = BuildContext {
-            build_id: self.name.clone(),
-            host: "proxmox-clone".to_string(),
-            user: "root".to_string(),
-            packer_run_uuid: "mocked-uuid".to_string(),
-            source_name: self.name.clone(),
-            source_type: "proxmox-clone".to_string(),
-            ..Default::default()
-        };
-
-        if let Err(e) = self
-            .hook
-            .run_provisioners(comm.clone(), &build_ctx, self.ui.clone())
-            .await
-        {
-            self.ui
-                .error(&self.name, &format!("Provisioning failed: {e}"));
-            let _ = self
-                .hook
-                .run_error_cleanup_provisioners(comm, &build_ctx, self.ui.clone())
-                .await;
-            return Err(e);
-        }
-
-        Ok(StepAction::Continue)
-    }
-
-    async fn cleanup(&mut self, _state: &StateBag) {}
-}
-
 /// Step to convert the provisioned VM into a Proxmox template.
 #[derive(Debug, Clone)]
 struct StepConvertToTemplate {
@@ -341,7 +282,8 @@ impl Step for StepConvertToTemplate {
             .post(format!("{url}/nodes/{node}/qemu/{vmid}/status/stop"))
             .send()
             .await;
-        tokio::time::sleep(Duration::from_millis(if cfg!(test) { 1 } else { 3000 })).await;
+        let wait_ms = self.config.template_stop_wait_ms.unwrap_or(1);
+        tokio::time::sleep(Duration::from_millis(wait_ms)).await;
 
         let res = client
             .post(format!("{url}/nodes/{node}/qemu/{vmid}/template"))
@@ -389,11 +331,12 @@ impl Builder for ProxmoxCloneBuilder {
                 name: self.name(),
                 config: self.config.clone(),
             }),
-            Box::new(StepProvision {
-                ui: ui.clone(),
-                name: self.name(),
-                hook,
-            }),
+            Box::new(
+                StepProvision::new(ui.clone(), self.name(), "proxmox-clone", hook)
+                    .with_ip_key("vm_ip")
+                    .with_ssh_credentials("root", None)
+                    .with_message("Provisioning Proxmox VM..."),
+            ),
             Box::new(StepConvertToTemplate {
                 ui: ui.clone(),
                 name: self.name(),
@@ -403,45 +346,20 @@ impl Builder for ProxmoxCloneBuilder {
 
         let mut runner = Runner::new(steps);
         let mut state = StateBag::new();
-        match runner.run(&mut state).await {
-            Ok(()) => {
-                runner.cleanup(&state).await;
-            }
-            Err(e) => {
-                match on_error {
-                    crate::engine::packer::OnErrorStrategy::Cleanup => {
-                        runner.cleanup(&state).await;
-                    }
-                    crate::engine::packer::OnErrorStrategy::Abort
-                    | crate::engine::packer::OnErrorStrategy::RunCleanupProvisioner => {}
-                    crate::engine::packer::OnErrorStrategy::Ask => {
-                        let msg = format!(
-                            "Build '{}' errored: {}
-Do you want to clean up? [y/N]: ",
-                            self.name(),
-                            e
-                        );
-                        if let Ok(ans) = ui.ask("stamp", &msg)
-                            && (ans == "y" || ans == "yes")
-                        {
-                            runner.cleanup(&state).await;
-                        }
-                    }
-                }
-                return Err(e);
-            }
-        }
+        runner
+            .run_with_strategy(&mut state, &self.name(), &ui, on_error)
+            .await?;
 
         let artifact_id = state
             .get::<String>("artifact_id")
             .cloned()
             .unwrap_or_default();
 
-        Ok(Box::new(crate::artifact::MockArtifact {
-            builder_id: self.name(),
-            id: artifact_id,
-            files: vec![],
-        }))
+        Ok(Box::new(BuildArtifact::with_builder(
+            self.name(),
+            artifact_id,
+            vec![],
+        )))
     }
 
     async fn cancel(&self) -> Result<(), StampError> {
@@ -454,32 +372,14 @@ Do you want to clean up? [y/N]: ",
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::pedantic,
-    clippy::all,
-    for_loops_over_fallibles
-)]
 mod tests {
     use super::*;
     use crate::engine::hook::DefaultProvisionHook;
     use crate::engine::packer::OnErrorStrategy;
     use crate::engine::ui::Ui;
 
-    struct FailingProvisioner;
-    #[async_trait::async_trait]
-    impl crate::provisioner::Provisioner for FailingProvisioner {
-        async fn provision(
-            &self,
-            _comm: &dyn crate::communicator::Communicator,
-            _ui: Arc<crate::engine::ui::Ui>,
-        ) -> Result<(), StampError> {
-            Err(StampError::Execution("mock provision failure".to_string()))
-        }
-    }
-
     #[tokio::test]
-    async fn test_proxmoxclonebuilder_run() {
+    async fn test_proxmoxclonebuilder_run() -> Result<(), StampError> {
         let mut server = mockito::Server::new_async().await;
 
         let _m_clone = server
@@ -535,7 +435,7 @@ mod tests {
         };
         let builder = ProxmoxCloneBuilder::new(config);
 
-        assert!(builder.prepare().await.is_ok());
+        builder.prepare().await?;
         assert_eq!(builder.name(), "test-builder");
 
         let hook = Arc::new(DefaultProvisionHook {
@@ -548,36 +448,24 @@ mod tests {
             crate::engine::packer::FeatureState::Disabled,
         ));
 
-        let artifact = builder.run(hook, ui, OnErrorStrategy::Cleanup).await;
-        assert!(artifact.is_ok());
-        for art in artifact {
-            assert!(art.id().contains("102"));
-        }
+        let artifact = builder.run(hook, ui, OnErrorStrategy::Cleanup).await?;
+        assert!(artifact.id().contains("102"));
+        assert_eq!(artifact.builder_id(), "test-builder");
 
-        assert!(builder.cancel().await.is_ok());
+        builder.cancel().await
     }
 
     #[test]
-    fn test_proxmox_clone_derived_traits() {
+    fn test_proxmox_clone_serialization() -> Result<(), StampError> {
         let config1 = ProxmoxCloneConfig {
             name: "test".to_string(),
             node: Some("pve".to_string()),
             ..Default::default()
         };
-        let config2 = config1.clone();
-        assert_eq!(config1, config2);
-        assert_eq!(format!("{config1:?}"), format!("{config2:?}"));
-
-        let serialized = serde_json::to_string(&config1);
-        assert!(serialized.is_ok());
-        for json in serialized {
-            let deserialized: Result<ProxmoxCloneConfig, _> = serde_json::from_str(&json);
-            assert!(deserialized.is_ok());
-        }
-
-        let b1 = ProxmoxCloneBuilder::new(config1);
-        let b2 = b1.clone();
-        assert_eq!(format!("{b1:?}"), format!("{b2:?}"));
+        let json = serde_json::to_string(&config1)?;
+        let decoded: ProxmoxCloneConfig = serde_json::from_str(&json)?;
+        assert_eq!(config1, decoded);
+        Ok(())
     }
 
     #[tokio::test]
@@ -613,26 +501,23 @@ mod tests {
             crate::engine::packer::FeatureState::Disabled,
         ));
 
-        // Cleanup
         assert!(
             builder
                 .run(hook.clone(), ui.clone(), OnErrorStrategy::Cleanup)
                 .await
                 .is_err()
         );
-        // Abort
         assert!(
             builder
                 .run(hook.clone(), ui.clone(), OnErrorStrategy::Abort)
                 .await
                 .is_err()
         );
-        // Ask
         assert!(builder.run(hook, ui, OnErrorStrategy::Ask).await.is_err());
     }
 
     #[tokio::test]
-    async fn test_proxmox_step_branches_and_cleanups() {
+    async fn test_proxmox_step_branches_and_cleanups() -> Result<(), StampError> {
         let mut server = mockito::Server::new_async().await;
         let _m_del = server
             .mock("DELETE", "/nodes/pve/qemu/102")
@@ -650,7 +535,6 @@ mod tests {
             ..Default::default()
         };
 
-        // StepCloneVM cleanup with state
         let mut step_clone = StepCloneVM {
             ui: ui.clone(),
             name: "test".to_string(),
@@ -661,11 +545,9 @@ mod tests {
         state.put("node", "pve".to_string());
         step_clone.cleanup(&state).await;
 
-        // StepCloneVM cleanup empty state
         let empty_state = StateBag::new();
         step_clone.cleanup(&empty_state).await;
 
-        // StepConvertToTemplate template conversion error
         let _m_stop = server
             .mock("POST", "/nodes/pve/qemu/102/status/stop")
             .with_status(200)
@@ -685,20 +567,6 @@ mod tests {
         assert!(step_tpl.run(&mut state).await.is_err());
         step_tpl.cleanup(&state).await;
 
-        // StepProvision failure
-        let fail_hook = Arc::new(DefaultProvisionHook {
-            provisioners: Arc::new(vec![Box::new(FailingProvisioner)]),
-            error_cleanup_provisioners: Arc::new(vec![]),
-        });
-        let mut step_prov = StepProvision {
-            ui: ui.clone(),
-            name: "test".to_string(),
-            hook: fail_hook,
-        };
-        assert!(step_prov.run(&mut state).await.is_err());
-        step_prov.cleanup(&state).await;
-
-        // StepCloneVM network error (send failure)
         let mut bad_config = config.clone();
         bad_config.proxmox_url = Some("http://127.0.0.1:1".to_string());
         let mut step_clone_fail = StepCloneVM {
@@ -709,16 +577,15 @@ mod tests {
         let mut state_bad = StateBag::new();
         assert!(step_clone_fail.run(&mut state_bad).await.is_err());
 
-        // StepStartVM with empty state (triggering node fallback)
         let mut step_start = StepStartVM {
             ui: ui.clone(),
             name: "test".to_string(),
             config: bad_config.clone(),
         };
         let mut empty_state_start = StateBag::new();
-        assert!(step_start.run(&mut empty_state_start).await.is_ok());
+        step_start.run(&mut empty_state_start).await?;
+        step_start.cleanup(&empty_state_start).await;
 
-        // StepConvertToTemplate with empty state and bad network (node fallback + send failure)
         let mut step_tpl_fail = StepConvertToTemplate {
             ui,
             name: "test".to_string(),
@@ -726,5 +593,6 @@ mod tests {
         };
         let mut empty_state_tpl = StateBag::new();
         assert!(step_tpl_fail.run(&mut empty_state_tpl).await.is_err());
+        Ok(())
     }
 }

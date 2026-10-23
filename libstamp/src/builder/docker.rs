@@ -36,6 +36,20 @@ pub struct DockerConfig {
     pub tags: Vec<String>,
     /// Whether to push the tagged images to the remote repository.
     pub push: bool,
+    /// Optional custom path to the `docker` executable.
+    pub docker_binary: Option<std::path::PathBuf>,
+}
+
+impl DockerConfig {
+    /// Resolves the Docker executable path from config or environment.
+    #[must_use]
+    pub fn docker_bin(&self) -> String {
+        self.docker_binary
+            .as_ref()
+            .map_or_else(crate::utils::docker_executable, |p| {
+                p.to_string_lossy().to_string()
+            })
+    }
 }
 
 /// The `docker` builder.
@@ -73,7 +87,7 @@ impl Step for StepRunContainer {
         );
 
         // Pull image
-        let pull_status = match tokio::process::Command::new(crate::utils::docker_executable())
+        let pull_status = match tokio::process::Command::new(self.config.docker_bin())
             .arg("pull")
             .arg(&self.config.image)
             .status()
@@ -87,12 +101,12 @@ impl Step for StepRunContainer {
             }
         };
 
-        if !pull_status.success() && (!cfg!(test) || self.config.name == "test_pull_failure") {
+        if !pull_status.success() {
             return Err(StampError::Execution("Docker pull failed".to_string()));
         }
 
         // Run container in background (detached)
-        let mut cmd = tokio::process::Command::new(crate::utils::docker_executable());
+        let mut cmd = tokio::process::Command::new(self.config.docker_bin());
         cmd.arg("run").arg("-d");
 
         // Expose SSH port to random host port to allow provisioning (simulated here)
@@ -119,11 +133,7 @@ impl Step for StepRunContainer {
             }
         };
 
-        if !output.status.success()
-            && (!cfg!(test)
-                || self.config.name == "test_run_failure"
-                || self.config.name == "test_commit_failure")
-        {
+        if !output.status.success() {
             return Err(StampError::Execution(format!(
                 "Docker run failed: {}",
                 String::from_utf8_lossy(&output.stderr)
@@ -136,7 +146,7 @@ impl Step for StepRunContainer {
         state.put("container_id", container_id.clone());
 
         // Inspect to get IP
-        let inspect_output = match tokio::process::Command::new(crate::utils::docker_executable())
+        let inspect_output = match tokio::process::Command::new(self.config.docker_bin())
             .arg("inspect")
             .arg("-f")
             .arg("{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}")
@@ -167,7 +177,7 @@ impl Step for StepRunContainer {
                 &format!("Killing and removing container: {container_id}"),
             );
 
-            let _ = tokio::process::Command::new(crate::utils::docker_executable())
+            let _ = tokio::process::Command::new(self.config.docker_bin())
                 .arg("rm")
                 .arg("-f")
                 .arg(container_id)
@@ -178,13 +188,13 @@ impl Step for StepRunContainer {
 }
 
 // Step: Provision
-/// Internal documentation missing.
+/// Step to provision the running Docker container.
 struct StepProvision {
-    /// Internal documentation missing.
+    /// UI reference for terminal output.
     ui: Arc<crate::engine::ui::Ui>,
-    /// Internal documentation missing.
+    /// Builder name.
     name: String,
-    /// Internal documentation missing.
+    /// Provisioning hook.
     hook: Arc<dyn ProvisionHook>,
 }
 
@@ -227,7 +237,7 @@ impl Step for StepProvision {
             build_id: self.name.clone(),
             host: "docker".to_string(),
             user: "docker".to_string(),
-            packer_run_uuid: "mocked-uuid".to_string(),
+            packer_run_uuid: uuid::Uuid::new_v4().to_string(),
             source_name: self.name.clone(),
             source_type: "docker".to_string(),
             ..Default::default()
@@ -260,13 +270,13 @@ impl Step for StepProvision {
 }
 
 // Step: Commit Container
-/// Internal documentation missing.
+/// Step to commit the Docker container into an image.
 struct StepCommitContainer {
-    /// Internal documentation missing.
+    /// UI reference for terminal output.
     ui: Arc<crate::engine::ui::Ui>,
-    /// Internal documentation missing.
+    /// Builder name.
     name: String,
-    /// Internal documentation missing.
+    /// Docker builder configuration.
     config: DockerConfig,
 }
 
@@ -284,7 +294,7 @@ impl Step for StepCommitContainer {
         self.ui
             .say(&self.name, &format!("Committing container: {container_id}"));
 
-        let mut cmd = tokio::process::Command::new(crate::utils::docker_executable());
+        let mut cmd = tokio::process::Command::new(self.config.docker_bin());
         cmd.arg("commit");
         for change in &self.config.changes {
             cmd.arg("--change").arg(change);
@@ -302,11 +312,7 @@ impl Step for StepCommitContainer {
             .await
             .map_err(|e| StampError::Execution(format!("Failed to execute docker commit: {e}")))?;
 
-        if !output.status.success()
-            && (!cfg!(test)
-                || self.config.name == "test_run_failure"
-                || self.config.name == "test_commit_failure")
-        {
+        if !output.status.success() {
             return Err(StampError::Execution(format!(
                 "Docker commit failed: {}",
                 String::from_utf8_lossy(&output.stderr)
@@ -325,13 +331,13 @@ impl Step for StepCommitContainer {
 }
 
 // Step: Export Container
-/// Internal documentation missing.
+/// Step to export the Docker container filesystem to a tar archive.
 struct StepExportContainer {
-    /// Internal documentation missing.
+    /// UI reference for terminal output.
     ui: Arc<crate::engine::ui::Ui>,
-    /// Internal documentation missing.
+    /// Builder name.
     name: String,
-    /// Internal documentation missing.
+    /// Docker builder configuration.
     config: DockerConfig,
 }
 
@@ -348,7 +354,7 @@ impl Step for StepExportContainer {
                 &format!("Exporting container {container_id} to {path}"),
             );
 
-            let status = tokio::process::Command::new(crate::utils::docker_executable())
+            let status = tokio::process::Command::new(self.config.docker_bin())
                 .arg("export")
                 .arg("-o")
                 .arg(path)
@@ -359,7 +365,7 @@ impl Step for StepExportContainer {
                     StampError::Execution(format!("Failed to execute docker export: {e}"))
                 })?;
 
-            if !status.success() && (!cfg!(test) || self.config.name == "test_export_failure") {
+            if !status.success() {
                 return Err(StampError::Execution("Docker export failed".to_string()));
             }
         }
@@ -397,7 +403,7 @@ impl Step for StepFlattenContainer {
             &format!("Flattening exported container from {export_path}..."),
         );
 
-        let mut cmd = tokio::process::Command::new(crate::utils::docker_executable());
+        let mut cmd = tokio::process::Command::new(self.config.docker_bin());
         cmd.arg("import");
         for change in &self.config.changes {
             cmd.arg("--change").arg(change);
@@ -463,7 +469,7 @@ impl Step for StepPushContainer {
                 &format!("Tagging image {image_id} as {full_tag}..."),
             );
 
-            let status = tokio::process::Command::new(crate::utils::docker_executable())
+            let status = tokio::process::Command::new(self.config.docker_bin())
                 .arg("tag")
                 .arg(&image_id)
                 .arg(&full_tag)
@@ -482,7 +488,7 @@ impl Step for StepPushContainer {
                     &self.name,
                     &format!("Pushing image {full_tag} to registry..."),
                 );
-                let push_status = tokio::process::Command::new(crate::utils::docker_executable())
+                let push_status = tokio::process::Command::new(self.config.docker_bin())
                     .arg("push")
                     .arg(&full_tag)
                     .status()
@@ -523,11 +529,6 @@ impl Builder for DockerBuilder {
         ui: Arc<crate::engine::ui::Ui>,
         on_error: crate::engine::packer::OnErrorStrategy,
     ) -> Result<Box<dyn crate::artifact::Artifact>, StampError> {
-        if cfg!(test) && (self.config.name == "test_bad_exit" || self.config.name == "test_missing")
-        {
-            return Err(StampError::Execution("test triggered error".to_string()));
-        }
-
         let steps: Vec<Box<dyn Step>> = vec![
             Box::new(StepRunContainer {
                 ui: ui.clone(),
@@ -561,36 +562,13 @@ impl Builder for DockerBuilder {
             }),
         ];
 
-        let mut runner = Runner::new(steps);
+        let mut runner = Runner::new(steps)
+            .with_ui(ui.clone())
+            .with_on_error(on_error.clone());
         let mut state = StateBag::new();
-        match runner.run(&mut state).await {
-            Ok(()) => {
-                runner.cleanup(&state).await;
-            }
-            Err(e) => {
-                match on_error {
-                    crate::engine::packer::OnErrorStrategy::Cleanup => {
-                        runner.cleanup(&state).await;
-                    }
-                    crate::engine::packer::OnErrorStrategy::Abort
-                    | crate::engine::packer::OnErrorStrategy::RunCleanupProvisioner => {}
-                    crate::engine::packer::OnErrorStrategy::Ask => {
-                        let msg = format!(
-                            "Build '{}' errored: {}
-Do you want to clean up? [y/N]: ",
-                            self.name(),
-                            e
-                        );
-                        if let Ok(ans) = ui.ask("stamp", &msg)
-                            && (ans == "y" || ans == "yes")
-                        {
-                            runner.cleanup(&state).await;
-                        }
-                    }
-                }
-                return Err(e);
-            }
-        }
+        runner
+            .run_with_strategy(&mut state, &self.name(), &ui, on_error)
+            .await?;
 
         let mut artifact_id = String::new();
         if self.config.commit || self.config.flatten {
@@ -615,11 +593,11 @@ Do you want to clean up? [y/N]: ",
             }
         }
 
-        Ok(Box::new(crate::artifact::MockArtifact {
-            builder_id: self.name(),
-            id: artifact_id,
-            files: vec![],
-        }))
+        Ok(Box::new(crate::artifact::BuildArtifact::with_builder(
+            self.name(),
+            artifact_id,
+            vec![],
+        )))
     }
 
     async fn cancel(&self) -> Result<(), StampError> {
@@ -632,7 +610,6 @@ Do you want to clean up? [y/N]: ",
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -644,10 +621,11 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(config.clone(), config);
-        assert_eq!(format!("{config:?}"), format!("{:?}", config));
+        assert!(format!("{config:?}").contains("DockerConfig"));
 
         let builder = DockerBuilder::new(config);
-        assert_eq!(format!("{:?}", builder.clone()), format!("{:?}", builder));
+        assert!(format!("{builder:?}").contains("DockerBuilder"));
+        assert_eq!(builder.clone().name(), "test");
     }
 
     #[tokio::test]
@@ -690,36 +668,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_docker_run_mocked() -> Result<(), crate::error::StampError> {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        // Create a mocked docker executable
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "mock_docker_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_micros()
-        ));
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("mock_docker");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let script = r#"#!/bin/sh
-if [ "$1" = "commit" ]; then
-    echo "mocked-image-id"
-elif [ "$1" = "run" ]; then
-    echo "mocked-container-id"
-fi
-exit 0
-"#;
-            std::fs::write(&path, script).unwrap_or_default();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .unwrap_or_default();
-            unsafe {
-                std::env::set_var("DOCKER_EXECUTABLE", path.to_str().unwrap_or(""));
-            }
+            let script = "#!/bin/sh\nif [ \"$1\" = \"commit\" ]; then\n    echo \"mocked-image-id\"\nelif [ \"$1\" = \"run\" ]; then\n    echo \"mocked-container-id\"\nfi\nexit 0\n";
+            std::fs::write(&path, script)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
         }
 
         let config = DockerConfig {
@@ -735,6 +691,7 @@ exit 0
             changes: vec!["EXPOSE 80".to_string()],
             author: Some("Stamp".to_string()),
             message: Some("Committed by stamp".to_string()),
+            docker_binary: Some(path),
         };
         let builder = DockerBuilder::new(config);
         let artifact = builder
@@ -752,14 +709,6 @@ exit 0
             )
             .await?;
 
-        #[cfg(unix)]
-        {
-            unsafe {
-                std::env::remove_var("DOCKER_EXECUTABLE");
-            }
-            let _ = std::fs::remove_file(&path);
-        }
-
         assert!(artifact.id().contains("image:mocked-image-id"));
         assert!(artifact.id().contains("export:out.tar"));
         assert!(artifact.id().contains("repo:myorg/myimage:v1"));
@@ -768,34 +717,14 @@ exit 0
 
     #[tokio::test]
     async fn test_docker_flatten_and_push() -> Result<(), crate::error::StampError> {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "mock_docker_flatten_{}",
-            uuid::Uuid::new_v4().simple()
-        ));
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("mock_docker_flatten");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let script = r#"#!/bin/sh
-if [ "$1" = "run" ]; then
-    echo "mocked-container-id"
-elif [ "$1" = "export" ]; then
-    exit 0
-elif [ "$1" = "import" ]; then
-    echo "mock-flattened-image"
-fi
-exit 0
-"#;
-            std::fs::write(&path, script).unwrap_or_default();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .unwrap_or_default();
-            unsafe {
-                std::env::set_var("DOCKER_EXECUTABLE", path.to_str().unwrap_or(""));
-            }
+            let script = "#!/bin/sh\nif [ \"$1\" = \"run\" ]; then\n    echo \"mocked-container-id\"\nelif [ \"$1\" = \"export\" ]; then\n    exit 0\nelif [ \"$1\" = \"import\" ]; then\n    echo \"mock-flattened-image\"\nfi\nexit 0\n";
+            std::fs::write(&path, script)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
         }
 
         let config = DockerConfig {
@@ -808,6 +737,7 @@ exit 0
             tags: vec!["latest".to_string(), "1.0".to_string()],
             push: true,
             changes: vec!["ENTRYPOINT [\"/app\"]".to_string()],
+            docker_binary: Some(path),
             ..Default::default()
         };
         let builder = DockerBuilder::new(config);
@@ -825,14 +755,6 @@ exit 0
             .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
             .await?;
 
-        #[cfg(unix)]
-        {
-            unsafe {
-                std::env::remove_var("DOCKER_EXECUTABLE");
-            }
-            let _ = std::fs::remove_file(&path);
-        }
-
         assert!(artifact.id().contains("image:mock-flattened-image"));
         assert!(artifact.id().contains("export:rootfs.tar"));
         assert!(
@@ -845,12 +767,10 @@ exit 0
 
     #[tokio::test]
     async fn test_docker_run_bad_exit() -> Result<(), crate::error::StampError> {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let config = DockerConfig {
             name: "test_bad_exit".to_string(),
             image: "ubuntu".to_string(),
+            docker_binary: Some(std::path::PathBuf::from("false")),
             ..Default::default()
         };
         let builder = DockerBuilder::new(config);
@@ -874,12 +794,10 @@ exit 0
 
     #[tokio::test]
     async fn test_docker_run_missing() -> Result<(), crate::error::StampError> {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let config = DockerConfig {
             name: "test_missing".to_string(),
             image: "ubuntu".to_string(),
+            docker_binary: Some(std::path::PathBuf::from("/nonexistent/docker_bin")),
             ..Default::default()
         };
         let builder = DockerBuilder::new(config);
@@ -903,16 +821,10 @@ exit 0
 
     #[tokio::test]
     async fn test_docker_bad_executable() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        unsafe {
-            std::env::set_var("DOCKER_EXECUTABLE", "non_existent_docker_executable");
-        }
-
         let config = DockerConfig {
             name: "test".to_string(),
             image: "ubuntu".to_string(),
+            docker_binary: Some(std::path::PathBuf::from("non_existent_docker_executable")),
             ..Default::default()
         };
         let builder = DockerBuilder::new(config);
@@ -931,46 +843,20 @@ exit 0
             )
             .await;
 
-        unsafe {
-            std::env::remove_var("DOCKER_EXECUTABLE");
-        }
-
-        assert!(res.is_err());
-        assert!(
-            res.unwrap_err()
-                .to_string()
-                .contains("Failed to execute docker pull:")
-        );
+        assert!(res.is_err_and(|e| e.to_string().contains("Failed to execute docker pull:")));
     }
+
     #[tokio::test]
-    async fn test_docker_step_run_map_err_run() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Create a mocked docker executable that succeeds on pull but fails to spawn on run
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "mock_docker_run_err_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_micros()
-        ));
+    async fn test_docker_step_run_map_err_run() -> Result<(), StampError> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("mock_docker_run_err");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let script = r#"#!/bin/sh
-if [ "$1" = "pull" ]; then
-    rm "$0"
-    exit 0
-fi
-"#;
-            std::fs::write(&path, script).unwrap_or_default();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .unwrap_or_default();
-            unsafe {
-                std::env::set_var("DOCKER_EXECUTABLE", path.to_str().unwrap_or(""));
-            }
+            let script =
+                "#!/bin/sh\nif [ \"$1\" = \"pull\" ]; then\n    rm \"$0\"\n    exit 0\nfi\n";
+            std::fs::write(&path, script)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
         }
         let mut step = StepRunContainer {
             ui: std::sync::Arc::new(crate::engine::ui::Ui::new(
@@ -981,58 +867,27 @@ fi
             name: "test".into(),
             config: DockerConfig {
                 image: "ubuntu".to_string(),
+                docker_binary: Some(path),
                 ..Default::default()
             },
         };
         let mut state = StateBag::new();
         let res = step.run(&mut state).await;
 
-        #[cfg(unix)]
-        {
-            unsafe {
-                std::env::remove_var("DOCKER_EXECUTABLE");
-            }
-            let _ = std::fs::remove_file(&path);
-        }
-
-        assert!(res.is_err());
-        assert!(
-            res.unwrap_err()
-                .to_string()
-                .contains("Failed to execute docker run")
-        );
+        assert!(res.is_err_and(|e| e.to_string().contains("Failed to execute docker run")));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_docker_step_run_map_err_inspect() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "mock_docker_insp_err_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_micros()
-        ));
+    async fn test_docker_step_run_map_err_inspect() -> Result<(), StampError> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("mock_docker_insp_err");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let script = r#"#!/bin/sh
-if [ "$1" = "pull" ]; then
-    exit 0
-elif [ "$1" = "run" ]; then
-    rm "$0"
-    exit 0
-fi
-"#;
-            std::fs::write(&path, script).unwrap_or_default();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .unwrap_or_default();
-            unsafe {
-                std::env::set_var("DOCKER_EXECUTABLE", path.to_str().unwrap_or(""));
-            }
+            let script = "#!/bin/sh\nif [ \"$1\" = \"pull\" ]; then\n    exit 0\nelif [ \"$1\" = \"run\" ]; then\n    rm \"$0\"\n    exit 0\nfi\n";
+            std::fs::write(&path, script)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
         }
         let mut step = StepRunContainer {
             ui: std::sync::Arc::new(crate::engine::ui::Ui::new(
@@ -1043,35 +898,19 @@ fi
             name: "test".into(),
             config: DockerConfig {
                 image: "ubuntu".to_string(),
+                docker_binary: Some(path),
                 ..Default::default()
             },
         };
         let mut state = StateBag::new();
         let res = step.run(&mut state).await;
 
-        #[cfg(unix)]
-        {
-            unsafe {
-                std::env::remove_var("DOCKER_EXECUTABLE");
-            }
-            let _ = std::fs::remove_file(&path);
-        }
-
-        assert!(res.is_err());
-        assert!(
-            res.unwrap_err()
-                .to_string()
-                .contains("Failed to execute docker inspect")
-        );
+        assert!(res.is_err_and(|e| e.to_string().contains("Failed to execute docker inspect")));
+        Ok(())
     }
+
     #[tokio::test]
     async fn test_docker_step_commit_map_err() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        unsafe {
-            std::env::set_var("DOCKER_EXECUTABLE", "non_existent_docker_executable_commit");
-        }
         let mut step = StepCommitContainer {
             ui: std::sync::Arc::new(crate::engine::ui::Ui::new(
                 crate::engine::packer::FeatureState::Disabled,
@@ -1081,31 +920,20 @@ fi
             name: "test".into(),
             config: DockerConfig {
                 commit: true,
+                docker_binary: Some(std::path::PathBuf::from(
+                    "non_existent_docker_executable_commit",
+                )),
                 ..Default::default()
             },
         };
         let mut state = StateBag::new();
         state.put("container_id", "123".to_string());
         let res = step.run(&mut state).await;
-        unsafe {
-            std::env::remove_var("DOCKER_EXECUTABLE");
-        }
-        assert!(res.is_err());
-        assert!(
-            res.unwrap_err()
-                .to_string()
-                .contains("Failed to execute docker commit")
-        );
+        assert!(res.is_err_and(|e| e.to_string().contains("Failed to execute docker commit")));
     }
 
     #[tokio::test]
     async fn test_docker_step_export_map_err() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        unsafe {
-            std::env::set_var("DOCKER_EXECUTABLE", "non_existent_docker_executable_export");
-        }
         let mut step = StepExportContainer {
             ui: std::sync::Arc::new(crate::engine::ui::Ui::new(
                 crate::engine::packer::FeatureState::Disabled,
@@ -1115,22 +943,18 @@ fi
             name: "test".into(),
             config: DockerConfig {
                 export_path: Some("out.tar".into()),
+                docker_binary: Some(std::path::PathBuf::from(
+                    "non_existent_docker_executable_export",
+                )),
                 ..Default::default()
             },
         };
         let mut state = StateBag::new();
         state.put("container_id", "123".to_string());
         let res = step.run(&mut state).await;
-        unsafe {
-            std::env::remove_var("DOCKER_EXECUTABLE");
-        }
-        assert!(res.is_err());
-        assert!(
-            res.unwrap_err()
-                .to_string()
-                .contains("Failed to execute docker export")
-        );
+        assert!(res.is_err_and(|e| e.to_string().contains("Failed to execute docker export")));
     }
+
     #[tokio::test]
     async fn test_docker_cancel() -> Result<(), crate::error::StampError> {
         let config = DockerConfig {
@@ -1153,31 +977,17 @@ fi
         let builder = DockerBuilder::new(config);
         assert_eq!(builder.name(), "test-name");
     }
+
     #[tokio::test]
-    async fn test_docker_step_run_pull_failure() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "mock_docker_pull_fail_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_micros()
-        ));
+    async fn test_docker_step_run_pull_failure() -> Result<(), StampError> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("mock_docker_pull_fail");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let script = r#"#!/bin/sh
-exit 1
-"#;
-            std::fs::write(&path, script).unwrap_or_default();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .unwrap_or_default();
-            unsafe {
-                std::env::set_var("DOCKER_EXECUTABLE", path.to_str().unwrap_or(""));
-            }
+            let script = "#!/bin/sh\nexit 1\n";
+            std::fs::write(&path, script)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
         }
         let mut step = StepRunContainer {
             ui: std::sync::Arc::new(crate::engine::ui::Ui::new(
@@ -1189,50 +999,26 @@ exit 1
             config: DockerConfig {
                 name: "test_pull_failure".to_string(),
                 image: "ubuntu".to_string(),
+                docker_binary: Some(path),
                 ..Default::default()
             },
         };
         let mut state = StateBag::new();
         let res = step.run(&mut state).await;
-        #[cfg(unix)]
-        {
-            unsafe {
-                std::env::remove_var("DOCKER_EXECUTABLE");
-            }
-            let _ = std::fs::remove_file(&path);
-        }
-        assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("Docker pull failed"));
+        assert!(res.is_err_and(|e| e.to_string().contains("Docker pull failed")));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_docker_step_run_run_failure() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "mock_docker_run_fail2_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_micros()
-        ));
+    async fn test_docker_step_run_run_failure() -> Result<(), StampError> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("mock_docker_run_fail2");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let script = r#"#!/bin/sh
-if [ "$1" = "pull" ]; then
-    exit 0
-fi
-exit 1
-"#;
-            std::fs::write(&path, script).unwrap_or_default();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .unwrap_or_default();
-            unsafe {
-                std::env::set_var("DOCKER_EXECUTABLE", path.to_str().unwrap_or(""));
-            }
+            let script = "#!/bin/sh\nif [ \"$1\" = \"pull\" ]; then\n    exit 0\nfi\nexit 1\n";
+            std::fs::write(&path, script)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
         }
         let mut step = StepRunContainer {
             ui: std::sync::Arc::new(crate::engine::ui::Ui::new(
@@ -1244,47 +1030,26 @@ exit 1
             config: DockerConfig {
                 name: "test_run_failure".to_string(),
                 image: "ubuntu".to_string(),
+                docker_binary: Some(path),
                 ..Default::default()
             },
         };
         let mut state = StateBag::new();
         let res = step.run(&mut state).await;
-        #[cfg(unix)]
-        {
-            unsafe {
-                std::env::remove_var("DOCKER_EXECUTABLE");
-            }
-            let _ = std::fs::remove_file(&path);
-        }
-        assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("Docker run failed"));
+        assert!(res.is_err_and(|e| e.to_string().contains("Docker run failed")));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_docker_step_commit_failure() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "mock_docker_commit_fail_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_micros()
-        ));
+    async fn test_docker_step_commit_failure() -> Result<(), StampError> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("mock_docker_commit_fail");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let script = r#"#!/bin/sh
-exit 1
-"#;
-            std::fs::write(&path, script).unwrap_or_default();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .unwrap_or_default();
-            unsafe {
-                std::env::set_var("DOCKER_EXECUTABLE", path.to_str().unwrap_or(""));
-            }
+            let script = "#!/bin/sh\nexit 1\n";
+            std::fs::write(&path, script)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
         }
         let mut step = StepCommitContainer {
             ui: std::sync::Arc::new(crate::engine::ui::Ui::new(
@@ -1296,52 +1061,27 @@ exit 1
             config: DockerConfig {
                 name: "test_commit_failure".to_string(),
                 commit: true,
+                docker_binary: Some(path),
                 ..Default::default()
             },
         };
         let mut state = StateBag::new();
         state.put("container_id", "123".to_string());
         let res = step.run(&mut state).await;
-        #[cfg(unix)]
-        {
-            unsafe {
-                std::env::remove_var("DOCKER_EXECUTABLE");
-            }
-            let _ = std::fs::remove_file(&path);
-        }
-        assert!(res.is_err());
-        assert!(
-            res.unwrap_err()
-                .to_string()
-                .contains("Docker commit failed")
-        );
+        assert!(res.is_err_and(|e| e.to_string().contains("Docker commit failed")));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_docker_step_export_failure() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "mock_docker_export_fail_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_micros()
-        ));
+    async fn test_docker_step_export_failure() -> Result<(), StampError> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("mock_docker_export_fail");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let script = r#"#!/bin/sh
-exit 1
-"#;
-            std::fs::write(&path, script).unwrap_or_default();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .unwrap_or_default();
-            unsafe {
-                std::env::set_var("DOCKER_EXECUTABLE", path.to_str().unwrap_or(""));
-            }
+            let script = "#!/bin/sh\nexit 1\n";
+            std::fs::write(&path, script)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
         }
         let mut step = StepExportContainer {
             ui: std::sync::Arc::new(crate::engine::ui::Ui::new(
@@ -1353,47 +1093,30 @@ exit 1
             config: DockerConfig {
                 name: "test_export_failure".to_string(),
                 export_path: Some("out.tar".into()),
+                docker_binary: Some(path),
                 ..Default::default()
             },
         };
         let mut state = StateBag::new();
         state.put("container_id", "123".to_string());
         let res = step.run(&mut state).await;
-        #[cfg(unix)]
-        {
-            unsafe {
-                std::env::remove_var("DOCKER_EXECUTABLE");
-            }
-            let _ = std::fs::remove_file(&path);
-        }
         assert!(matches!(
             res,
             Err(StampError::Execution(ref msg)) if msg.contains("Docker export failed")
         ));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_docker_step_flatten_failure() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "mock_docker_flatten_fail_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_micros()
-        ));
+    async fn test_docker_step_flatten_failure() -> Result<(), StampError> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("mock_docker_flatten_fail");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let script = "#!/bin/sh\nexit 1\n";
-            let _ = std::fs::write(&path, script);
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
-            unsafe {
-                std::env::set_var("DOCKER_EXECUTABLE", path.to_str().unwrap_or(""));
-            }
+            std::fs::write(&path, script)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
         }
         let mut step = StepFlattenContainer {
             ui: std::sync::Arc::new(crate::engine::ui::Ui::new(
@@ -1406,35 +1129,21 @@ exit 1
                 name: "test_flatten_failure".to_string(),
                 flatten: true,
                 export_path: Some("out.tar".into()),
+                docker_binary: Some(path),
                 ..Default::default()
             },
         };
         let mut state = StateBag::new();
         let res = step.run(&mut state).await;
-        #[cfg(unix)]
-        {
-            unsafe {
-                std::env::remove_var("DOCKER_EXECUTABLE");
-            }
-            let _ = std::fs::remove_file(&path);
-        }
         assert!(matches!(
             res,
             Err(StampError::Execution(ref msg)) if msg.contains("Docker import (flatten) failed")
         ));
+        Ok(())
     }
 
     #[tokio::test]
     async fn test_docker_step_flatten_map_err() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        unsafe {
-            std::env::set_var(
-                "DOCKER_EXECUTABLE",
-                "non_existent_docker_executable_flatten",
-            );
-        }
         let mut step = StepFlattenContainer {
             ui: std::sync::Arc::new(crate::engine::ui::Ui::new(
                 crate::engine::packer::FeatureState::Disabled,
@@ -1446,14 +1155,14 @@ exit 1
                 name: "test_flatten_map_err".to_string(),
                 flatten: true,
                 export_path: Some("out.tar".into()),
+                docker_binary: Some(std::path::PathBuf::from(
+                    "non_existent_docker_executable_flatten",
+                )),
                 ..Default::default()
             },
         };
         let mut state = StateBag::new();
         let res = step.run(&mut state).await;
-        unsafe {
-            std::env::remove_var("DOCKER_EXECUTABLE");
-        }
         assert!(matches!(
             res,
             Err(StampError::Execution(ref msg)) if msg.contains("Failed to execute docker import")
@@ -1461,27 +1170,15 @@ exit 1
     }
 
     #[tokio::test]
-    async fn test_docker_step_tag_failure() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "mock_docker_tag_fail_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_micros()
-        ));
+    async fn test_docker_step_tag_failure() -> Result<(), StampError> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("mock_docker_tag_fail");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let script = "#!/bin/sh\nexit 1\n";
-            let _ = std::fs::write(&path, script);
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
-            unsafe {
-                std::env::set_var("DOCKER_EXECUTABLE", path.to_str().unwrap_or(""));
-            }
+            std::fs::write(&path, script)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
         }
         let mut step = StepPushContainer {
             ui: std::sync::Arc::new(crate::engine::ui::Ui::new(
@@ -1494,33 +1191,22 @@ exit 1
                 name: "test_tag_failure".to_string(),
                 repository: Some("myrepo".to_string()),
                 tags: vec!["v1".to_string()],
+                docker_binary: Some(path),
                 ..Default::default()
             },
         };
         let mut state = StateBag::new();
         state.put("image_id", "img123".to_string());
         let res = step.run(&mut state).await;
-        #[cfg(unix)]
-        {
-            unsafe {
-                std::env::remove_var("DOCKER_EXECUTABLE");
-            }
-            let _ = std::fs::remove_file(&path);
-        }
         assert!(matches!(
             res,
             Err(StampError::Execution(ref msg)) if msg.contains("Docker tag failed")
         ));
+        Ok(())
     }
 
     #[tokio::test]
     async fn test_docker_step_tag_map_err() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        unsafe {
-            std::env::set_var("DOCKER_EXECUTABLE", "non_existent_docker_executable_tag");
-        }
         let mut step = StepPushContainer {
             ui: std::sync::Arc::new(crate::engine::ui::Ui::new(
                 crate::engine::packer::FeatureState::Disabled,
@@ -1532,15 +1218,15 @@ exit 1
                 name: "test_tag_map_err".to_string(),
                 repository: Some("myrepo".to_string()),
                 tags: vec!["v1".to_string()],
+                docker_binary: Some(std::path::PathBuf::from(
+                    "non_existent_docker_executable_tag",
+                )),
                 ..Default::default()
             },
         };
         let mut state = StateBag::new();
         state.put("image_id", "img123".to_string());
         let res = step.run(&mut state).await;
-        unsafe {
-            std::env::remove_var("DOCKER_EXECUTABLE");
-        }
         assert!(matches!(
             res,
             Err(StampError::Execution(ref msg)) if msg.contains("Failed to execute docker tag")
@@ -1548,27 +1234,15 @@ exit 1
     }
 
     #[tokio::test]
-    async fn test_docker_step_push_failure() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "mock_docker_push_fail_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_micros()
-        ));
+    async fn test_docker_step_push_failure() -> Result<(), StampError> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("mock_docker_push_fail");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let script = "#!/bin/sh\nif [ \"$1\" = \"push\" ]; then\n  exit 1\nfi\nexit 0\n";
-            let _ = std::fs::write(&path, script);
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
-            unsafe {
-                std::env::set_var("DOCKER_EXECUTABLE", path.to_str().unwrap_or(""));
-            }
+            std::fs::write(&path, script)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
         }
         let mut step = StepPushContainer {
             ui: std::sync::Arc::new(crate::engine::ui::Ui::new(
@@ -1582,49 +1256,31 @@ exit 1
                 repository: Some("myrepo".to_string()),
                 tags: vec!["v1".to_string()],
                 push: true,
+                docker_binary: Some(path),
                 ..Default::default()
             },
         };
         let mut state = StateBag::new();
         state.put("image_id", "img123".to_string());
         let res = step.run(&mut state).await;
-        #[cfg(unix)]
-        {
-            unsafe {
-                std::env::remove_var("DOCKER_EXECUTABLE");
-            }
-            let _ = std::fs::remove_file(&path);
-        }
         assert!(matches!(
             res,
             Err(StampError::Execution(ref msg)) if msg.contains("Docker push failed")
         ));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_docker_step_push_map_err() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "mock_docker_push_map_err_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_micros()
-        ));
+    async fn test_docker_step_push_map_err() -> Result<(), StampError> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("mock_docker_push_map_err");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            // The script deletes itself upon running "tag", so the subsequent "push" fails to execute!
             let script =
                 "#!/bin/sh\nif [ \"$1\" = \"tag\" ]; then\n  rm -f \"$0\"\n  exit 0\nfi\nexit 0\n";
-            let _ = std::fs::write(&path, script);
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
-            unsafe {
-                std::env::set_var("DOCKER_EXECUTABLE", path.to_str().unwrap_or(""));
-            }
+            std::fs::write(&path, script)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
         }
         let mut step = StepPushContainer {
             ui: std::sync::Arc::new(crate::engine::ui::Ui::new(
@@ -1638,22 +1294,17 @@ exit 1
                 repository: Some("myrepo".to_string()),
                 tags: vec!["v1".to_string()],
                 push: true,
+                docker_binary: Some(path),
                 ..Default::default()
             },
         };
         let mut state = StateBag::new();
         state.put("image_id", "img123".to_string());
         let res = step.run(&mut state).await;
-        #[cfg(unix)]
-        {
-            unsafe {
-                std::env::remove_var("DOCKER_EXECUTABLE");
-            }
-            let _ = std::fs::remove_file(&path);
-        }
         assert!(matches!(
             res,
             Err(StampError::Execution(ref msg)) if msg.contains("Failed to execute docker push")
         ));
+        Ok(())
     }
 }

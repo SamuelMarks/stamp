@@ -4,6 +4,7 @@
 use super::parallels_iso::{
     discover_parallels_guest_ip, execute_prlctl_commands, query_prlctl_version, run_prlctl,
 };
+use crate::artifact::BuildArtifact;
 use crate::builder::Builder;
 use crate::communicator::Communicator;
 use crate::communicator::ssh::{SshCommunicator, SshConfig};
@@ -67,6 +68,8 @@ pub struct ParallelsIpswConfig {
     pub headless: bool,
     /// Output directory for exported appliance.
     pub output_directory: Option<String>,
+    /// Optional custom `prlctl` binary path.
+    pub prlctl_binary: Option<String>,
 }
 
 /// Helper to parse string list from JSON or comma-separated string.
@@ -75,7 +78,12 @@ fn parse_string_list(val: &str) -> Vec<String> {
         list
     } else {
         val.split(',')
-            .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+            .map(|s| {
+                s.trim()
+                    .trim_matches('"')
+                    .trim_matches(char::from(0x27))
+                    .to_string()
+            })
             .filter(|s| !s.is_empty())
             .collect()
     }
@@ -197,6 +205,7 @@ impl ParallelsIpswConfig {
 
         let headless = cfg.get("headless").is_some_and(|v| v == "true");
         let output_directory = cfg.get("output_directory").cloned();
+        let prlctl_binary = cfg.get("prlctl_binary").cloned();
 
         Ok(Self {
             name,
@@ -222,6 +231,7 @@ impl ParallelsIpswConfig {
             shutdown_timeout,
             headless,
             output_directory,
+            prlctl_binary,
         })
     }
 }
@@ -373,7 +383,6 @@ impl Step for StepCreateMacVM {
         }
         run_prlctl(&create_args).await?;
 
-        // Hardware configuration: CPUs and memory
         let cpus_str = self.config.cpus.unwrap_or(2).to_string();
         run_prlctl(&["set", vm_name, "--cpus", &cpus_str]).await?;
 
@@ -383,7 +392,6 @@ impl Step for StepCreateMacVM {
         let disk_size = format!("{}", self.config.disk_size.map_or(65536, |d| d.get()));
         run_prlctl(&["set", vm_name, "--device-set", "hdd0", "--size", &disk_size]).await?;
 
-        // Configure host network interfaces
         for iface in &self.config.host_interfaces {
             run_prlctl(&[
                 "set",
@@ -398,7 +406,6 @@ impl Step for StepCreateMacVM {
             .await?;
         }
 
-        // Custom prlctl commands
         if !self.config.prlctl.is_empty() {
             self.ui
                 .say(&self.name, "Executing custom prlctl commands...");
@@ -453,10 +460,10 @@ impl Step for StepRunVM {
             self.ui.say(&self.name, "Typing boot commands...");
             let actions =
                 crate::builder::virtualization::BootCommandParser::parse(cmds, None, None, None);
-            let vnc_port = 5900;
-            let vnc_addr = format!("127.0.0.1:{vnc_port}");
-            crate::builder::virtualization::send_vnc_boot_command(&vnc_addr, None, &actions)
-                .await?;
+            crate::builder::virtualization::send_apple_virtualization_boot_command(
+                &vm_name, &actions, None,
+            )
+            .await?;
         }
 
         Ok(StepAction::Continue)
@@ -511,7 +518,7 @@ impl Step for StepProvision {
             build_id: self.name.clone(),
             host: "parallels".to_string(),
             user: "root".to_string(),
-            packer_run_uuid: "mocked-uuid".to_string(),
+            packer_run_uuid: uuid::Uuid::new_v4().to_string(),
             source_name: self.name.clone(),
             source_type: "parallels-ipsw".to_string(),
             ..Default::default()
@@ -559,14 +566,14 @@ impl Step for StepShutdown {
             .as_deref()
             .unwrap_or("output-parallels");
 
-        if let Some(ref cmd) = self.config.shutdown_command {
-            if let Some(comm) = state.get::<Arc<dyn Communicator>>("communicator") {
-                self.ui
-                    .say(&self.name, &format!("Executing shutdown command: {cmd}"));
-                let _ = comm
-                    .execute(&crate::communicator::Command::new(cmd.clone()))
-                    .await;
-            }
+        if let Some(ref cmd) = self.config.shutdown_command
+            && let Some(comm) = state.get::<Arc<dyn Communicator>>("communicator")
+        {
+            self.ui
+                .say(&self.name, &format!("Executing shutdown command: {cmd}"));
+            let _ = comm
+                .execute(&crate::communicator::Command::new(cmd.clone()))
+                .await;
         }
 
         let _ = run_prlctl(&["stop", &vm_name]).await;
@@ -684,42 +691,17 @@ impl Builder for ParallelsIpswBuilder {
 
         let mut runner = Runner::new(steps);
         let mut state = StateBag::new();
-        match runner.run(&mut state).await {
-            Ok(()) => {
-                runner.cleanup(&state).await;
-            }
-            Err(e) => {
-                match on_error {
-                    crate::engine::packer::OnErrorStrategy::Cleanup => {
-                        runner.cleanup(&state).await;
-                    }
-                    crate::engine::packer::OnErrorStrategy::Abort
-                    | crate::engine::packer::OnErrorStrategy::RunCleanupProvisioner => {}
-                    crate::engine::packer::OnErrorStrategy::Ask => {
-                        let msg = format!(
-                            "Build '{}' errored: {}
-Do you want to clean up? [y/N]: ",
-                            self.name(),
-                            e
-                        );
-                        if let Ok(ans) = ui.ask("stamp", &msg)
-                            && (ans == "y" || ans == "yes")
-                        {
-                            runner.cleanup(&state).await;
-                        }
-                    }
-                }
-                return Err(e);
-            }
-        }
+        runner
+            .run_with_strategy(&mut state, &self.name(), &ui, on_error)
+            .await?;
 
         let pvm_path = state.get::<String>("pvm_path").cloned().unwrap_or_default();
 
-        Ok(Box::new(crate::artifact::MockArtifact {
-            builder_id: self.name(),
-            id: format!("parallels-pvm:{pvm_path}"),
-            files: vec![],
-        }))
+        Ok(Box::new(BuildArtifact::with_builder(
+            self.name(),
+            format!("parallels-pvm:{pvm_path}"),
+            vec![],
+        )))
     }
 
     async fn cancel(&self) -> Result<(), StampError> {
@@ -732,12 +714,6 @@ Do you want to clean up? [y/N]: ",
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::pedantic,
-    clippy::all,
-    for_loops_over_fallibles
-)]
 mod tests {
     use super::*;
     use crate::engine::hook::DefaultProvisionHook;
@@ -760,71 +736,35 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_parallels_ipsw_derived_traits() {
-        let config1 = ParallelsIpswConfig::default();
-        let config2 = config1.clone();
-        assert_eq!(config1, config2);
-        assert_eq!(format!("{config1:?}"), format!("{config2:?}"));
-
-        let b1 = ParallelsIpswBuilder::new(config1);
-        let b2 = b1.clone();
-        assert_eq!(format!("{b1:?}"), format!("{b2:?}"));
-    }
-
     #[tokio::test]
-    async fn test_verify_ipsw_checksum_variations() {
-        let temp_dir = tempfile::tempdir().unwrap();
+    async fn test_verify_ipsw_checksum_variations() -> Result<(), StampError> {
+        let temp_dir = tempfile::tempdir()?;
         let file_path = temp_dir.path().join("test.ipsw");
-        tokio::fs::write(&file_path, b"IPSW_RESTORE_DATA")
-            .await
-            .unwrap();
+        tokio::fs::write(&file_path, b"IPSW_RESTORE_DATA").await?;
 
-        // sha256
         let sha256_hash = hex::encode(Sha256::digest(b"IPSW_RESTORE_DATA"));
-        assert!(
-            verify_ipsw_checksum(&file_path, &format!("sha256:{sha256_hash}"))
-                .await
-                .is_ok()
-        );
-        assert!(verify_ipsw_checksum(&file_path, &sha256_hash).await.is_ok());
+        verify_ipsw_checksum(&file_path, &format!("sha256:{sha256_hash}")).await?;
+        verify_ipsw_checksum(&file_path, &sha256_hash).await?;
 
-        // sha512
         let sha512_hash = hex::encode(Sha512::digest(b"IPSW_RESTORE_DATA"));
-        assert!(
-            verify_ipsw_checksum(&file_path, &format!("sha512:{sha512_hash}"))
-                .await
-                .is_ok()
-        );
-        assert!(verify_ipsw_checksum(&file_path, &sha512_hash).await.is_ok());
+        verify_ipsw_checksum(&file_path, &format!("sha512:{sha512_hash}")).await?;
+        verify_ipsw_checksum(&file_path, &sha512_hash).await?;
 
-        // sha1
         let mut sha1_hasher = Sha1::default();
         Sha1Digest::update(&mut sha1_hasher, b"IPSW_RESTORE_DATA");
         let sha1_hash = hex::encode(Sha1Digest::finalize(sha1_hasher));
-        assert!(
-            verify_ipsw_checksum(&file_path, &format!("sha1:{sha1_hash}"))
-                .await
-                .is_ok()
-        );
-        assert!(verify_ipsw_checksum(&file_path, &sha1_hash).await.is_ok());
+        verify_ipsw_checksum(&file_path, &format!("sha1:{sha1_hash}")).await?;
+        verify_ipsw_checksum(&file_path, &sha1_hash).await?;
 
-        // md5
         let mut md5_hasher = Md5::default();
         Md5Digest::update(&mut md5_hasher, b"IPSW_RESTORE_DATA");
         let md5_hash = hex::encode(Md5Digest::finalize(md5_hasher));
-        assert!(
-            verify_ipsw_checksum(&file_path, &format!("md5:{md5_hash}"))
-                .await
-                .is_ok()
-        );
-        assert!(verify_ipsw_checksum(&file_path, &md5_hash).await.is_ok());
+        verify_ipsw_checksum(&file_path, &format!("md5:{md5_hash}")).await?;
+        verify_ipsw_checksum(&file_path, &md5_hash).await?;
 
-        // none & empty
-        assert!(verify_ipsw_checksum(&file_path, "none").await.is_ok());
-        assert!(verify_ipsw_checksum(&file_path, "").await.is_ok());
+        verify_ipsw_checksum(&file_path, "none").await?;
+        verify_ipsw_checksum(&file_path, "").await?;
 
-        // Mismatch
         assert!(
             verify_ipsw_checksum(
                 &file_path,
@@ -834,7 +774,6 @@ mod tests {
             .is_err()
         );
 
-        // Non-existent file
         let non_exist = temp_dir.path().join("does_not_exist.ipsw");
         assert!(
             verify_ipsw_checksum(&non_exist, "sha256:abc")
@@ -842,16 +781,16 @@ mod tests {
                 .is_err()
         );
 
-        // Fallback default length mismatch
         assert!(
             verify_ipsw_checksum(&file_path, "short_hash")
                 .await
                 .is_err()
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_parallels_ipsw_from_builder_config() {
+    async fn test_parallels_ipsw_from_builder_config() -> Result<(), StampError> {
         let mut builder_cfg = crate::template::BuilderConfig {
             builder_type: "parallels-ipsw".to_string(),
             name: "bento-macos-ipsw".to_string(),
@@ -893,7 +832,7 @@ mod tests {
             r#"[["set", "{{ .Name }}", "--cpus", "6"]]"#.to_string(),
         );
 
-        let cfg = ParallelsIpswConfig::from_builder_config(&builder_cfg).unwrap();
+        let cfg = ParallelsIpswConfig::from_builder_config(&builder_cfg)?;
         assert_eq!(cfg.name, "bento-macos-ipsw");
         assert_eq!(cfg.vm_name.as_deref(), Some("my-macos-vm"));
         assert_eq!(cfg.host_interfaces, vec!["en0", "en1"]);
@@ -904,7 +843,7 @@ mod tests {
         assert_eq!(cfg.ipsw_checksum.as_deref(), Some("sha256:abcd"));
         assert_eq!(cfg.cpus, Some(6));
         assert_eq!(cfg.memory, Some(MemoryMb::new(8192)));
-        assert_eq!(cfg.disk_size, Some(MemoryMb::new(100000)));
+        assert_eq!(cfg.disk_size, Some(MemoryMb::new(100_000)));
         assert_eq!(
             cfg.shutdown_command.as_deref(),
             Some("sudo shutdown -h now")
@@ -912,17 +851,22 @@ mod tests {
         assert!(cfg.headless);
         assert_eq!(cfg.prlctl.len(), 1);
 
-        // HCL tuple parsing
-        use hashicorp_configuration_language_rs::ast::expr::Expression;
-        use hashicorp_configuration_language_rs::span::Span;
-        let dummy = Span::default();
-        let tuple_expr = Expression::Tuple(
+        let dummy = hashicorp_configuration_language_rs::span::Span::default();
+        let tuple_expr = hashicorp_configuration_language_rs::ast::expr::Expression::Tuple(
             vec![
-                Expression::Tuple(
-                    vec![Expression::String("set".to_string(), dummy.clone())],
+                hashicorp_configuration_language_rs::ast::expr::Expression::Tuple(
+                    vec![
+                        hashicorp_configuration_language_rs::ast::expr::Expression::String(
+                            "set".to_string(),
+                            dummy.clone(),
+                        ),
+                    ],
                     dummy.clone(),
                 ),
-                Expression::String("flat".to_string(), dummy.clone()),
+                hashicorp_configuration_language_rs::ast::expr::Expression::String(
+                    "flat".to_string(),
+                    dummy.clone(),
+                ),
             ],
             dummy,
         );
@@ -934,72 +878,67 @@ mod tests {
         builder_hcl
             .expressions
             .insert("prlctl".to_string(), tuple_expr);
-        let cfg_hcl = ParallelsIpswConfig::from_builder_config(&builder_hcl).unwrap();
+        let cfg_hcl = ParallelsIpswConfig::from_builder_config(&builder_hcl)?;
         assert_eq!(cfg_hcl.prlctl.len(), 2);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_parallels_ipsw_run() {
-        let temp_dir = tempfile::tempdir();
-        assert!(temp_dir.is_ok());
-        for td in temp_dir {
-            let fake_ipsw = td.path().join("mac.ipsw");
-            let _ = tokio::fs::write(&fake_ipsw, b"IPSW_DATA").await;
+    async fn test_parallels_ipsw_run() -> Result<(), StampError> {
+        let td = tempfile::tempdir()?;
+        let fake_ipsw = td.path().join("mac.ipsw");
+        tokio::fs::write(&fake_ipsw, b"IPSW_DATA").await?;
 
-            let config = ParallelsIpswConfig {
-                name: "test-ipsw-builder".to_string(),
-                vm_name: Some("test-mac".to_string()),
-                host_interfaces: vec!["en0".to_string()],
-                ipsw_url: Some(fake_ipsw.to_string_lossy().to_string()),
-                ipsw_checksum: Some("none".to_string()),
-                cpus: Some(4),
-                memory: Some(MemoryMb::new(4096)),
-                disk_size: Some(MemoryMb::new(65536)),
-                boot_command: Some(vec!["<enter>".to_string()]),
-                prlctl: vec![vec![
-                    "set".to_string(),
-                    "{{ .Name }}".to_string(),
-                    "--cpus".to_string(),
-                    "4".to_string(),
-                ]],
-                prlctl_post: vec![vec!["echo".to_string(), "done".to_string()]],
-                prlctl_version_file: Some(".prl_version".to_string()),
-                shutdown_command: Some("poweroff".to_string()),
-                output_directory: Some(td.path().to_string_lossy().to_string()),
-                ..Default::default()
-            };
-            let builder = ParallelsIpswBuilder::new(config);
+        let config = ParallelsIpswConfig {
+            name: "test-ipsw-builder".to_string(),
+            vm_name: Some("test-mac".to_string()),
+            host_interfaces: vec!["en0".to_string()],
+            ipsw_url: Some(fake_ipsw.to_string_lossy().to_string()),
+            ipsw_checksum: Some("none".to_string()),
+            cpus: Some(4),
+            memory: Some(MemoryMb::new(4096)),
+            disk_size: Some(MemoryMb::new(65536)),
+            boot_command: Some(vec!["<enter>".to_string()]),
+            prlctl: vec![vec![
+                "set".to_string(),
+                "{{ .Name }}".to_string(),
+                "--cpus".to_string(),
+                "4".to_string(),
+            ]],
+            prlctl_post: vec![vec!["echo".to_string(), "done".to_string()]],
+            prlctl_version_file: Some(".prl_version".to_string()),
+            shutdown_command: Some("poweroff".to_string()),
+            output_directory: Some(td.path().to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let builder = ParallelsIpswBuilder::new(config);
 
-            assert!(builder.prepare().await.is_ok());
-            assert_eq!(builder.name(), "test-ipsw-builder");
+        builder.prepare().await?;
+        assert_eq!(builder.name(), "test-ipsw-builder");
 
-            let hook = Arc::new(DefaultProvisionHook {
-                provisioners: Arc::new(vec![]),
-                error_cleanup_provisioners: Arc::new(vec![]),
-            });
-            let ui = Arc::new(Ui::new(
-                crate::engine::packer::FeatureState::Disabled,
-                crate::engine::packer::FeatureState::Disabled,
-                crate::engine::packer::FeatureState::Disabled,
-            ));
+        let hook = Arc::new(DefaultProvisionHook {
+            provisioners: Arc::new(vec![]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let ui = Arc::new(Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
 
-            let res = builder
-                .run(hook.clone(), ui.clone(), OnErrorStrategy::Cleanup)
-                .await;
-            assert!(res.is_ok());
-            for art in res {
-                assert!(art.id().contains("test-mac.pvm"));
-            }
+        let art = builder.run(hook, ui, OnErrorStrategy::Cleanup).await?;
+        assert!(art.id().contains("test-mac.pvm"));
+        assert_eq!(art.builder_id(), "test-ipsw-builder");
 
-            assert!(builder.cancel().await.is_ok());
-        }
+        builder.cancel().await
     }
 
     #[tokio::test]
-    async fn test_parallels_ipsw_error_strategies_and_cleanup() {
-        let _temp_dir = tempfile::tempdir().unwrap();
+    async fn test_parallels_ipsw_error_strategies_and_cleanup() -> Result<(), StampError> {
+        let temp_dir = tempfile::tempdir()?;
         let config = ParallelsIpswConfig {
             name: "test-ipsw-err".to_string(),
+            output_directory: Some(temp_dir.path().to_string_lossy().to_string()),
             ..Default::default()
         };
         let builder = ParallelsIpswBuilder::new(config.clone());
@@ -1028,40 +967,11 @@ mod tests {
         );
         assert!(
             builder
-                .run(
-                    fail_hook.clone(),
-                    ui.clone(),
-                    OnErrorStrategy::RunCleanupProvisioner
-                )
-                .await
-                .is_err()
-        );
-
-        let mut queue = std::collections::VecDeque::new();
-        queue.push_back("yes".to_string());
-        let ui_ask = Arc::new(
-            Ui::new(
-                crate::engine::packer::FeatureState::Disabled,
-                crate::engine::packer::FeatureState::Disabled,
-                crate::engine::packer::FeatureState::Disabled,
-            )
-            .with_mock_inputs(Arc::new(std::sync::Mutex::new(queue))),
-        );
-        assert!(
-            builder
-                .run(fail_hook.clone(), ui_ask, OnErrorStrategy::Ask)
-                .await
-                .is_err()
-        );
-
-        assert!(
-            builder
                 .run(fail_hook, ui.clone(), OnErrorStrategy::Ask)
                 .await
                 .is_err()
         );
 
-        // StepCreateMacVM cleanup
         let mut step_create = StepCreateMacVM {
             ui: ui.clone(),
             name: "create-mac".to_string(),
@@ -1071,7 +981,6 @@ mod tests {
         state.put("vm_name", "mac-vm".to_string());
         step_create.cleanup(&state).await;
 
-        // StepRunVM cleanup
         let mut step_run = StepRunVM {
             ui: ui.clone(),
             name: "run-mac".to_string(),
@@ -1079,9 +988,8 @@ mod tests {
         };
         step_run.cleanup(&state).await;
 
-        // StepProvision failure directly
         let mut step_prov = StepProvision {
-            ui,
+            ui: ui.clone(),
             name: "prov-mac".to_string(),
             hook: Arc::new(DefaultProvisionHook {
                 provisioners: Arc::new(vec![Box::new(FailingProvisioner)]),
@@ -1092,60 +1000,52 @@ mod tests {
         assert!(step_prov.run(&mut state).await.is_err());
         step_prov.cleanup(&state).await;
 
-        // StepVerifyIpsw cleanup
         let mut step_verify = StepVerifyIpsw {
-            ui: Arc::new(Ui::new(
-                crate::engine::packer::FeatureState::Disabled,
-                crate::engine::packer::FeatureState::Disabled,
-                crate::engine::packer::FeatureState::Disabled,
-            )),
+            ui: ui.clone(),
             name: "v-ipsw".to_string(),
             config: ParallelsIpswConfig::default(),
         };
         step_verify.cleanup(&state).await;
 
-        // StepExport cleanup
         let mut step_export = StepExport {
-            ui: Arc::new(Ui::new(
-                crate::engine::packer::FeatureState::Disabled,
-                crate::engine::packer::FeatureState::Disabled,
-                crate::engine::packer::FeatureState::Disabled,
-            )),
+            ui: ui.clone(),
             name: "export".to_string(),
-            config: ParallelsIpswConfig::default(),
+            config: ParallelsIpswConfig {
+                output_directory: Some(temp_dir.path().to_string_lossy().to_string()),
+                ..Default::default()
+            },
         };
         step_export.cleanup(&state).await;
 
-        // StepCreateMacVM without ipsw_path
         let mut state_no_ipsw = StateBag::new();
         let mut step_create_no_ipsw = StepCreateMacVM {
-            ui: Arc::new(Ui::new(
-                crate::engine::packer::FeatureState::Disabled,
-                crate::engine::packer::FeatureState::Disabled,
-                crate::engine::packer::FeatureState::Disabled,
-            )),
+            ui: ui.clone(),
             name: "create-no-ipsw".to_string(),
-            config: ParallelsIpswConfig::default(),
+            config: ParallelsIpswConfig {
+                output_directory: Some(temp_dir.path().to_string_lossy().to_string()),
+                ..Default::default()
+            },
         };
-        assert!(step_create_no_ipsw.run(&mut state_no_ipsw).await.is_ok());
+        assert_eq!(
+            step_create_no_ipsw.run(&mut state_no_ipsw).await?,
+            StepAction::Continue
+        );
 
-        // StepShutdown without shutdown_command
         let mut step_shutdown_no_cmd = StepShutdown {
-            ui: Arc::new(Ui::new(
-                crate::engine::packer::FeatureState::Disabled,
-                crate::engine::packer::FeatureState::Disabled,
-                crate::engine::packer::FeatureState::Disabled,
-            )),
+            ui,
             name: "shutdown-no-cmd".to_string(),
-            config: ParallelsIpswConfig::default(),
+            config: ParallelsIpswConfig {
+                output_directory: Some(temp_dir.path().to_string_lossy().to_string()),
+                ..Default::default()
+            },
         };
-        assert!(step_shutdown_no_cmd.run(&mut state_no_ipsw).await.is_ok());
+        assert_eq!(
+            step_shutdown_no_cmd.run(&mut state_no_ipsw).await?,
+            StepAction::Continue
+        );
         step_shutdown_no_cmd.cleanup(&state_no_ipsw).await;
 
-        // Test parse_string_list with json
         assert_eq!(parse_string_list(r#"["x", "y"]"#), vec!["x", "y"]);
-
-        // Test parse_nested_string_list with flat and invalid
         assert_eq!(
             parse_nested_string_list(Some(&r#"["flat"]"#.to_string()), None),
             vec![vec!["flat"]]
@@ -1154,23 +1054,28 @@ mod tests {
             parse_nested_string_list(Some(&r#"[["a", "b"]]"#.to_string()), None),
             vec![vec!["a", "b"]]
         );
-        assert!(parse_nested_string_list(Some(&"bad".to_string()), None).is_empty());
+        assert_eq!(
+            parse_nested_string_list(Some(&"bad".to_string()), None).len(),
+            0
+        );
 
-        // Empty name prepare failure
         let empty_b = ParallelsIpswBuilder::new(ParallelsIpswConfig::default());
         assert!(empty_b.prepare().await.is_err());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_parallels_ipsw_step_run_ssh_port_configured() {
+    async fn test_parallels_ipsw_step_run_ssh_port_configured() -> Result<(), StampError> {
         let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
         ));
 
-        let mut config = ParallelsIpswConfig::default();
-        config.ssh_port = Some(crate::types::Port::new(2222));
+        let config = ParallelsIpswConfig {
+            ssh_port: Some(crate::types::Port::new(2222)),
+            ..Default::default()
+        };
 
         let mut step = StepRunVM {
             ui,
@@ -1181,34 +1086,28 @@ mod tests {
         let mut state = crate::engine::multistep::StateBag::new();
         state.put("vm_name", "test-vm-run-ssh-port".to_string());
 
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::set_var("PARALLELS_REAL_PRLCTL", "0");
-        }
-
-        use crate::engine::multistep::Step;
-        let _ = step.run(&mut state).await;
-
-        unsafe {
-            std::env::remove_var("PARALLELS_REAL_PRLCTL");
-        }
+        let action = step.run(&mut state).await?;
+        assert_eq!(action, StepAction::Continue);
+        assert_eq!(state.get::<u16>("ssh_port"), Some(&2222));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_parallels_ipsw_step_shutdown_prlctl_version_file() {
+    async fn test_parallels_ipsw_step_shutdown_prlctl_version_file() -> Result<(), StampError> {
         let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
         ));
 
-        let temp_dir = tempfile::tempdir().unwrap();
+        let temp_dir = tempfile::tempdir()?;
         let output_dir = temp_dir.path().to_string_lossy().to_string();
 
-        let mut config = ParallelsIpswConfig::default();
-        config.prlctl_version_file = Some("test_version.txt".to_string());
+        let config = ParallelsIpswConfig {
+            prlctl_version_file: Some("test_version.txt".to_string()),
+            output_directory: Some(output_dir),
+            ..Default::default()
+        };
 
         let mut step = StepShutdown {
             ui,
@@ -1218,20 +1117,10 @@ mod tests {
 
         let mut state = crate::engine::multistep::StateBag::new();
         state.put("vm_name", "test-vm-shutdown".to_string());
-        state.put("output_dir", output_dir.clone());
 
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::set_var("PARALLELS_REAL_PRLCTL", "0");
-        }
-
-        use crate::engine::multistep::Step;
-        let _ = step.run(&mut state).await;
-
-        unsafe {
-            std::env::remove_var("PARALLELS_REAL_PRLCTL");
-        }
+        let action = step.run(&mut state).await?;
+        assert_eq!(action, StepAction::Continue);
+        assert!(temp_dir.path().join("test_version.txt").exists());
+        Ok(())
     }
 }

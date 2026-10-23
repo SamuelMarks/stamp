@@ -93,7 +93,6 @@ impl DataSource for GoPluginDataSource {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
     use crate::r#gen::packer::ExecuteResponse;
@@ -157,16 +156,13 @@ mod tests {
 
         let config = GoPluginDataSourceConfig {
             source_type: "custom".to_string(),
-            plugin_path: "".to_string(),
+            plugin_path: String::new(),
             endpoint: Some(addr),
         };
         let ds = GoPluginDataSource::new(config);
         let val = ds.read().await?;
-        assert_eq!(
-            val.get("result").and_then(|v| v.as_str()),
-            Some("mock_data")
-        );
-        assert_eq!(val.get("active").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(val.get("result").and_then(Value::as_str), Some("mock_data"));
+        assert_eq!(val.get("active").and_then(Value::as_bool), Some(true));
         Ok(())
     }
 
@@ -176,7 +172,7 @@ mod tests {
         let addr = spawn_mock_server("normal").await?;
         let config = GoPluginDataSourceConfig {
             source_type: "custom".to_string(),
-            plugin_path: "".to_string(),
+            plugin_path: String::new(),
             endpoint: Some(format!("http://{addr}")),
         };
         let ds = GoPluginDataSource::new(config);
@@ -186,7 +182,7 @@ mod tests {
         let addr_err = spawn_mock_server("error").await?;
         let config_err = GoPluginDataSourceConfig {
             source_type: "custom".to_string(),
-            plugin_path: "".to_string(),
+            plugin_path: String::new(),
             endpoint: Some(addr_err),
         };
         let ds_err = GoPluginDataSource::new(config_err);
@@ -196,7 +192,7 @@ mod tests {
         let addr_inv = spawn_mock_server("invalid_json").await?;
         let config_inv = GoPluginDataSourceConfig {
             source_type: "custom".to_string(),
-            plugin_path: "".to_string(),
+            plugin_path: String::new(),
             endpoint: Some(addr_inv),
         };
         let ds_inv = GoPluginDataSource::new(config_inv);
@@ -206,7 +202,7 @@ mod tests {
         let addr_resp_err = spawn_mock_server("resp_error").await?;
         let config_resp_err = GoPluginDataSourceConfig {
             source_type: "custom".to_string(),
-            plugin_path: "".to_string(),
+            plugin_path: String::new(),
             endpoint: Some(addr_resp_err),
         };
         let ds_resp_err = GoPluginDataSource::new(config_resp_err);

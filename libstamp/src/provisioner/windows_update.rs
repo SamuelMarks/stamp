@@ -366,7 +366,6 @@ impl Provisioner for WindowsUpdateProvisioner {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -383,17 +382,13 @@ mod tests {
             if self.reboot && cmd.command.contains("powershell") {
                 Ok(crate::communicator::CommandResult {
                     exit_code: 3010,
-                    stdout: "Reboot required by Windows Update
-"
-                    .to_string(),
+                    stdout: "Reboot required by Windows Update\n".to_string(),
                     stderr: String::new(),
                 })
             } else {
                 Ok(crate::communicator::CommandResult {
                     exit_code: 0,
-                    stdout: "OK
-"
-                    .to_string(),
+                    stdout: "OK\n".to_string(),
                     stderr: String::new(),
                 })
             }
@@ -429,9 +424,10 @@ mod tests {
             only: None,
             except: None,
         };
-        assert_eq!(config.clone(), config);
-        assert_eq!(format!("{config:?}"), format!("{config:?}"));
-        let prov = WindowsUpdateProvisioner::new(config.clone());
+        let cloned = config.clone();
+        assert_eq!(cloned, config);
+        assert!(format!("{config:?}").contains("WindowsUpdateConfig"));
+        let prov = WindowsUpdateProvisioner::new(config);
         let script = prov.generate_wua_script();
         assert!(script.contains("IsInstalled=0"));
         assert!(script.contains("Security Updates"));

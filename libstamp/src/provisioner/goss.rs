@@ -148,7 +148,6 @@ impl Provisioner for GossProvisioner {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
     use crate::communicator::mock::MockCommunicator;
@@ -168,14 +167,17 @@ mod tests {
             inspect: true,
             remote_folder: Some("/tmp/specs".to_string()),
         };
-        assert_eq!(config.clone(), config);
-        assert_eq!(format!("{config:?}"), format!("{config:?}"));
+        let cloned = config.clone();
+        assert_eq!(cloned, config);
+        assert!(format!("{config:?}").contains("GossConfig"));
         let prov = GossProvisioner::new(config);
-        assert_eq!(format!("{prov:?}"), format!("{:?}", prov.clone()));
+        let prov_clone = prov.clone();
+        assert!(format!("{prov:?}").contains("GossProvisioner"));
+        assert_eq!(prov.config, prov_clone.config);
     }
 
     #[tokio::test]
-    async fn test_goss_provision_success() {
+    async fn test_goss_provision_success() -> Result<(), StampError> {
         let mock_comm = MockCommunicator::new();
         let ui = Arc::new(Ui::new(
             FeatureState::Disabled,
@@ -183,16 +185,9 @@ mod tests {
             FeatureState::Disabled,
         ));
 
-        let temp_dir = std::env::temp_dir();
-        let test_spec = temp_dir.join("goss.yaml");
-        let _ = tokio::fs::write(
-            &test_spec,
-            "port:
-  tcp:22:
-    listening: true
-",
-        )
-        .await;
+        let temp_dir = tempfile::tempdir()?;
+        let test_spec = temp_dir.path().join("goss.yaml");
+        tokio::fs::write(&test_spec, "port:\n  tcp:22:\n    listening: true\n").await?;
 
         let prov = GossProvisioner::new(GossConfig {
             tests: vec![test_spec.to_string_lossy().to_string()],
@@ -202,9 +197,8 @@ mod tests {
             ..Default::default()
         });
 
-        let res = prov.provision(&mock_comm, ui).await;
-        assert!(res.is_ok());
-        let _ = tokio::fs::remove_file(&test_spec).await;
+        prov.provision(&mock_comm, ui).await?;
+        Ok(())
     }
 
     #[tokio::test]

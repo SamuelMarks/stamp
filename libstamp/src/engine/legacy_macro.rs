@@ -635,18 +635,12 @@ pub fn interpolate_json_value(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::pedantic,
-    clippy::all,
-    for_loops_over_fallibles
-)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_tokenize_macro_valid_and_unclosed() {
-        let tokens = tokenize_macro("user `my_var` | clean_resource_name").unwrap();
+    fn test_tokenize_macro_valid_and_unclosed() -> Result<(), StampError> {
+        let tokens = tokenize_macro("user `my_var` | clean_resource_name")?;
         assert_eq!(
             tokens,
             vec![
@@ -657,115 +651,96 @@ mod tests {
             ]
         );
 
-        let err = tokenize_macro("user `unclosed").unwrap_err();
-        assert_eq!(
-            std::mem::discriminant(&err),
-            std::mem::discriminant(&StampError::Parse(String::new()))
-        );
+        let err = tokenize_macro("user `unclosed");
+        assert!(matches!(err, Err(StampError::Parse(_))));
+        Ok(())
     }
 
     #[test]
-    fn test_quotes_variations() {
+    fn test_quotes_variations() -> Result<(), StampError> {
         let ctx = LegacyMacroContext {
             user_variables: [("key".to_string(), "val".to_string())].into(),
             ..Default::default()
         };
 
-        assert_eq!(interpolate_string("{{ user `key` }}", &ctx).unwrap(), "val");
-        assert_eq!(interpolate_string("{{ user 'key' }}", &ctx).unwrap(), "val");
-        assert_eq!(
-            interpolate_string("{{ user \"key\" }}", &ctx).unwrap(),
-            "val"
-        );
-        assert_eq!(interpolate_string("{{user `key`}}", &ctx).unwrap(), "val");
+        assert_eq!(interpolate_string("{{ user `key` }}", &ctx)?, "val");
+        assert_eq!(interpolate_string("{{ user 'key' }}", &ctx)?, "val");
+        assert_eq!(interpolate_string("{{ user \"key\" }}", &ctx)?, "val");
+        assert_eq!(interpolate_string("{{user `key`}}", &ctx)?, "val");
+        Ok(())
     }
 
     #[test]
-    fn test_user_and_env_variables() {
+    fn test_user_and_env_variables() -> Result<(), StampError> {
         let mut ctx = LegacyMacroContext::new();
         ctx.set_user_var("app", "web-server");
         ctx.set_env_var("MY_ENV", "prod");
 
         let input = "name={{ user `app` }}-{{ env `MY_ENV` }}";
-        assert_eq!(
-            interpolate_string(input, &ctx).unwrap(),
-            "name=web-server-prod"
-        );
+        assert_eq!(interpolate_string(input, &ctx)?, "name=web-server-prod");
 
         // Missing user var without permissive mode
-        let err = interpolate_string("{{ user `missing` }}", &ctx).unwrap_err();
-        assert_eq!(
-            std::mem::discriminant(&err),
-            std::mem::discriminant(&StampError::Validation(String::new()))
-        );
+        let err = interpolate_string("{{ user `missing` }}", &ctx);
+        assert!(matches!(err, Err(StampError::Validation(_))));
 
         // Permissive mode
         ctx.permissive = true;
-        assert_eq!(
-            interpolate_string("{{ user `missing` }}", &ctx).unwrap(),
-            ""
-        );
+        assert_eq!(interpolate_string("{{ user `missing` }}", &ctx)?, "");
+        Ok(())
     }
 
     #[test]
-    fn test_timestamp_and_isotime() {
+    fn test_timestamp_and_isotime() -> Result<(), StampError> {
         let mut ctx = LegacyMacroContext::new();
-        ctx.timestamp = Some(1700000000);
+        ctx.timestamp = Some(1_700_000_000);
 
-        assert_eq!(
-            interpolate_string("{{ timestamp }}", &ctx).unwrap(),
-            "1700000000"
-        );
+        assert_eq!(interpolate_string("{{ timestamp }}", &ctx)?, "1700000000");
 
-        let iso_default = interpolate_string("{{ isotime }}", &ctx).unwrap();
+        let iso_default = interpolate_string("{{ isotime }}", &ctx)?;
         assert_eq!(iso_default, "2023-11-14T22:13:20+00:00");
 
-        let iso_formatted =
-            interpolate_string("{{ isotime `2006-01-02-15-04-05` }}", &ctx).unwrap();
+        let iso_formatted = interpolate_string("{{ isotime `2006-01-02-15-04-05` }}", &ctx)?;
         assert_eq!(iso_formatted, "2023-11-14-22-13-20");
 
-        let iso_date_only = interpolate_string("{{ isotime `2006-01-02` }}", &ctx).unwrap();
+        let iso_date_only = interpolate_string("{{ isotime `2006-01-02` }}", &ctx)?;
         assert_eq!(iso_date_only, "2023-11-14");
+        Ok(())
     }
 
     #[test]
-    fn test_uuid_pwd_template_dir() {
+    fn test_uuid_pwd_template_dir() -> Result<(), StampError> {
         let mut ctx = LegacyMacroContext::new();
         ctx.uuid = Some("12345678-1234-1234-1234-123456789abc".to_string());
         ctx.pwd = Some("/current/dir".to_string());
         ctx.template_dir = "/template/path".to_string();
 
         assert_eq!(
-            interpolate_string("{{ uuid }}", &ctx).unwrap(),
+            interpolate_string("{{ uuid }}", &ctx)?,
             "12345678-1234-1234-1234-123456789abc"
         );
+        assert_eq!(interpolate_string("{{ pwd }}", &ctx)?, "/current/dir");
         assert_eq!(
-            interpolate_string("{{ pwd }}", &ctx).unwrap(),
-            "/current/dir"
-        );
-        assert_eq!(
-            interpolate_string("{{ template_dir }}", &ctx).unwrap(),
+            interpolate_string("{{ template_dir }}", &ctx)?,
             "/template/path"
         );
         assert_eq!(
-            interpolate_string("{{ .TemplateDir }}", &ctx).unwrap(),
+            interpolate_string("{{ .TemplateDir }}", &ctx)?,
             "/template/path"
         );
-        assert_eq!(
-            interpolate_string("{{ .Path }}", &ctx).unwrap(),
-            "/template/path"
-        );
+        assert_eq!(interpolate_string("{{ .Path }}", &ctx)?, "/template/path");
+        Ok(())
     }
 
     #[test]
-    fn test_clean_resource_name() {
+    fn test_clean_resource_name() -> Result<(), StampError> {
         let ctx = LegacyMacroContext::default();
-        let res = interpolate_string("{{ clean_resource_name `my/custom:name!` }}", &ctx).unwrap();
+        let res = interpolate_string("{{ clean_resource_name `my/custom:name!` }}", &ctx)?;
         assert_eq!(res, "my-custom-name-");
+        Ok(())
     }
 
     #[test]
-    fn test_build_context_variables() {
+    fn test_build_context_variables() -> Result<(), StampError> {
         let mut ctx = LegacyMacroContext::new();
         ctx.build_name = "ubuntu-ami".to_string();
         ctx.build_type = "amazon-ebs".to_string();
@@ -778,86 +753,68 @@ mod tests {
         ctx.source_ami = Some("ami-source-111".to_string());
         ctx.source_ami_name = Some("ubuntu-base".to_string());
 
+        assert_eq!(interpolate_string("{{ build_name }}", &ctx)?, "ubuntu-ami");
+        assert_eq!(interpolate_string("{{ .BuildName }}", &ctx)?, "ubuntu-ami");
+        assert_eq!(interpolate_string("{{ build_type }}", &ctx)?, "amazon-ebs");
+        assert_eq!(interpolate_string("{{ .BuildType }}", &ctx)?, "amazon-ebs");
         assert_eq!(
-            interpolate_string("{{ build_name }}", &ctx).unwrap(),
-            "ubuntu-ami"
-        );
-        assert_eq!(
-            interpolate_string("{{ .BuildName }}", &ctx).unwrap(),
-            "ubuntu-ami"
-        );
-        assert_eq!(
-            interpolate_string("{{ build_type }}", &ctx).unwrap(),
-            "amazon-ebs"
-        );
-        assert_eq!(
-            interpolate_string("{{ .BuildType }}", &ctx).unwrap(),
-            "amazon-ebs"
-        );
-        assert_eq!(
-            interpolate_string("{{ build `ID` }}", &ctx).unwrap(),
+            interpolate_string("{{ build `ID` }}", &ctx)?,
             "ami-0123456789abcdef0"
         );
         assert_eq!(
-            interpolate_string("{{ build `PackerRunUUID` }}", &ctx).unwrap(),
+            interpolate_string("{{ build `PackerRunUUID` }}", &ctx)?,
             "run-uuid-123"
         );
+        assert_eq!(interpolate_string("{{ build `Host` }}", &ctx)?, "10.0.0.1");
+        assert_eq!(interpolate_string("{{ build `User` }}", &ctx)?, "ec2-user");
+        assert_eq!(interpolate_string("{{ build `Port` }}", &ctx)?, "22");
         assert_eq!(
-            interpolate_string("{{ build `Host` }}", &ctx).unwrap(),
-            "10.0.0.1"
-        );
-        assert_eq!(
-            interpolate_string("{{ build `User` }}", &ctx).unwrap(),
-            "ec2-user"
-        );
-        assert_eq!(
-            interpolate_string("{{ build `Port` }}", &ctx).unwrap(),
-            "22"
-        );
-        assert_eq!(
-            interpolate_string("{{ build `Password` }}", &ctx).unwrap(),
+            interpolate_string("{{ build `Password` }}", &ctx)?,
             "secret"
         );
         assert_eq!(
-            interpolate_string("{{ build `SourceAMI` }}", &ctx).unwrap(),
+            interpolate_string("{{ build `SourceAMI` }}", &ctx)?,
             "ami-source-111"
         );
         assert_eq!(
-            interpolate_string("{{ build `SourceAMIName` }}", &ctx).unwrap(),
+            interpolate_string("{{ build `SourceAMIName` }}", &ctx)?,
             "ubuntu-base"
         );
+        Ok(())
     }
 
     #[test]
-    fn test_pipes_and_subexpressions() {
+    fn test_pipes_and_subexpressions() -> Result<(), StampError> {
         let mut ctx = LegacyMacroContext::new();
         ctx.set_user_var("raw_name", "My App: v1.0");
 
         let piped = "{{ user `raw_name` | clean_resource_name }}";
-        assert_eq!(interpolate_string(piped, &ctx).unwrap(), "My-App--v1-0");
+        assert_eq!(interpolate_string(piped, &ctx)?, "My-App--v1-0");
 
         let nested = "{{ clean_resource_name (user `raw_name`) }}";
-        assert_eq!(interpolate_string(nested, &ctx).unwrap(), "My-App--v1-0");
+        assert_eq!(interpolate_string(nested, &ctx)?, "My-App--v1-0");
 
         let lower = "{{ user `raw_name` | lower }}";
-        assert_eq!(interpolate_string(lower, &ctx).unwrap(), "my app: v1.0");
+        assert_eq!(interpolate_string(lower, &ctx)?, "my app: v1.0");
 
         let upper = "{{ user `raw_name` | upper }}";
-        assert_eq!(interpolate_string(upper, &ctx).unwrap(), "MY APP: V1.0");
+        assert_eq!(interpolate_string(upper, &ctx)?, "MY APP: V1.0");
+        Ok(())
     }
 
     #[test]
-    fn test_split_and_replace() {
+    fn test_split_and_replace() -> Result<(), StampError> {
         let ctx = LegacyMacroContext::default();
         let split = "{{ split `a/b/c` `/` }}";
-        assert_eq!(interpolate_string(split, &ctx).unwrap(), "a");
+        assert_eq!(interpolate_string(split, &ctx)?, "a");
 
         let replaced = "{{ replace `hello world` `world` `packers` }}";
-        assert_eq!(interpolate_string(replaced, &ctx).unwrap(), "hello packers");
+        assert_eq!(interpolate_string(replaced, &ctx)?, "hello packers");
+        Ok(())
     }
 
     #[test]
-    fn test_interpolate_json_value() {
+    fn test_interpolate_json_value() -> Result<(), StampError> {
         let mut ctx = LegacyMacroContext::new();
         ctx.set_user_var("env", "staging");
         ctx.build_name = "my-box".to_string();
@@ -872,22 +829,24 @@ mod tests {
             ]
         });
 
-        interpolate_json_value(&mut val, &ctx).unwrap();
+        interpolate_json_value(&mut val, &ctx)?;
 
         assert_eq!(val["target"], "server-staging");
         assert_eq!(val["metadata"]["builder"], "my-box");
         assert_eq!(val["tags"][0], "tag-staging");
+        Ok(())
     }
 
     #[test]
-    fn test_unclosed_and_verbatim_macros() {
+    fn test_unclosed_and_verbatim_macros() -> Result<(), StampError> {
         let ctx = LegacyMacroContext::default();
         let unclosed = "hello {{ world without closing";
-        assert_eq!(interpolate_string(unclosed, &ctx).unwrap(), unclosed);
+        assert_eq!(interpolate_string(unclosed, &ctx)?, unclosed);
+        Ok(())
     }
 
     #[test]
-    fn test_macro_error_paths_and_edge_cases() {
+    fn test_macro_error_paths_and_edge_cases() -> Result<(), StampError> {
         let mut ctx = LegacyMacroContext::default();
 
         // 1. Missing arguments for macros
@@ -903,62 +862,51 @@ mod tests {
         // 2. Unknown build property (non-permissive vs permissive)
         assert!(interpolate_string("{{ build `nonexistent` }}", &ctx).is_err());
         ctx.permissive = true;
-        assert_eq!(
-            interpolate_string("{{ build `nonexistent` }}", &ctx).unwrap(),
-            ""
-        );
+        assert_eq!(interpolate_string("{{ build `nonexistent` }}", &ctx)?, "");
 
         // 3. Unknown function (non-permissive vs permissive)
         ctx.permissive = false;
         assert!(interpolate_string("{{ unknown_func }}", &ctx).is_err());
         ctx.permissive = true;
-        assert_eq!(interpolate_string("{{ unknown_func }}", &ctx).unwrap(), "");
+        assert_eq!(interpolate_string("{{ unknown_func }}", &ctx)?, "");
 
         // 4. Syntax errors in tokens (empty pipe, mismatched parentheses)
         ctx.permissive = false;
         assert!(interpolate_string("{{ | user `x` }}", &ctx).is_err());
         assert!(interpolate_string("{{ user `x` ( }}", &ctx).is_err());
         assert!(interpolate_string("{{ user `x` ) }}", &ctx).is_err());
-        assert!(interpolate_string("{{ }}", &ctx).unwrap().is_empty());
+        assert_eq!(interpolate_string("{{ }}", &ctx)?, "");
 
         // 5. Escaped quote in string literal
         let escaped = r#"{{ user "my\"var" }}"#;
         ctx.set_user_var("my\"var", "escaped_val");
-        assert_eq!(interpolate_string(escaped, &ctx).unwrap(), "escaped_val");
+        assert_eq!(interpolate_string(escaped, &ctx)?, "escaped_val");
 
         // 6. Chrono strftime format passthrough
         let strftime_res = convert_go_time_format_to_chrono("%Y-%m-%d");
         assert_eq!(strftime_res, "%Y-%m-%d");
+        Ok(())
     }
 
     #[test]
-    fn test_legacy_macro_coverage_comprehensive() {
-        // 1. Env fallback to std::env::var (line 259)
+    fn test_legacy_macro_coverage_comprehensive() -> Result<(), StampError> {
+        // 1. Env fallback to std::env::var
         let ctx_env = LegacyMacroContext::default();
         let env_res = interpolate_string("{{ env `PATH` }}", &ctx_env);
         assert!(env_res.is_ok());
 
-        // 2. Default uuid, pwd, and timestamp generation (lines 263, 283, 290-291)
+        // 2. Default uuid, pwd, and timestamp generation
         let ctx_defaults = LegacyMacroContext::default();
-        let uuid_res = interpolate_string("{{ uuid }}", &ctx_defaults);
-        assert!(uuid_res.is_ok());
-        for u in uuid_res {
-            assert!(!u.is_empty());
-        }
-        let pwd_res = interpolate_string("{{ pwd }}", &ctx_defaults);
-        assert!(pwd_res.is_ok());
-        for p in pwd_res {
-            assert!(!p.is_empty());
-        }
-        let ts_res = interpolate_string("{{ timestamp }}", &ctx_defaults);
-        assert!(ts_res.is_ok());
-        for ts in ts_res {
-            assert!(!ts.is_empty());
-        }
-        let vars_res = interpolate_string("{{ .Vars }}", &ctx_defaults);
-        assert_eq!(vars_res.as_deref().ok(), Some(""));
+        let u = interpolate_string("{{ uuid }}", &ctx_defaults)?;
+        assert_ne!(u, "");
+        let p = interpolate_string("{{ pwd }}", &ctx_defaults)?;
+        assert_ne!(p, "");
+        let ts = interpolate_string("{{ timestamp }}", &ctx_defaults)?;
+        assert_ne!(ts, "");
+        let vars_res = interpolate_string("{{ .Vars }}", &ctx_defaults)?;
+        assert_eq!(vars_res, "");
 
-        // 3. preserve_unresolved branches (lines 313, 319, 325, 331, 337, 343, 349, 355, 360-363, 384, 390, 577-580)
+        // 3. preserve_unresolved branches
         let ctx_unresolved = LegacyMacroContext {
             preserve_unresolved: true,
             ..Default::default()
@@ -978,31 +926,29 @@ mod tests {
             ("{{ build_type }}", "{{ build_type }}"),
         ];
         for (input, expected) in cases {
-            let res = interpolate_string(input, &ctx_unresolved);
-            assert_eq!(res.as_deref().ok(), Some(expected));
+            let res = interpolate_string(input, &ctx_unresolved)?;
+            assert_eq!(res, expected);
         }
 
         // Test build Name and Type when populated
-        let mut ctx_resolved = LegacyMacroContext::default();
-        ctx_resolved.build_name = "my-name".to_string();
-        ctx_resolved.build_type = "my-type".to_string();
+        let ctx_resolved = LegacyMacroContext {
+            build_name: "my-name".to_string(),
+            build_type: "my-type".to_string(),
+            ..Default::default()
+        };
         assert_eq!(
-            interpolate_string("{{ build `Name` }}", &ctx_resolved)
-                .as_deref()
-                .ok(),
-            Some("my-name")
+            interpolate_string("{{ build `Name` }}", &ctx_resolved)?,
+            "my-name"
         );
         assert_eq!(
-            interpolate_string("{{ build `Type` }}", &ctx_resolved)
-                .as_deref()
-                .ok(),
-            Some("my-type")
+            interpolate_string("{{ build `Type` }}", &ctx_resolved)?,
+            "my-type"
         );
 
-        // 4. Nested parentheses and parentheses errors (lines 487-490, 494, 517-518)
+        // 4. Nested parentheses and parentheses errors
         let ctx = LegacyMacroContext::default();
-        let nested_res = interpolate_string("{{ upper (lower (upper `nested`)) }}", &ctx);
-        assert_eq!(nested_res.as_deref().ok(), Some("NESTED"));
+        let nested_res = interpolate_string("{{ upper (lower (upper `nested`)) }}", &ctx)?;
+        assert_eq!(nested_res, "NESTED");
 
         let unmatched_res = interpolate_string("{{ upper (lower `abc` }}", &ctx);
         assert!(unmatched_res.is_err());
@@ -1010,33 +956,33 @@ mod tests {
         let unexpected_res = interpolate_string("{{ upper ) }}", &ctx);
         assert!(unexpected_res.is_err());
 
-        // 5. Ident as arguments (line 523) and evaluate_stage with Pipe
-        let ident_arg_res = interpolate_string("{{ lower FOO }}", &ctx);
-        assert_eq!(ident_arg_res.as_deref().ok(), Some("foo"));
+        // 5. Ident as arguments and evaluate_stage with Pipe
+        let ident_arg_res = interpolate_string("{{ lower FOO }}", &ctx)?;
+        assert_eq!(ident_arg_res, "foo");
         assert!(evaluate_stage(&[MacroToken::Pipe], None, &ctx).is_err());
         let _ = evaluate_tokens(
             &[MacroToken::Ident("lower".to_string()), MacroToken::Pipe],
             &ctx,
         );
 
-        // 6. Macro stage missing function name (lines 529-531)
+        // 6. Macro stage missing function name
         let missing_fn_res = interpolate_string("{{ `string_only` }}", &ctx);
         assert!(missing_fn_res.is_err());
 
-        // 7. Primitive JSON values in interpolate_json_value (line 617)
+        // 7. Primitive JSON values in interpolate_json_value
         let mut json_val = serde_json::json!({
             "num": 42,
             "bool": true,
             "null": null,
             "text": "{{ upper `hello` }}"
         });
-        assert!(interpolate_json_value(&mut json_val, &ctx).is_ok());
+        interpolate_json_value(&mut json_val, &ctx)?;
         assert_eq!(json_val["num"], 42);
         assert_eq!(json_val["bool"], true);
         assert_eq!(json_val["null"], serde_json::Value::Null);
         assert_eq!(json_val["text"], "HELLO");
 
-        // 8. Error propagation branches (lines 481, 570, 621, 625, 630)
+        // 8. Error propagation branches
         assert!(interpolate_string("{{ upper (unknown_func) }}", &ctx).is_err());
         assert!(interpolate_string("{{ upper \"unclosed }}", &ctx).is_err());
 
@@ -1048,5 +994,6 @@ mod tests {
 
         let mut bad_obj = serde_json::json!({ "k": "{{ upper \"unclosed }}" });
         assert!(interpolate_json_value(&mut bad_obj, &ctx).is_err());
+        Ok(())
     }
 }

@@ -484,7 +484,7 @@ impl PluginServer {
 /// # impl Builder for MyBuilder {
 /// #     fn name(&self) -> String { "my".into() }
 /// #     async fn prepare(&self) -> Result<(), libstamp::error::StampError> { Ok(()) }
-/// #     async fn run(&self, _: std::sync::Arc<dyn libstamp::engine::hook::ProvisionHook>, _: std::sync::Arc<libstamp::engine::ui::Ui>, _: libstamp::engine::packer::OnErrorStrategy) -> Result<Box<dyn libstamp::artifact::Artifact>, libstamp::error::StampError> { Ok(Box::new(libstamp::artifact::MockArtifact { builder_id: "".into(), id: "".into(), files: vec![] })) }
+/// #     async fn run(&self, _: std::sync::Arc<dyn libstamp::engine::hook::ProvisionHook>, _: std::sync::Arc<libstamp::engine::ui::Ui>, _: libstamp::engine::packer::OnErrorStrategy) -> Result<Box<dyn libstamp::artifact::Artifact>, libstamp::error::StampError> { Ok(Box::new(libstamp::artifact::BuildArtifact::default())) }
 /// #     async fn cancel(&self) -> Result<(), libstamp::error::StampError> { Ok(()) }
 /// # }
 /// # #[tokio::main]
@@ -520,7 +520,7 @@ macro_rules! serve_plugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libstamp::artifact::MockArtifact;
+    use libstamp::artifact::BuildArtifact;
     use libstamp::communicator::Communicator;
     use libstamp::engine::hook::ProvisionHook;
     use libstamp::engine::packer::OnErrorStrategy;
@@ -555,11 +555,11 @@ mod tests {
             if self.should_fail {
                 Err(StampError::Execution("run failed".to_string()))
             } else {
-                Ok(Box::new(MockArtifact {
-                    builder_id: "dummy".to_string(),
-                    id: "dummy-id".to_string(),
-                    files: vec!["disk.qcow2".into()],
-                }))
+                Ok(Box::new(BuildArtifact::with_builder(
+                    "dummy".to_string(),
+                    "dummy-id".to_string(),
+                    vec!["disk.qcow2".into()],
+                )))
             }
         }
         async fn cancel(&self) -> Result<(), StampError> {
@@ -885,32 +885,22 @@ mod tests {
 
     #[test]
     fn test_verify_handshake_enforcement_paths() {
-        let old_cookie = std::env::var(MAGIC_COOKIE_KEY).ok();
-
         // 1. Missing cookie
-        unsafe {
-            std::env::remove_var(MAGIC_COOKIE_KEY);
+        {
+            let _env = libstamp::utils::ScopedEnvVar::remove(MAGIC_COOKIE_KEY);
+            assert!(verify_handshake_internal(true).is_err());
         }
-        assert!(verify_handshake_internal(true).is_err());
 
         // 2. Invalid cookie
-        unsafe {
-            std::env::set_var(MAGIC_COOKIE_KEY, "invalid_magic_cookie");
+        {
+            let _env = libstamp::utils::ScopedEnvVar::set(MAGIC_COOKIE_KEY, "invalid_magic_cookie");
+            assert!(verify_handshake_internal(true).is_err());
         }
-        assert!(verify_handshake_internal(true).is_err());
 
         // 3. Valid cookie
-        unsafe {
-            std::env::set_var(MAGIC_COOKIE_KEY, MAGIC_COOKIE_VALUE);
-        }
-        assert!(verify_handshake_internal(true).is_ok());
-
-        unsafe {
-            if let Some(c) = old_cookie {
-                std::env::set_var(MAGIC_COOKIE_KEY, c);
-            } else {
-                std::env::remove_var(MAGIC_COOKIE_KEY);
-            }
+        {
+            let _env = libstamp::utils::ScopedEnvVar::set(MAGIC_COOKIE_KEY, MAGIC_COOKIE_VALUE);
+            assert!(verify_handshake_internal(true).is_ok());
         }
     }
 

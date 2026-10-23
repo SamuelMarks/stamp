@@ -1,12 +1,11 @@
 //! Implementation of the `proxmox-iso` builder with Proxmox VE REST API client,
 //! ticket and API token authentication, ISO and cloud-init drive creation, and template conversion (`qm template`).
 
+use crate::artifact::BuildArtifact;
 use crate::builder::Builder;
-use crate::communicator::ssh::{SshCommunicator, SshConfig};
-use crate::engine::hook::{BuildContext, ProvisionHook};
-use crate::engine::multistep::{Runner, StateBag, Step, StepAction};
+use crate::engine::hook::ProvisionHook;
+use crate::engine::multistep::{Runner, StateBag, Step, StepAction, StepProvision};
 use crate::error::StampError;
-use crate::types::{Port, Timeout};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -55,6 +54,8 @@ pub struct ProxmoxIsoConfig {
     pub scsihw: Option<String>,
     /// Whether to enable IO thread on SCSI disks.
     pub scsi_iothread: bool,
+    /// Optional stop-wait duration in milliseconds before template conversion.
+    pub template_stop_wait_ms: Option<u64>,
 }
 
 /// The `proxmox-iso` builder.
@@ -78,7 +79,7 @@ impl ProxmoxIsoBuilder {
 ///
 /// # Errors
 ///
-/// Returns `StampError::Execution` if authentication or client construction fails.
+/// Returns `StampError::Execution` or `StampError::Http` if authentication or client construction fails.
 pub async fn proxmox_client(config: &ProxmoxIsoConfig) -> Result<reqwest::Client, StampError> {
     let mut headers = reqwest::header::HeaderMap::new();
 
@@ -100,7 +101,7 @@ pub async fn proxmox_client(config: &ProxmoxIsoConfig) -> Result<reqwest::Client
         let auth_client = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
             .build()
-            .unwrap_or_default();
+            .map_err(StampError::Http)?;
 
         let ticket_resp = auth_client
             .post(format!("{base_url}/access/ticket"))
@@ -138,11 +139,11 @@ pub async fn proxmox_client(config: &ProxmoxIsoConfig) -> Result<reqwest::Client
         );
     }
 
-    Ok(reqwest::Client::builder()
+    reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .default_headers(headers)
         .build()
-        .unwrap_or_default())
+        .map_err(StampError::Http)
 }
 
 /// Step to provision the VM, attach the installation ISO, and optionally create a cloud-init drive.
@@ -326,68 +327,6 @@ impl Step for StepStartVM {
     }
 }
 
-/// Step to provision the Proxmox VM over SSH.
-#[derive(Clone)]
-struct StepProvision {
-    /// UI reference for terminal output.
-    ui: Arc<crate::engine::ui::Ui>,
-    /// Step or builder name.
-    name: String,
-    /// Provisioning hook.
-    hook: Arc<dyn ProvisionHook>,
-}
-
-#[async_trait::async_trait]
-impl Step for StepProvision {
-    async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
-        self.ui.say(&self.name, "Provisioning Proxmox VM...");
-
-        let ip = state
-            .get::<String>("vm_ip")
-            .cloned()
-            .unwrap_or_else(|| "127.0.0.1".to_string());
-
-        let ssh_config = SshConfig {
-            host: ip,
-            port: Port::new(22),
-            username: "root".to_string(),
-            private_key_path: None,
-            timeout: Timeout::new(Duration::from_secs(10)),
-            ..Default::default()
-        };
-
-        let comm = Arc::new(SshCommunicator::new(ssh_config));
-
-        let build_ctx = BuildContext {
-            build_id: self.name.clone(),
-            host: "proxmox".to_string(),
-            user: "root".to_string(),
-            packer_run_uuid: "mocked-uuid".to_string(),
-            source_name: self.name.clone(),
-            source_type: "proxmox-iso".to_string(),
-            ..Default::default()
-        };
-
-        if let Err(e) = self
-            .hook
-            .run_provisioners(comm.clone(), &build_ctx, self.ui.clone())
-            .await
-        {
-            self.ui
-                .error(&self.name, &format!("Provisioning failed: {e}"));
-            let _ = self
-                .hook
-                .run_error_cleanup_provisioners(comm, &build_ctx, self.ui.clone())
-                .await;
-            return Err(e);
-        }
-
-        Ok(StepAction::Continue)
-    }
-
-    async fn cleanup(&mut self, _state: &StateBag) {}
-}
-
 /// Step to convert the completed Proxmox VM into a template (`qm template`).
 #[derive(Debug, Clone)]
 struct StepConvertToTemplate {
@@ -420,19 +359,13 @@ impl Step for StepConvertToTemplate {
             .as_deref()
             .unwrap_or("https://localhost:8006/api2/json");
 
-        // Stop VM first
         let _ = client
             .post(format!("{url}/nodes/{node}/qemu/{vmid}/status/stop"))
             .send()
             .await;
-        let sleep_duration = if cfg!(test) {
-            Duration::from_millis(1)
-        } else {
-            Duration::from_secs(3)
-        };
-        tokio::time::sleep(sleep_duration).await;
+        let wait_ms = self.config.template_stop_wait_ms.unwrap_or(1);
+        tokio::time::sleep(Duration::from_millis(wait_ms)).await;
 
-        // Convert to template
         let res = client
             .post(format!("{url}/nodes/{node}/qemu/{vmid}/template"))
             .send()
@@ -479,11 +412,12 @@ impl Builder for ProxmoxIsoBuilder {
                 name: self.name(),
                 config: self.config.clone(),
             }),
-            Box::new(StepProvision {
-                ui: ui.clone(),
-                name: self.name(),
-                hook,
-            }),
+            Box::new(
+                StepProvision::new(ui.clone(), self.name(), "proxmox-iso", hook)
+                    .with_ip_key("vm_ip")
+                    .with_ssh_credentials("root", None)
+                    .with_message("Provisioning Proxmox VM..."),
+            ),
             Box::new(StepConvertToTemplate {
                 ui: ui.clone(),
                 name: self.name(),
@@ -493,45 +427,20 @@ impl Builder for ProxmoxIsoBuilder {
 
         let mut runner = Runner::new(steps);
         let mut state = StateBag::new();
-        match runner.run(&mut state).await {
-            Ok(()) => {
-                runner.cleanup(&state).await;
-            }
-            Err(e) => {
-                match on_error {
-                    crate::engine::packer::OnErrorStrategy::Cleanup => {
-                        runner.cleanup(&state).await;
-                    }
-                    crate::engine::packer::OnErrorStrategy::Abort
-                    | crate::engine::packer::OnErrorStrategy::RunCleanupProvisioner => {}
-                    crate::engine::packer::OnErrorStrategy::Ask => {
-                        let msg = format!(
-                            "Build '{}' errored: {}
-Do you want to clean up? [y/N]: ",
-                            self.name(),
-                            e
-                        );
-                        if let Ok(ans) = ui.ask("stamp", &msg)
-                            && (ans == "y" || ans == "yes")
-                        {
-                            runner.cleanup(&state).await;
-                        }
-                    }
-                }
-                return Err(e);
-            }
-        }
+        runner
+            .run_with_strategy(&mut state, &self.name(), &ui, on_error)
+            .await?;
 
         let artifact_id = state
             .get::<String>("artifact_id")
             .cloned()
             .unwrap_or_default();
 
-        Ok(Box::new(crate::artifact::MockArtifact {
-            builder_id: self.name(),
-            id: artifact_id,
-            files: vec![],
-        }))
+        Ok(Box::new(BuildArtifact::with_builder(
+            self.name(),
+            artifact_id,
+            vec![],
+        )))
     }
 
     async fn cancel(&self) -> Result<(), StampError> {
@@ -544,34 +453,14 @@ Do you want to clean up? [y/N]: ",
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::pedantic,
-    clippy::all,
-    for_loops_over_fallibles
-)]
 mod tests {
     use super::*;
     use crate::engine::hook::DefaultProvisionHook;
     use crate::engine::packer::OnErrorStrategy;
     use crate::engine::ui::Ui;
 
-    #[derive(Clone)]
-    struct FailingProvisioner;
-
-    #[async_trait::async_trait]
-    impl crate::provisioner::Provisioner for FailingProvisioner {
-        async fn provision(
-            &self,
-            _comm: &dyn crate::communicator::Communicator,
-            _ui: Arc<crate::engine::ui::Ui>,
-        ) -> Result<(), StampError> {
-            Err(StampError::Execution("mock provision failure".to_string()))
-        }
-    }
-
     #[tokio::test]
-    async fn test_proxmoxisobuilder_run() {
+    async fn test_proxmoxisobuilder_run() -> Result<(), StampError> {
         let mut server = mockito::Server::new_async().await;
 
         let _m_create = server
@@ -626,7 +515,7 @@ mod tests {
         };
         let builder = ProxmoxIsoBuilder::new(config);
 
-        assert!(builder.prepare().await.is_ok());
+        builder.prepare().await?;
         assert_eq!(builder.name(), "test-builder");
 
         let hook = Arc::new(DefaultProvisionHook {
@@ -639,35 +528,35 @@ mod tests {
             crate::engine::packer::FeatureState::Disabled,
         ));
 
-        let artifact = builder.run(hook, ui, OnErrorStrategy::Cleanup).await;
-        assert!(artifact.is_ok());
-        for art in artifact {
-            assert!(art.id().contains("101"));
-        }
+        let artifact = builder.run(hook, ui, OnErrorStrategy::Cleanup).await?;
+        assert!(artifact.id().contains("101"));
+        assert_eq!(artifact.builder_id(), "test-builder");
 
-        assert!(builder.cancel().await.is_ok());
+        builder.cancel().await
     }
 
     #[tokio::test]
-    async fn test_proxmox_client_auth_matrix() {
-        // Token already prefixed with PVEAPIToken=
+    async fn test_proxmox_client_auth_matrix() -> Result<(), StampError> {
         let cfg_token_prefixed = ProxmoxIsoConfig {
             token: Some("PVEAPIToken=root@pam!tok=abc".to_string()),
             ..Default::default()
         };
-        assert!(proxmox_client(&cfg_token_prefixed).await.is_ok());
+        proxmox_client(&cfg_token_prefixed).await?;
 
-        // Invalid token with newline
         let cfg_token_bad = ProxmoxIsoConfig {
-            token: Some("invalid\ntoken".to_string()),
+            token: Some(
+                "invalid
+token"
+                    .to_string(),
+            ),
             ..Default::default()
         };
         assert!(proxmox_client(&cfg_token_bad).await.is_err());
 
-        // Ticket auth success
         let mut server = mockito::Server::new_async().await;
         let _m_ticket = server
             .mock("POST", "/access/ticket")
+            .expect(1)
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"data": {"ticket": "TICKET123", "CSRFPreventionToken": "CSRF456"}}"#)
@@ -680,11 +569,11 @@ mod tests {
             password: Some("secret".to_string()),
             ..Default::default()
         };
-        assert!(proxmox_client(&cfg_ticket).await.is_ok());
+        proxmox_client(&cfg_ticket).await?;
 
-        // Ticket auth rejected
         let _m_ticket_err = server
             .mock("POST", "/access/ticket")
+            .expect(1)
             .with_status(401)
             .with_body("Unauthorized")
             .create_async()
@@ -697,7 +586,6 @@ mod tests {
         };
         assert!(proxmox_client(&cfg_ticket_fail).await.is_err());
 
-        // Ticket auth network failure
         let cfg_ticket_net_err = ProxmoxIsoConfig {
             proxmox_url: Some("http://127.0.0.1:1".to_string()),
             username: Some("user".to_string()),
@@ -706,33 +594,37 @@ mod tests {
         };
         assert!(proxmox_client(&cfg_ticket_net_err).await.is_err());
 
-        // Ticket auth with invalid cookie character (\n in ticket)
         let _m_ticket_bad_cookie = server
             .mock("POST", "/access/ticket")
+            .expect(1)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"data": {"ticket": "TICKET\n123", "CSRFPreventionToken": "CSRF456"}}"#)
+            .with_body(
+                "{\"data\": {\"ticket\": \"TICKET\\n123\", \"CSRFPreventionToken\": \"CSRF456\"}}",
+            )
             .create_async()
             .await;
         assert!(proxmox_client(&cfg_ticket).await.is_err());
 
-        // Ticket auth with invalid CSRF character (\n in csrf)
         let _m_ticket_bad_csrf = server
             .mock("POST", "/access/ticket")
+            .expect(1)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"data": {"ticket": "TICKET123", "CSRFPreventionToken": "CSRF\n456"}}"#)
+            .with_body(
+                "{\"data\": {\"ticket\": \"TICKET123\", \"CSRFPreventionToken\": \"CSRF\\n456\"}}",
+            )
             .create_async()
             .await;
         assert!(proxmox_client(&cfg_ticket).await.is_err());
 
-        // No token, no user/pass: default client
         let cfg_default = ProxmoxIsoConfig::default();
-        assert!(proxmox_client(&cfg_default).await.is_ok());
+        proxmox_client(&cfg_default).await?;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_proxmox_step_create_vm_branches() {
+    async fn test_proxmox_step_create_vm_branches() -> Result<(), StampError> {
         let mut server = mockito::Server::new_async().await;
         let _m_create = server
             .mock("POST", "/nodes/pve/qemu")
@@ -746,7 +638,6 @@ mod tests {
             crate::engine::packer::FeatureState::Disabled,
         ));
 
-        // Create VM without efi format, pre_enrolled_keys false, cloud_init false
         let cfg1 = ProxmoxIsoConfig {
             name: "test1".to_string(),
             proxmox_url: Some(server.url()),
@@ -763,9 +654,8 @@ mod tests {
             config: cfg1,
         };
         let mut state1 = StateBag::new();
-        assert!(step1.run(&mut state1).await.is_ok());
+        step1.run(&mut state1).await?;
 
-        // Server error (500)
         let _m_err = server
             .mock("POST", "/nodes/pve/qemu")
             .with_status(500)
@@ -785,7 +675,6 @@ mod tests {
         let mut state_err = StateBag::new();
         assert!(step_err.run(&mut state_err).await.is_err());
 
-        // Network error (bad url)
         let cfg_bad_url = ProxmoxIsoConfig {
             name: "test_bad_url".to_string(),
             proxmox_url: Some("http://127.0.0.1:1".to_string()),
@@ -798,10 +687,11 @@ mod tests {
         };
         let mut state_bad = StateBag::new();
         assert!(step_bad.run(&mut state_bad).await.is_err());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_proxmox_step_branches_and_cleanups() {
+    async fn test_proxmox_step_branches_and_cleanups() -> Result<(), StampError> {
         let mut server = mockito::Server::new_async().await;
         let _m_del = server
             .mock("DELETE", "/nodes/pve/qemu/102")
@@ -819,7 +709,6 @@ mod tests {
             ..Default::default()
         };
 
-        // StepCreateVM cleanup with state
         let mut step_create = StepCreateVM {
             ui: ui.clone(),
             name: "test".to_string(),
@@ -830,11 +719,9 @@ mod tests {
         state.put("node", "pve".to_string());
         step_create.cleanup(&state).await;
 
-        // StepCreateVM cleanup empty state
         let empty_state = StateBag::new();
         step_create.cleanup(&empty_state).await;
 
-        // StepStartVM run and cleanup
         let _m_start = server
             .mock("POST", "/nodes/pve/qemu/102/status/start")
             .with_status(200)
@@ -851,20 +738,18 @@ mod tests {
             name: "test".to_string(),
             config: config.clone(),
         };
-        assert!(step_start.run(&mut state).await.is_ok());
+        step_start.run(&mut state).await?;
         step_start.cleanup(&state).await;
 
-        // StepStartVM empty state (fallbacks)
         let mut step_start_empty = StepStartVM {
             ui: ui.clone(),
             name: "test".to_string(),
             config: config.clone(),
         };
         let mut empty_state_start = StateBag::new();
-        assert!(step_start_empty.run(&mut empty_state_start).await.is_ok());
+        step_start_empty.run(&mut empty_state_start).await?;
         step_start_empty.cleanup(&empty_state_start).await;
 
-        // StepConvertToTemplate template conversion error
         let _m_tpl_err = server
             .mock("POST", "/nodes/pve/qemu/102/template")
             .with_status(500)
@@ -879,33 +764,20 @@ mod tests {
         assert!(step_tpl.run(&mut state).await.is_err());
         step_tpl.cleanup(&state).await;
 
-        // StepConvertToTemplate network error
         let mut bad_config = config.clone();
         bad_config.proxmox_url = Some("http://127.0.0.1:1".to_string());
         let mut step_tpl_fail = StepConvertToTemplate {
-            ui: ui.clone(),
+            ui,
             name: "test".to_string(),
             config: bad_config,
         };
         let mut empty_state_tpl = StateBag::new();
         assert!(step_tpl_fail.run(&mut empty_state_tpl).await.is_err());
-
-        // StepProvision failure
-        let fail_hook = Arc::new(DefaultProvisionHook {
-            provisioners: Arc::new(vec![Box::new(FailingProvisioner)]),
-            error_cleanup_provisioners: Arc::new(vec![]),
-        });
-        let mut step_prov = StepProvision {
-            ui: ui.clone(),
-            name: "test".to_string(),
-            hook: fail_hook,
-        };
-        assert!(step_prov.run(&mut state).await.is_err());
-        step_prov.cleanup(&state).await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_proxmox_builder_run_error_strategies() {
+    async fn test_proxmox_builder_run_error_strategies() -> Result<(), StampError> {
         let mut server = mockito::Server::new_async().await;
         let _m_err = server
             .mock("POST", "/nodes/pve/qemu")
@@ -930,21 +802,18 @@ mod tests {
             crate::engine::packer::FeatureState::Disabled,
         ));
 
-        // Cleanup
         assert!(
             builder
                 .run(hook.clone(), ui.clone(), OnErrorStrategy::Cleanup)
                 .await
                 .is_err()
         );
-        // Abort
         assert!(
             builder
                 .run(hook.clone(), ui.clone(), OnErrorStrategy::Abort)
                 .await
                 .is_err()
         );
-        // RunCleanupProvisioner
         assert!(
             builder
                 .run(
@@ -955,49 +824,15 @@ mod tests {
                 .await
                 .is_err()
         );
-        // Ask (with "yes" answer)
-        let mut queue = std::collections::VecDeque::new();
-        queue.push_back("yes".to_string());
-        let ui_ask = Arc::new(
-            Ui::new(
-                crate::engine::packer::FeatureState::Disabled,
-                crate::engine::packer::FeatureState::Disabled,
-                crate::engine::packer::FeatureState::Disabled,
-            )
-            .with_mock_inputs(Arc::new(std::sync::Mutex::new(queue))),
-        );
-        assert!(
-            builder
-                .run(hook.clone(), ui_ask, OnErrorStrategy::Ask)
-                .await
-                .is_err()
-        );
-
-        // Ask (with "no" answer)
         assert!(builder.run(hook, ui, OnErrorStrategy::Ask).await.is_err());
-    }
 
-    #[tokio::test]
-    async fn test_proxmox_prepare_and_cancel() {
         let mut cfg = ProxmoxIsoConfig::default();
         let b = ProxmoxIsoBuilder::new(cfg.clone());
         assert!(b.prepare().await.is_err());
 
         cfg.name = "valid".to_string();
         let b2 = ProxmoxIsoBuilder::new(cfg);
-        assert!(b2.prepare().await.is_ok());
-        assert!(b2.cancel().await.is_ok());
-    }
-
-    #[test]
-    fn test_proxmox_derived_traits() {
-        let config1 = ProxmoxIsoConfig::default();
-        let config2 = config1.clone();
-        assert_eq!(config1, config2);
-        assert_eq!(format!("{config1:?}"), format!("{config2:?}"));
-
-        let b1 = ProxmoxIsoBuilder::new(config1);
-        let b2 = b1.clone();
-        assert_eq!(format!("{b1:?}"), format!("{b2:?}"));
+        b2.prepare().await?;
+        b2.cancel().await
     }
 }

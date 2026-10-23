@@ -501,14 +501,13 @@ impl PluginSupervisor {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_handshake_parse_valid() {
+    fn test_handshake_parse_valid() -> Result<(), StampError> {
         let line = "1|2|tcp|127.0.0.1:12345|grpc|certdata";
-        let hs: Handshake = line.parse().unwrap();
+        let hs: Handshake = line.parse()?;
         assert_eq!(hs.core_protocol_version, "1");
         assert_eq!(hs.app_protocol_version, "2");
         assert_eq!(hs.network_type, NetworkType::Tcp);
@@ -517,14 +516,15 @@ mod tests {
         assert_eq!(hs.server_cert.as_deref(), Some("certdata"));
 
         let line_net_rpc = "1|1|unix|/tmp/test.sock|net/rpc";
-        let hs2: Handshake = line_net_rpc.parse().unwrap();
+        let hs2: Handshake = line_net_rpc.parse()?;
         assert_eq!(hs2.network_type, NetworkType::Unix);
         assert_eq!(hs2.protocol, Protocol::NetRpc);
         assert_eq!(hs2.server_cert, None);
 
         let default_protocol = "1|1|tcp|127.0.0.1:9999";
-        let hs3: Handshake = default_protocol.parse().unwrap();
+        let hs3: Handshake = default_protocol.parse()?;
         assert_eq!(hs3.protocol, Protocol::NetRpc);
+        Ok(())
     }
 
     #[test]
@@ -574,60 +574,61 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_supervisor_perform_healthcheck() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let local_addr = listener.local_addr().unwrap();
+    async fn test_supervisor_perform_healthcheck() -> Result<(), StampError> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let local_addr = listener.local_addr()?;
 
         tokio::spawn(async move {
-            tonic::transport::Server::builder()
+            let _ = tonic::transport::Server::builder()
                 .add_service(crate::r#gen::packer::health_server::HealthServer::new(
                     MockHealthService,
                 ))
                 .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-                .await
-                .unwrap();
+                .await;
         });
 
         let is_healthy =
             PluginSupervisor::perform_healthcheck(&local_addr.to_string(), &NetworkType::Tcp)
-                .await
-                .unwrap();
+                .await?;
         assert!(is_healthy);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_supervisor_spawn_cancel_and_wait() {
-        let mut cfg = PluginSupervisorConfig::default();
-        cfg.plugin_path = PathBuf::from("sh");
-        cfg.args = vec![
-            "-c".to_string(),
-            "echo '1|1|tcp|127.0.0.1:12345|grpc|' && sleep 5".to_string(),
-        ];
-        cfg.graceful_timeout = Duration::from_millis(100);
+    async fn test_supervisor_spawn_cancel_and_wait() -> Result<(), StampError> {
+        let cfg = PluginSupervisorConfig {
+            plugin_path: PathBuf::from("sh"),
+            args: vec![
+                "-c".to_string(),
+                "echo '1|1|tcp|127.0.0.1:12345|grpc|' && sleep 5".to_string(),
+            ],
+            graceful_timeout: Duration::from_millis(100),
+            ..Default::default()
+        };
 
-        let plugin = PluginSupervisor::spawn(cfg).await.unwrap();
+        let plugin = PluginSupervisor::spawn(cfg).await?;
         assert_eq!(plugin.handshake.protocol, Protocol::Grpc);
         assert_eq!(plugin.handshake.address, "127.0.0.1:12345");
         assert!(plugin.is_alive());
 
-        plugin.cancel().await.unwrap();
-        let exit_code = plugin.wait().await.unwrap();
+        plugin.cancel().await?;
+        let exit_code = plugin.wait().await?;
         assert_ne!(exit_code, 0);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_supervisor_is_cancelled_and_heartbeat() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let local_addr = listener.local_addr().unwrap();
+    async fn test_supervisor_is_cancelled_and_heartbeat() -> Result<(), StampError> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let local_addr = listener.local_addr()?;
 
         tokio::spawn(async move {
-            tonic::transport::Server::builder()
+            let _ = tonic::transport::Server::builder()
                 .add_service(crate::r#gen::packer::health_server::HealthServer::new(
                     MockHealthService,
                 ))
                 .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-                .await
-                .unwrap();
+                .await;
         });
 
         let plugin = SupervisedPlugin {
@@ -677,21 +678,21 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(dead_plugin.is_cancelled());
         dead_handle.abort();
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_supervisor_create_channel() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let local_addr = listener.local_addr().unwrap();
+    async fn test_supervisor_create_channel() -> Result<(), StampError> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let local_addr = listener.local_addr()?;
 
         tokio::spawn(async move {
-            tonic::transport::Server::builder()
+            let _ = tonic::transport::Server::builder()
                 .add_service(crate::r#gen::packer::health_server::HealthServer::new(
                     MockHealthService,
                 ))
                 .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-                .await
-                .unwrap();
+                .await;
         });
 
         let plugin = SupervisedPlugin {
@@ -734,16 +735,17 @@ mod tests {
             client_key: None,
         };
         let _ = plugin_bad_cert.create_channel().await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_supervisor_extra_channel_and_healthcheck() {
-        let temp_dir = tempfile::tempdir().unwrap();
+    async fn test_supervisor_extra_channel_and_healthcheck() -> Result<(), StampError> {
+        let temp_dir = tempfile::tempdir()?;
         let sock_path = temp_dir.path().join("test.sock");
 
         #[cfg(unix)]
         {
-            let uds = tokio::net::UnixListener::bind(&sock_path).unwrap();
+            let uds = tokio::net::UnixListener::bind(&sock_path)?;
             tokio::spawn(async move {
                 let _ = tonic::transport::Server::builder()
                     .add_service(crate::r#gen::packer::health_server::HealthServer::new(
@@ -801,18 +803,20 @@ mod tests {
             client_cert: None,
             client_key: None,
         };
-        assert_eq!(plugin_no_child.wait().await.unwrap(), 0);
+        assert_eq!(plugin_no_child.wait().await?, 0);
 
         // Spawn with env and tls client certs
-        let mut cfg = PluginSupervisorConfig::default();
-        cfg.plugin_path = PathBuf::from("sh");
-        cfg.args = vec![
-            "-c".to_string(),
-            String::from("echo 1\\|1\\|tcp\\|127.0.0.1:12345\\|grpc\\| && sleep 1"),
-        ];
+        let mut cfg = PluginSupervisorConfig {
+            plugin_path: PathBuf::from("sh"),
+            args: vec![
+                "-c".to_string(),
+                String::from("echo 1\\|1\\|tcp\\|127.0.0.1:12345\\|grpc\\| && sleep 1"),
+            ],
+            client_cert: Some("test_cert".to_string()),
+            client_key: Some("test_key".to_string()),
+            ..Default::default()
+        };
         cfg.env.insert("CUSTOM_VAR".to_string(), "val".to_string());
-        cfg.client_cert = Some("test_cert".to_string());
-        cfg.client_key = Some("test_key".to_string());
 
         let sp = PluginSupervisor::spawn(cfg).await;
         assert!(sp.is_ok());
@@ -824,5 +828,6 @@ mod tests {
         let hc_err =
             PluginSupervisor::perform_healthcheck("http://127.0.0.1:1", &NetworkType::Tcp).await;
         assert!(hc_err.is_err() || matches!(hc_err, Ok(false)));
+        Ok(())
     }
 }

@@ -14,7 +14,7 @@ pub struct TelemetryConfig {
     /// Whether telemetry is enabled.
     pub enabled: bool,
     /// The endpoint URL to send telemetry data to.
-    pub endpoint: Url,
+    pub endpoint: String,
 }
 
 impl Default for TelemetryConfig {
@@ -26,10 +26,7 @@ impl Default for TelemetryConfig {
 
         Self {
             enabled: !checkpoint_disabled && !telemetry_disabled,
-            endpoint: Url::parse("https://checkpoint-api.hashicorp.com/v1/telemetry")
-                .unwrap_or_else(|_| {
-                    Url::parse("http://localhost").unwrap_or_else(|_| unreachable!())
-                }),
+            endpoint: "https://checkpoint-api.hashicorp.com/v1/telemetry".to_string(),
         }
     }
 }
@@ -75,6 +72,9 @@ struct CheckpointResponse {
 
 impl Client {
     /// Creates a new `Client` with the given configuration.
+    ///
+    /// # Arguments
+    /// * `config` - The [`TelemetryConfig`] governing endpoint URL and enablement.
     #[must_use]
     pub fn new(config: TelemetryConfig) -> Self {
         Self {
@@ -88,6 +88,9 @@ impl Client {
     /// Fails gracefully, meaning it won't panic or return errors that halt execution
     /// if the endpoint is unreachable. Returns Ok immediately if disabled.
     ///
+    /// # Arguments
+    /// * `event` - The [`Event`] payload to dispatch.
+    ///
     /// # Errors
     /// Returns `StampError::Telemetry` if an unrecoverable network failure occurs during dispatch.
     pub async fn dispatch(&self, event: Event) -> Result<(), StampError> {
@@ -95,9 +98,12 @@ impl Client {
             return Ok(());
         }
 
+        let endpoint_url = Url::parse(&self.config.endpoint)
+            .map_err(|e| StampError::Telemetry(format!("Invalid telemetry endpoint URL: {e}")))?;
+
         let res = self
             .http
-            .post(self.config.endpoint.clone())
+            .post(endpoint_url)
             .json(&event)
             .timeout(Duration::from_secs(3))
             .send()
@@ -112,6 +118,9 @@ impl Client {
 
     /// Checks the given current version against the upstream checkpoint API.
     ///
+    /// # Arguments
+    /// * `current_version` - Semantic version string of the running binary.
+    ///
     /// # Errors
     /// Returns `StampError::Telemetry` if the request fails or parsing fails.
     pub async fn checkpoint_check(
@@ -125,19 +134,19 @@ impl Client {
             return Ok(None);
         }
 
+        let base_url = Url::parse(&self.config.endpoint)
+            .map_err(|e| StampError::Telemetry(format!("Invalid telemetry endpoint URL: {e}")))?;
+
         // We check the specific checkpoint endpoint
-        let endpoint = if self.config.endpoint.as_str().contains("localhost")
-            || self.config.endpoint.as_str().contains("127.0.0.1")
-        {
-            // Re-use endpoint domain for tests if testing
-            self.config
-                .endpoint
-                .join("/v1/check/packer")
-                .unwrap_or_else(|_| self.config.endpoint.clone())
-        } else {
-            Url::parse("https://checkpoint-api.hashicorp.com/v1/check/packer")
-                .unwrap_or_else(|_| unreachable!())
-        };
+        let endpoint =
+            if base_url.as_str().contains("localhost") || base_url.as_str().contains("127.0.0.1") {
+                base_url
+                    .join("/v1/check/packer")
+                    .map_err(|e| StampError::Telemetry(e.to_string()))?
+            } else {
+                Url::parse("https://checkpoint-api.hashicorp.com/v1/check/packer")
+                    .map_err(|e| StampError::Telemetry(e.to_string()))?
+            };
 
         let res = self
             .http
@@ -216,6 +225,9 @@ impl VersionInfo {
     }
 
     /// Formats the version information in human-readable or verbose format matching Packer output.
+    ///
+    /// # Arguments
+    /// * `verbose` - Whether to include extended platform, OS, arch, and revision details.
     #[must_use]
     pub fn format_human(&self, verbose: bool) -> String {
         if verbose {
@@ -238,6 +250,9 @@ impl VersionInfo {
     }
 
     /// Formats the version information in Packer-compatible machine-readable CSV format.
+    ///
+    /// # Arguments
+    /// * `timestamp` - Unix epoch timestamp in seconds.
     #[must_use]
     pub fn format_machine_readable(&self, timestamp: u64) -> String {
         format!(
@@ -250,77 +265,84 @@ impl VersionInfo {
     }
 }
 
+/// Checks Checkpoint for newer releases of Stamp/Packer using an explicit [`TelemetryConfig`].
+///
+/// # Arguments
+/// * `current_version` - Semantic version string of the running binary.
+/// * `config` - Explicit telemetry configuration.
+///
+/// # Errors
+/// Returns `StampError::Telemetry` if the check fails.
+pub async fn check_for_updates_with_config(
+    current_version: &str,
+    config: TelemetryConfig,
+) -> Result<Option<Version>, StampError> {
+    let client = Client::new(config);
+    client.checkpoint_check(current_version).await
+}
+
 /// Checks Checkpoint for newer releases of Stamp/Packer.
 ///
 /// Returns `Ok(Some(new_version))` if a newer release is available, or `Ok(None)` otherwise.
 ///
+/// # Arguments
+/// * `current_version` - Semantic version string of the running binary.
+///
 /// # Errors
 /// Returns `StampError::Telemetry` if the check fails.
 pub async fn check_for_updates(current_version: &str) -> Result<Option<Version>, StampError> {
-    let client = Client::new(TelemetryConfig::default());
-    client.checkpoint_check(current_version).await
+    check_for_updates_with_config(current_version, TelemetryConfig::default()).await
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 #[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
-
-    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use crate::utils::{ENV_MUTEX, ScopedEnvVar};
 
     #[test]
     fn test_telemetry_config_default() {
-        let _guard = match ENV_MUTEX.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        unsafe {
-            std::env::set_var("PACKER_TELEMETRY", "0");
-        }
+        let _guard = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _c = ScopedEnvVar::remove("CHECKPOINT_DISABLE");
+        let _t0 = ScopedEnvVar::set("PACKER_TELEMETRY", "0");
         let cfg = TelemetryConfig::default();
         assert!(!cfg.enabled);
 
-        unsafe {
-            std::env::set_var("PACKER_TELEMETRY", "1");
-        }
+        let _t1 = ScopedEnvVar::set("PACKER_TELEMETRY", "1");
         let cfg2 = TelemetryConfig::default();
         assert!(cfg2.enabled);
-
-        unsafe {
-            std::env::remove_var("PACKER_TELEMETRY");
-        }
     }
 
     #[tokio::test]
-    async fn test_client_dispatch_disabled() {
+    async fn test_client_dispatch_disabled() -> Result<(), StampError> {
         let cfg = TelemetryConfig {
             enabled: false,
-            endpoint: Url::parse("http://localhost").unwrap_or_else(|_| unreachable!()),
+            endpoint: "http://localhost".to_string(),
         };
         let client = Client::new(cfg);
-        let res = client
+        client
             .dispatch(Event::BuildStart {
                 builder: "test".to_string(),
             })
-            .await;
-        assert!(res.is_ok());
+            .await
     }
 
     #[tokio::test]
-    async fn test_client_checkpoint_disabled() {
+    async fn test_client_checkpoint_disabled() -> Result<(), StampError> {
         let cfg = TelemetryConfig {
             enabled: false,
-            endpoint: Url::parse("http://localhost").unwrap_or_else(|_| unreachable!()),
+            endpoint: "http://localhost".to_string(),
         };
         let client = Client::new(cfg);
-        let res = client.checkpoint_check("1.0.0").await;
-        assert!(res.is_ok());
-        assert_eq!(res.unwrap_or_else(|_| unreachable!()), None);
+        let res = client.checkpoint_check("1.0.0").await?;
+        assert_eq!(res, None);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_client_dispatch_enabled_success() {
+    async fn test_client_dispatch_enabled_success() -> Result<(), StampError> {
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("POST", "/")
@@ -330,24 +352,23 @@ mod tests {
 
         let cfg = TelemetryConfig {
             enabled: true,
-            endpoint: Url::parse(&server.url()).unwrap(),
+            endpoint: server.url(),
         };
         let client = Client::new(cfg);
-        let res = client
+        client
             .dispatch(Event::BuildStart {
                 builder: "test".to_string(),
             })
-            .await;
-        assert!(res.is_ok());
+            .await?;
         mock.assert_async().await;
+        Ok(())
     }
 
     #[tokio::test]
     async fn test_client_dispatch_enabled_failure() {
-        // use an invalid port to simulate error
         let cfg = TelemetryConfig {
             enabled: true,
-            endpoint: Url::parse("http://127.0.0.1:0").unwrap(),
+            endpoint: "http://127.0.0.1:0".to_string(),
         };
         let client = Client::new(cfg);
         let res = client
@@ -356,10 +377,22 @@ mod tests {
             })
             .await;
         assert!(matches!(res, Err(StampError::Telemetry(_))));
+
+        let bad_url_cfg = TelemetryConfig {
+            enabled: true,
+            endpoint: "not a url".to_string(),
+        };
+        let bad_client = Client::new(bad_url_cfg);
+        let bad_res = bad_client
+            .dispatch(Event::BuildStart {
+                builder: "test".to_string(),
+            })
+            .await;
+        assert!(matches!(bad_res, Err(StampError::Telemetry(_))));
     }
 
     #[tokio::test]
-    async fn test_client_checkpoint_enabled_success_upgrade() {
+    async fn test_client_checkpoint_enabled_success_upgrade() -> Result<(), StampError> {
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("GET", "/v1/check/packer")
@@ -370,16 +403,16 @@ mod tests {
 
         let cfg = TelemetryConfig {
             enabled: true,
-            endpoint: Url::parse(&server.url()).unwrap(),
+            endpoint: server.url(),
         };
-        let client = Client::new(cfg);
-        let res = client.checkpoint_check("1.0.0").await.unwrap();
-        assert_eq!(res, Some(Version::parse("2.0.0").unwrap()));
+        let res = check_for_updates_with_config("1.0.0", cfg).await?;
+        assert_eq!(res, Some(Version::parse("2.0.0")?));
         mock.assert_async().await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_client_checkpoint_enabled_success_no_upgrade() {
+    async fn test_client_checkpoint_enabled_success_no_upgrade() -> Result<(), StampError> {
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("GET", "/v1/check/packer")
@@ -390,19 +423,20 @@ mod tests {
 
         let cfg = TelemetryConfig {
             enabled: true,
-            endpoint: Url::parse(&server.url()).unwrap(),
+            endpoint: server.url(),
         };
         let client = Client::new(cfg);
-        let res = client.checkpoint_check("1.0.0").await.unwrap();
+        let res = client.checkpoint_check("1.0.0").await?;
         assert_eq!(res, None);
         mock.assert_async().await;
+        Ok(())
     }
 
     #[tokio::test]
     async fn test_client_checkpoint_enabled_failure_network() {
         let cfg = TelemetryConfig {
             enabled: true,
-            endpoint: Url::parse("http://127.0.0.1:0").unwrap(),
+            endpoint: "http://127.0.0.1:0".to_string(),
         };
         let client = Client::new(cfg);
         let res = client.checkpoint_check("1.0.0").await;
@@ -421,7 +455,7 @@ mod tests {
 
         let cfg = TelemetryConfig {
             enabled: true,
-            endpoint: Url::parse(&server.url()).unwrap(),
+            endpoint: server.url(),
         };
         let client = Client::new(cfg);
         let res = client.checkpoint_check("1.0.0").await;
@@ -441,7 +475,7 @@ mod tests {
 
         let cfg = TelemetryConfig {
             enabled: true,
-            endpoint: Url::parse(&server.url()).unwrap(),
+            endpoint: server.url(),
         };
         let client = Client::new(cfg);
         let res = client.checkpoint_check("1.0.0").await;
@@ -453,7 +487,7 @@ mod tests {
     async fn test_client_checkpoint_invalid_current_version() {
         let cfg = TelemetryConfig {
             enabled: true,
-            endpoint: Url::parse("http://localhost").unwrap(),
+            endpoint: "http://localhost".to_string(),
         };
         let client = Client::new(cfg);
         let res = client.checkpoint_check("invalid").await;
@@ -462,25 +496,16 @@ mod tests {
 
     #[test]
     fn test_checkpoint_disable_env() {
-        let _guard = match ENV_MUTEX.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        unsafe {
-            std::env::set_var("CHECKPOINT_DISABLE", "1");
-        }
+        let _guard = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _c1 = ScopedEnvVar::set("CHECKPOINT_DISABLE", "1");
         let cfg = TelemetryConfig::default();
         assert!(!cfg.enabled);
 
-        unsafe {
-            std::env::set_var("CHECKPOINT_DISABLE", "true");
-        }
+        let _c2 = ScopedEnvVar::set("CHECKPOINT_DISABLE", "true");
         let cfg2 = TelemetryConfig::default();
         assert!(!cfg2.enabled);
-
-        unsafe {
-            std::env::remove_var("CHECKPOINT_DISABLE");
-        }
     }
 
     #[test]
@@ -506,21 +531,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_check_for_updates_disabled() {
-        let _guard = match ENV_MUTEX.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        unsafe {
-            std::env::set_var("CHECKPOINT_DISABLE", "1");
-        }
-        let res = check_for_updates("0.0.1").await;
-        assert!(res.is_ok());
-        if let Ok(update_opt) = res {
-            assert_eq!(update_opt, None);
-        }
-        unsafe {
-            std::env::remove_var("CHECKPOINT_DISABLE");
-        }
+    async fn test_check_for_updates_disabled() -> Result<(), StampError> {
+        let _guard = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _c = ScopedEnvVar::set("CHECKPOINT_DISABLE", "1");
+        let res = check_for_updates("0.0.1").await?;
+        assert_eq!(res, None);
+        Ok(())
     }
 }

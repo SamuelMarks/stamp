@@ -137,13 +137,13 @@ impl Drop for PluginBroker {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use crate::engine::packer::FeatureState;
 
     #[tokio::test]
-    async fn test_plugin_broker_tcp_lifecycle() {
+    async fn test_plugin_broker_tcp_lifecycle() -> Result<(), StampError> {
         let _guard = crate::utils::ENV_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -152,21 +152,17 @@ mod tests {
             FeatureState::Disabled,
             FeatureState::Disabled,
         ));
-        let broker = PluginBroker::start_tcp(ui.clone(), None, None)
-            .await
-            .unwrap();
+        let broker = PluginBroker::start_tcp(ui.clone(), None, None).await?;
         assert_eq!(broker.network_type(), NetworkType::Tcp);
-        assert!(!broker.address().is_empty());
+        assert_ne!(broker.address(), "");
         assert!(format!("{broker:?}").contains("PluginBroker"));
 
         // Verify Ui service can be called via broker
-        let client_res = crate::r#gen::packer::ui_client::UiClient::connect(format!(
+        let mut client = crate::r#gen::packer::ui_client::UiClient::connect(format!(
             "http://{}",
             broker.address()
         ))
-        .await;
-        assert!(client_res.is_ok());
-        let mut client = client_res.unwrap();
+        .await?;
         let say_res = client
             .say(tonic::Request::new(crate::r#gen::packer::SayRequest {
                 target: "test-target".to_string(),
@@ -194,19 +190,18 @@ mod tests {
         // Verify Communicator service can be called via broker
         let comm_proxy =
             crate::communicator::grpc_proxy::GrpcCommunicatorProxy::connect_tcp(broker.address())
-                .await
-                .unwrap();
+                .await?;
         let cmd = crate::communicator::Command::new("echo 1".to_string());
         let exec_res = comm_proxy.execute(&cmd).await;
         assert!(exec_res.is_ok());
 
         // Verify Hook service can be called via broker
-        let mut hook_client = crate::engine::hook::RemoteHookClient::connect_tcp(broker.address())
-            .await
-            .unwrap();
+        let mut hook_client =
+            crate::engine::hook::RemoteHookClient::connect_tcp(broker.address()).await?;
         let hook_res = hook_client.run_hook("pre-provision", b"data").await;
         assert!(hook_res.is_ok());
 
-        broker.shutdown().await.unwrap();
+        broker.shutdown().await?;
+        Ok(())
     }
 }

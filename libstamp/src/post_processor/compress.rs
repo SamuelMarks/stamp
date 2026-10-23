@@ -205,17 +205,16 @@ impl PostProcessor for CompressPostProcessor {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
     #[tokio::test]
     async fn test_compress_tar_and_tar_gz() -> Result<(), StampError> {
-        let tmp_dir = std::env::temp_dir();
-        let input_file = tmp_dir.join(format!("stamp_tar_{}.txt", uuid::Uuid::new_v4()));
+        let tmp_dir = tempfile::tempdir()?;
+        let input_file = tmp_dir.path().join("stamp_tar.txt");
         fs::write(&input_file, b"content for tar").map_err(StampError::Io)?;
 
-        let out_tar = tmp_dir.join(format!("stamp_out_{}.tar", uuid::Uuid::new_v4()));
+        let out_tar = tmp_dir.path().join("stamp_out.tar");
         let config_tar = CompressConfig {
             format: "tar".to_string(),
             output: out_tar.to_string_lossy().to_string(),
@@ -232,7 +231,7 @@ mod tests {
         assert_eq!(res.files, vec![out_tar.to_string_lossy().to_string()]);
         assert!(out_tar.exists());
 
-        let out_targz = tmp_dir.join(format!("stamp_out_{}.tar.gz", uuid::Uuid::new_v4()));
+        let out_targz = tmp_dir.path().join("stamp_out.tar.gz");
         let config_targz = CompressConfig {
             format: "tar.gz".to_string(),
             output: out_targz.to_string_lossy().to_string(),
@@ -249,19 +248,16 @@ mod tests {
         assert!(out_targz.exists());
         // input_file removed because keep_input_artifact is false
         assert!(!input_file.exists());
-
-        let _ = fs::remove_file(out_tar);
-        let _ = fs::remove_file(out_targz);
         Ok(())
     }
 
     #[tokio::test]
     async fn test_compress_tar_bz2() -> Result<(), StampError> {
-        let tmp_dir = std::env::temp_dir();
-        let input_file = tmp_dir.join(format!("stamp_bz_{}.txt", uuid::Uuid::new_v4()));
+        let tmp_dir = tempfile::tempdir()?;
+        let input_file = tmp_dir.path().join("stamp_bz.txt");
         fs::write(&input_file, b"content for bz2").map_err(StampError::Io)?;
 
-        let out_tbz2 = tmp_dir.join(format!("stamp_out_{}.tar.bz2", uuid::Uuid::new_v4()));
+        let out_tbz2 = tmp_dir.path().join("stamp_out.tar.bz2");
         let config = CompressConfig {
             format: "tar.bz2".to_string(),
             output: out_tbz2.to_string_lossy().to_string(),
@@ -276,20 +272,18 @@ mod tests {
         let res = proc.process(art).await?;
         assert_eq!(res.id, "test_bz2-compressed");
         assert!(out_tbz2.exists());
-
-        let _ = fs::remove_file(input_file);
-        let _ = fs::remove_file(out_tbz2);
         Ok(())
     }
 
     #[tokio::test]
     async fn test_compress_zip_dir_and_file() -> Result<(), StampError> {
-        let tmp_dir = std::env::temp_dir().join(format!("stamp_zip_dir_{}", uuid::Uuid::new_v4()));
+        let tmp_root = tempfile::tempdir()?;
+        let tmp_dir = tmp_root.path().join("stamp_zip_dir");
         fs::create_dir_all(&tmp_dir).map_err(StampError::Io)?;
         let sub_file = tmp_dir.join("inner.txt");
         fs::write(&sub_file, b"inner zip content").map_err(StampError::Io)?;
 
-        let out_zip = std::env::temp_dir().join(format!("stamp_out_{}.zip", uuid::Uuid::new_v4()));
+        let out_zip = tmp_root.path().join("stamp_out.zip");
         let config = CompressConfig {
             format: "zip".to_string(),
             output: out_zip.to_string_lossy().to_string(),
@@ -304,9 +298,6 @@ mod tests {
         let res = proc.process(art).await?;
         assert_eq!(res.id, "test_zip-zipped");
         assert!(out_zip.exists());
-
-        let _ = fs::remove_dir_all(tmp_dir);
-        let _ = fs::remove_file(out_zip);
         Ok(())
     }
 
@@ -337,9 +328,10 @@ mod tests {
         let config1 = CompressConfig::default();
         let config2 = config1.clone();
         assert_eq!(config1, config2);
-        assert_eq!(format!("{config1:?}"), format!("{config2:?}"));
+        assert!(format!("{config1:?}").contains("CompressConfig"));
         let st1 = CompressPostProcessor::new(config1);
         let st2 = st1.clone();
-        assert_eq!(format!("{st1:?}"), format!("{st2:?}"));
+        assert!(format!("{st1:?}").contains("CompressPostProcessor"));
+        assert_eq!(st1.config, st2.config);
     }
 }

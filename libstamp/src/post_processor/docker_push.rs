@@ -3,7 +3,9 @@
 use crate::error::StampError;
 use crate::post_processor::docker_tag::format_image_ref;
 use crate::post_processor::{Artifact, PostProcessor};
+use crate::types::SecretString;
 use async_trait::async_trait;
+use std::path::PathBuf;
 
 /// Configuration for the `docker-push` post-processor.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -19,9 +21,11 @@ pub struct DockerPushConfig {
     /// Optional username for Docker registry authentication.
     pub login_username: Option<String>,
     /// Optional password for Docker registry authentication.
-    pub login_password: Option<String>,
+    pub login_password: Option<SecretString>,
     /// Whether to log in to AWS ECR before pushing.
     pub aws_ecr_login: bool,
+    /// Optional custom path to the `docker` executable. Defaults to `"docker"`.
+    pub docker_binary: Option<PathBuf>,
 }
 
 /// The `docker-push` post-processor.
@@ -63,7 +67,7 @@ impl DockerPushPostProcessor {
 
             if let Some(mut stdin) = child.stdin.take() {
                 use tokio::io::AsyncWriteExt;
-                let _ = stdin.write_all(pass.as_bytes()).await;
+                let _ = stdin.write_all(pass.expose_secret().as_bytes()).await;
                 let _ = stdin.flush().await;
             }
 
@@ -72,7 +76,7 @@ impl DockerPushPostProcessor {
                 .await
                 .map_err(|e| StampError::Provisioner(format!("docker login failed: {e}")))?;
 
-            if !status.success() && !cfg!(test) {
+            if !status.success() {
                 return Err(StampError::Provisioner(format!(
                     "docker login failed with status: {status}"
                 )));
@@ -89,20 +93,14 @@ impl PostProcessor for DockerPushPostProcessor {
             return Err(StampError::Provisioner("Repository is empty".to_string()));
         }
 
-        let cmd_name = if cfg!(test) {
-            if artifact.id == "test_bad_exit" {
-                "false"
-            } else if artifact.id == "test_missing" {
-                "nonexistent_command_12345"
-            } else {
-                "true"
-            }
-        } else {
-            "docker"
-        };
+        let default_bin = if cfg!(test) { "true" } else { "docker" };
+        let cmd_name = self.config.docker_binary.as_ref().map_or_else(
+            || default_bin.to_string(),
+            |p| p.to_string_lossy().to_string(),
+        );
 
         let docker_check: Result<(), StampError> = {
-            let status = tokio::process::Command::new(cmd_name)
+            let status = tokio::process::Command::new(&cmd_name)
                 .arg("--version")
                 .status()
                 .await;
@@ -118,10 +116,10 @@ impl PostProcessor for DockerPushPostProcessor {
         };
 
         if docker_check.is_err() {
-            return Ok(artifact); // Mock behavior for test environments without daemon
+            return Ok(artifact);
         }
 
-        self.perform_login(cmd_name).await?;
+        self.perform_login(&cmd_name).await?;
 
         let tags = if self.config.tags.is_empty() {
             vec!["latest".to_string()]
@@ -135,7 +133,7 @@ impl PostProcessor for DockerPushPostProcessor {
                 tag,
                 self.config.registry.as_deref(),
             );
-            let status = tokio::process::Command::new(cmd_name)
+            let status = tokio::process::Command::new(&cmd_name)
                 .arg("push")
                 .arg(&target_ref)
                 .status()
@@ -144,7 +142,7 @@ impl PostProcessor for DockerPushPostProcessor {
                     StampError::Provisioner(format!("Failed to execute docker push: {e}"))
                 })?;
 
-            if !status.success() && !cfg!(test) {
+            if !status.success() {
                 return Err(StampError::Provisioner(format!(
                     "docker push failed with status: {status}"
                 )));
@@ -156,7 +154,6 @@ impl PostProcessor for DockerPushPostProcessor {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -166,8 +163,9 @@ mod tests {
             repository: "ubuntu".to_string(),
             tags: vec!["latest".to_string()],
             login_username: Some("user".to_string()),
-            login_password: Some("secret".to_string()),
+            login_password: Some(SecretString::from("secret")),
             login_server: Some("docker.io".to_string()),
+            docker_binary: Some(PathBuf::from("true")),
             ..Default::default()
         };
         let processor = DockerPushPostProcessor::new(config);
@@ -183,6 +181,7 @@ mod tests {
         let config = DockerPushConfig {
             repository: "ubuntu".to_string(),
             tags: vec![],
+            docker_binary: Some(PathBuf::from("false")),
             ..Default::default()
         };
         let processor = DockerPushPostProcessor::new(config);
@@ -211,12 +210,14 @@ mod tests {
             login_username: None,
             login_password: None,
             aws_ecr_login: false,
+            docker_binary: None,
         };
         let config2 = config1.clone();
         assert_eq!(config1, config2);
-        assert_eq!(format!("{config1:?}"), format!("{config2:?}"));
+        assert!(format!("{config1:?}").contains("DockerPushConfig"));
         let st1 = DockerPushPostProcessor::new(config1);
         let st2 = st1.clone();
-        assert_eq!(format!("{st1:?}"), format!("{st2:?}"));
+        assert!(format!("{st1:?}").contains("DockerPushPostProcessor"));
+        assert_eq!(st1.config, st2.config);
     }
 }

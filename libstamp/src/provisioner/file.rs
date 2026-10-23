@@ -312,7 +312,6 @@ impl Provisioner for FileProvisioner {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
     use crate::communicator::mock::MockCommunicator;
@@ -343,15 +342,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_provision_upload_dir() -> Result<(), StampError> {
-        let tmp_dir =
-            std::env::temp_dir().join(format!("stamp_file_test_{}", uuid::Uuid::new_v4()));
-        let sub_dir = tmp_dir.join("subdir");
+        let tmp_dir = tempfile::tempdir()?;
+        let sub_dir = tmp_dir.path().join("subdir");
         fs::create_dir_all(&sub_dir).map_err(StampError::Io)?;
         let test_file = sub_dir.join("file.txt");
         fs::write(&test_file, "hello world").map_err(StampError::Io)?;
 
         let config = FileConfig {
-            source: FilePath::new(tmp_dir.clone()),
+            source: FilePath::new(tmp_dir.path().to_path_buf()),
             destination: FilePath::new(PathBuf::from("/remote/dest")),
             direction: FileDirection::Upload,
             symlink_policy: SymlinkPolicy::Follow,
@@ -369,7 +367,6 @@ mod tests {
         )
         .await?;
 
-        let _ = fs::remove_dir_all(tmp_dir);
         Ok(())
     }
 
@@ -397,35 +394,36 @@ mod tests {
 
     #[test]
     fn test_scan_directory_symlink_policies() -> Result<(), StampError> {
-        let tmp_dir =
-            std::env::temp_dir().join(format!("stamp_symlink_test_{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&tmp_dir).map_err(StampError::Io)?;
-        let file1 = tmp_dir.join("test.txt");
+        let tmp_dir = tempfile::tempdir()?;
+        let file1 = tmp_dir.path().join("test.txt");
         fs::write(&file1, "sample").map_err(StampError::Io)?;
 
         #[cfg(unix)]
         {
-            let link = tmp_dir.join("cycle_link");
-            let _ = std::os::unix::fs::symlink(&tmp_dir, &link);
-            let file_link = tmp_dir.join("file_link");
+            let link = tmp_dir.path().join("cycle_link");
+            let _ = std::os::unix::fs::symlink(tmp_dir.path(), &link);
+            let file_link = tmp_dir.path().join("file_link");
             let _ = std::os::unix::fs::symlink(&file1, &file_link);
         }
 
-        let scanned_default = FileProvisioner::scan_directory_tree(&tmp_dir)?;
-        assert!(!scanned_default.is_empty());
+        let scanned_default = FileProvisioner::scan_directory_tree(tmp_dir.path())?;
+        assert_ne!(scanned_default.len(), 0);
 
-        let scanned_ignored =
-            FileProvisioner::scan_directory_tree_with_policy(&tmp_dir, SymlinkPolicy::Ignore)?;
-        assert!(!scanned_ignored.is_empty());
+        let scanned_ignored = FileProvisioner::scan_directory_tree_with_policy(
+            tmp_dir.path(),
+            SymlinkPolicy::Ignore,
+        )?;
+        assert_ne!(scanned_ignored.len(), 0);
 
-        let scanned_followed =
-            FileProvisioner::scan_directory_tree_with_policy(&tmp_dir, SymlinkPolicy::Follow)?;
-        assert!(!scanned_followed.is_empty());
+        let scanned_followed = FileProvisioner::scan_directory_tree_with_policy(
+            tmp_dir.path(),
+            SymlinkPolicy::Follow,
+        )?;
+        assert_ne!(scanned_followed.len(), 0);
 
         let meta = &scanned_default[0];
         FileProvisioner::apply_local_metadata(&file1, meta)?;
 
-        let _ = fs::remove_dir_all(tmp_dir);
         Ok(())
     }
 
@@ -452,10 +450,11 @@ mod tests {
         };
         let config2 = config1.clone();
         assert_eq!(config1, config2);
-        assert_eq!(format!("{config1:?}"), format!("{config2:?}"));
+        assert!(format!("{config1:?}").contains("FileConfig"));
         let st1 = FileProvisioner::new(config1);
         let st2 = st1.clone();
-        assert_eq!(format!("{st1:?}"), format!("{st2:?}"));
+        assert!(format!("{st1:?}").contains("FileProvisioner"));
+        assert_eq!(st1.config, st2.config);
 
         let dir1 = FileDirection::Upload;
         let dir2 = FileDirection::default();

@@ -665,7 +665,7 @@ mod tests {
     #[test]
     fn test_find_host_ip() {
         let ip = find_host_ip();
-        assert!(!ip.is_empty());
+        assert_ne!(ip, "");
     }
 
     #[test]

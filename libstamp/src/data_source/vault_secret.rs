@@ -4,6 +4,7 @@
 
 use crate::data_source::DataSource;
 use crate::error::StampError;
+use crate::types::SecretString;
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -17,7 +18,7 @@ pub struct VaultSecretConfig {
     /// Vault server address. Defaults to the `VAULT_ADDR` environment variable or `http://127.0.0.1:8200`.
     pub address: Option<String>,
     /// Vault authentication token. Defaults to the `VAULT_TOKEN` environment variable.
-    pub token: Option<String>,
+    pub token: Option<SecretString>,
 }
 
 /// The `vault-secret` data source.
@@ -44,35 +45,33 @@ impl DataSource for VaultSecretDataSource {
             ));
         }
 
-        if self.config.path.contains("error") {
-            return Err(StampError::Execution("Vault query failed".to_string()));
-        }
-
         if let Some(ref addr) = self.config.address {
             let clean_path = self.config.path.trim_start_matches('/');
             let url = format!("{}/v1/{clean_path}", addr.trim_end_matches('/'));
             let client = reqwest::Client::new();
             let mut req = client.get(&url);
             if let Some(ref tok) = self.config.token {
-                req = req.header("X-Vault-Token", tok);
+                req = req.header("X-Vault-Token", tok.expose_secret());
             }
-            if let Ok(resp) = req.send().await {
-                if !resp.status().is_success() {
-                    return Err(StampError::Execution(format!(
-                        "Vault query failed with status {}",
-                        resp.status()
-                    )));
-                }
-                let payload: Value = resp.json().await?;
-                if let Some(ref k) = self.config.key
-                    && let Some(val) = payload
-                        .pointer(&format!("/data/data/{k}"))
-                        .or_else(|| payload.pointer(&format!("/data/{k}")))
-                {
-                    return Ok(serde_json::json!({ k: val }));
-                }
-                return Ok(payload);
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| StampError::Execution(format!("Vault query failed: {e}")))?;
+            if !resp.status().is_success() {
+                return Err(StampError::Execution(format!(
+                    "Vault query failed with status {}",
+                    resp.status()
+                )));
             }
+            let payload: Value = resp.json().await?;
+            if let Some(ref k) = self.config.key
+                && let Some(val) = payload
+                    .pointer(&format!("/data/data/{k}"))
+                    .or_else(|| payload.pointer(&format!("/data/{k}")))
+            {
+                return Ok(serde_json::json!({ k: val }));
+            }
+            return Ok(payload);
         }
 
         if let Some(ref k) = self.config.key {
@@ -100,9 +99,10 @@ mod tests {
             path: "sec/path".to_string(),
             key: Some("key1".to_string()),
             address: None,
-            token: Some("tok".to_string()),
+            token: Some(SecretString::new("tok".to_string())),
         };
-        assert_eq!(config.clone(), config);
+        let cloned = config.clone();
+        assert_eq!(cloned.path, "sec/path");
         assert!(format!("{config:?}").contains("VaultSecretConfig"));
         let ds = VaultSecretDataSource::new(config);
         assert!(format!("{ds:?}").contains("VaultSecretDataSource"));
@@ -119,7 +119,7 @@ mod tests {
         let ds = VaultSecretDataSource::new(VaultSecretConfig {
             path: "secret/data/database".to_string(),
             key: Some("password".to_string()),
-            address: Some("http://127.0.0.1:1".to_string()),
+            address: None,
             ..Default::default()
         });
 
@@ -139,7 +139,7 @@ mod tests {
             path: "secret/data/prod".to_string(),
             key: Some("api_key".to_string()),
             address: Some(server.url()),
-            token: Some("v-tok".to_string()),
+            token: Some(SecretString::new("v-tok".to_string())),
         });
         let live_res = ds_live.read().await?;
         assert_eq!(live_res["api_key"], "live-vault-key");
@@ -196,13 +196,10 @@ mod tests {
         );
 
         let ds_err = VaultSecretDataSource::new(VaultSecretConfig {
-            path: "error_path".to_string(),
+            path: "secret/data/app".to_string(),
+            address: Some("http://127.0.0.1:1".to_string()),
             ..Default::default()
         });
-        let res_err = ds_err.read().await;
-        assert_eq!(
-            res_err.err().as_ref().map(ToString::to_string),
-            Some("Execution error: Vault query failed".to_string())
-        );
+        assert!(ds_err.read().await.is_err());
     }
 }

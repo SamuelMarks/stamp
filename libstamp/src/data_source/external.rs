@@ -62,7 +62,7 @@ impl DataSource for ExternalDataSource {
 
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
-            let query_json = serde_json::to_vec(&self.config.query).unwrap_or_default();
+            let query_json = serde_json::to_vec(&self.config.query)?;
             let _ = stdin.write_all(&query_json).await;
         }
 
@@ -88,7 +88,6 @@ impl DataSource for ExternalDataSource {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -103,7 +102,7 @@ mod tests {
         };
         let ds = ExternalDataSource::new(config);
         let val = ds.read().await?;
-        assert_eq!(val.get("status").and_then(|v| v.as_str()), Some("ok"));
+        assert_eq!(val.get("status").and_then(Value::as_str), Some("ok"));
         Ok(())
     }
 

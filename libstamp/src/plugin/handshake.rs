@@ -329,97 +329,73 @@ pub fn get_bounded_port_range() -> Result<Option<(u16, u16)>, StampError> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
+    use crate::utils::{ENV_MUTEX, ScopedEnvVar};
 
     #[test]
-    fn test_network_type_display_and_parse() {
+    fn test_network_type_display_and_parse() -> Result<(), StampError> {
         assert_eq!(NetworkType::Tcp.as_str(), "tcp");
         assert_eq!(NetworkType::Unix.as_str(), "unix");
         assert_eq!(NetworkType::NamedPipe.as_str(), "namedpipe");
 
-        assert_eq!("TCP".parse::<NetworkType>().unwrap(), NetworkType::Tcp);
-        assert_eq!("unix".parse::<NetworkType>().unwrap(), NetworkType::Unix);
-        assert_eq!(
-            "namedpipe".parse::<NetworkType>().unwrap(),
-            NetworkType::NamedPipe
-        );
-        assert_eq!(
-            "pipe".parse::<NetworkType>().unwrap(),
-            NetworkType::NamedPipe
-        );
+        assert_eq!("TCP".parse::<NetworkType>()?, NetworkType::Tcp);
+        assert_eq!("unix".parse::<NetworkType>()?, NetworkType::Unix);
+        assert_eq!("namedpipe".parse::<NetworkType>()?, NetworkType::NamedPipe);
+        assert_eq!("pipe".parse::<NetworkType>()?, NetworkType::NamedPipe);
         assert!("invalid".parse::<NetworkType>().is_err());
+        Ok(())
     }
 
     #[test]
     fn test_display_coverage() {
+        let _guard = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(format!("{}", NetworkType::Tcp), "tcp");
         assert_eq!(format!("{}", Protocol::Grpc), "grpc");
 
-        let min_var = std::env::var(crate::plugin::handshake::PACKER_PLUGIN_MIN_PORT_ENV).ok();
-        let max_var = std::env::var(crate::plugin::handshake::PACKER_PLUGIN_MAX_PORT_ENV).ok();
+        let _min = ScopedEnvVar::set(PACKER_PLUGIN_MIN_PORT_ENV, "abc");
+        let _max = ScopedEnvVar::set(PACKER_PLUGIN_MAX_PORT_ENV, "def");
+        assert!(get_bounded_port_range().is_err());
 
-        // This is safe if run serially or if we just want coverage
-        unsafe {
-            std::env::set_var(crate::plugin::handshake::PACKER_PLUGIN_MIN_PORT_ENV, "abc");
-            std::env::set_var(crate::plugin::handshake::PACKER_PLUGIN_MAX_PORT_ENV, "def");
-        }
-        let res = crate::plugin::handshake::get_bounded_port_range();
-        assert!(res.is_err());
-
-        unsafe {
-            std::env::set_var(crate::plugin::handshake::PACKER_PLUGIN_MIN_PORT_ENV, "1000");
-            std::env::set_var(crate::plugin::handshake::PACKER_PLUGIN_MAX_PORT_ENV, "def");
-        }
-        let res2 = crate::plugin::handshake::get_bounded_port_range();
-        assert!(res2.is_err());
-
-        unsafe {
-            if let Some(v) = min_var {
-                std::env::set_var(crate::plugin::handshake::PACKER_PLUGIN_MIN_PORT_ENV, v);
-            } else {
-                std::env::remove_var(crate::plugin::handshake::PACKER_PLUGIN_MIN_PORT_ENV);
-            }
-            if let Some(v) = max_var {
-                std::env::set_var(crate::plugin::handshake::PACKER_PLUGIN_MAX_PORT_ENV, v);
-            } else {
-                std::env::remove_var(crate::plugin::handshake::PACKER_PLUGIN_MAX_PORT_ENV);
-            }
-        }
+        let _min2 = ScopedEnvVar::set(PACKER_PLUGIN_MIN_PORT_ENV, "1000");
+        let _max2 = ScopedEnvVar::set(PACKER_PLUGIN_MAX_PORT_ENV, "def");
+        assert!(get_bounded_port_range().is_err());
     }
+
     #[test]
-    fn test_protocol_display_and_parse() {
+    fn test_protocol_display_and_parse() -> Result<(), StampError> {
         assert_eq!(Protocol::Grpc.as_str(), "grpc");
         assert_eq!(Protocol::NetRpc.as_str(), "net/rpc");
 
-        assert_eq!("grpc".parse::<Protocol>().unwrap(), Protocol::Grpc);
-        assert_eq!("GRPC".parse::<Protocol>().unwrap(), Protocol::Grpc);
-        assert_eq!("net/rpc".parse::<Protocol>().unwrap(), Protocol::NetRpc);
-        assert_eq!("netrpc".parse::<Protocol>().unwrap(), Protocol::NetRpc);
+        assert_eq!("grpc".parse::<Protocol>()?, Protocol::Grpc);
+        assert_eq!("GRPC".parse::<Protocol>()?, Protocol::Grpc);
+        assert_eq!("net/rpc".parse::<Protocol>()?, Protocol::NetRpc);
+        assert_eq!("netrpc".parse::<Protocol>()?, Protocol::NetRpc);
         assert!("unknown".parse::<Protocol>().is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_handshake_render_and_parse() {
+    fn test_handshake_render_and_parse() -> Result<(), StampError> {
         let hs = Handshake::new(1, 5, NetworkType::Tcp, "127.0.0.1:12345", Protocol::Grpc);
         assert_eq!(hs.render(), "1|5|tcp|127.0.0.1:12345|grpc");
         assert_eq!(format!("{hs}"), "1|5|tcp|127.0.0.1:12345|grpc");
 
-        let parsed = "1|5|tcp|127.0.0.1:12345|grpc".parse::<Handshake>().unwrap();
+        let parsed = "1|5|tcp|127.0.0.1:12345|grpc".parse::<Handshake>()?;
         assert_eq!(parsed, hs);
 
-        let hs_tls = hs.clone().with_server_cert("CERT_BASE64");
+        let hs_tls = hs.with_server_cert("CERT_BASE64");
         assert_eq!(hs_tls.render(), "1|5|tcp|127.0.0.1:12345|grpc|CERT_BASE64");
-        let parsed_tls = "1|5|tcp|127.0.0.1:12345|grpc|CERT_BASE64"
-            .parse::<Handshake>()
-            .unwrap();
+        let parsed_tls = "1|5|tcp|127.0.0.1:12345|grpc|CERT_BASE64".parse::<Handshake>()?;
         assert_eq!(parsed_tls, hs_tls);
 
         // NetRpc 4-part fallback
-        let net_rpc = "1|2|unix|/tmp/test.sock".parse::<Handshake>().unwrap();
+        let net_rpc = "1|2|unix|/tmp/test.sock".parse::<Handshake>()?;
         assert_eq!(net_rpc.protocol, Protocol::NetRpc);
         assert_eq!(net_rpc.network_type, NetworkType::Unix);
+        Ok(())
     }
 
     #[test]
@@ -444,62 +420,47 @@ mod tests {
 
     #[test]
     fn test_magic_cookie_validation() {
+        let _guard = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(validate_magic_cookie(PACKER_PLUGIN_MAGIC_COOKIE_VALUE).is_ok());
         assert!(validate_magic_cookie("invalid_cookie").is_err());
 
         // Environment check
-        unsafe {
-            std::env::set_var(
-                PACKER_PLUGIN_MAGIC_COOKIE_KEY,
-                PACKER_PLUGIN_MAGIC_COOKIE_VALUE,
-            );
-        }
+        let _c1 = ScopedEnvVar::set(
+            PACKER_PLUGIN_MAGIC_COOKIE_KEY,
+            PACKER_PLUGIN_MAGIC_COOKIE_VALUE,
+        );
         assert!(verify_environment_magic_cookie().is_ok());
 
-        unsafe {
-            std::env::set_var(PACKER_PLUGIN_MAGIC_COOKIE_KEY, "wrong");
-        }
+        let _c2 = ScopedEnvVar::set(PACKER_PLUGIN_MAGIC_COOKIE_KEY, "wrong");
         assert!(verify_environment_magic_cookie().is_err());
 
-        unsafe {
-            std::env::remove_var(PACKER_PLUGIN_MAGIC_COOKIE_KEY);
-        }
+        let _c3 = ScopedEnvVar::remove(PACKER_PLUGIN_MAGIC_COOKIE_KEY);
         assert!(verify_environment_magic_cookie().is_err());
     }
 
     #[test]
-    fn test_bounded_port_range_parsing() {
-        let _guard = crate::utils::ENV_MUTEX
+    fn test_bounded_port_range_parsing() -> Result<(), StampError> {
+        let _guard = ENV_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        unsafe {
-            std::env::remove_var(PACKER_PLUGIN_MIN_PORT_ENV);
-            std::env::remove_var(PACKER_PLUGIN_MAX_PORT_ENV);
-        }
-        assert_eq!(get_bounded_port_range().unwrap(), None);
+        let _rm_min = ScopedEnvVar::remove(PACKER_PLUGIN_MIN_PORT_ENV);
+        let _rm_max = ScopedEnvVar::remove(PACKER_PLUGIN_MAX_PORT_ENV);
+        assert_eq!(get_bounded_port_range()?, None);
 
-        unsafe {
-            std::env::set_var(PACKER_PLUGIN_MIN_PORT_ENV, "10000");
-            std::env::set_var(PACKER_PLUGIN_MAX_PORT_ENV, "10050");
-        }
-        assert_eq!(get_bounded_port_range().unwrap(), Some((10000, 10050)));
+        let _s_min = ScopedEnvVar::set(PACKER_PLUGIN_MIN_PORT_ENV, "10000");
+        let _s_max = ScopedEnvVar::set(PACKER_PLUGIN_MAX_PORT_ENV, "10050");
+        assert_eq!(get_bounded_port_range()?, Some((10000, 10050)));
 
         // Min > max
-        unsafe {
-            std::env::set_var(PACKER_PLUGIN_MIN_PORT_ENV, "20000");
-            std::env::set_var(PACKER_PLUGIN_MAX_PORT_ENV, "10000");
-        }
+        let _s_min2 = ScopedEnvVar::set(PACKER_PLUGIN_MIN_PORT_ENV, "20000");
+        let _s_max2 = ScopedEnvVar::set(PACKER_PLUGIN_MAX_PORT_ENV, "10000");
         assert!(get_bounded_port_range().is_err());
 
         // Single var set
-        unsafe {
-            std::env::remove_var(PACKER_PLUGIN_MAX_PORT_ENV);
-        }
+        let _rm_max2 = ScopedEnvVar::remove(PACKER_PLUGIN_MAX_PORT_ENV);
         assert!(get_bounded_port_range().is_err());
-
-        // Clean up
-        unsafe {
-            std::env::remove_var(PACKER_PLUGIN_MIN_PORT_ENV);
-        }
+        Ok(())
     }
 }

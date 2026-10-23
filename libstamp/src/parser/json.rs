@@ -3,73 +3,163 @@
 use crate::error::StampError;
 use crate::template::{BuilderConfig, ProvisionerConfig, Template};
 
+/// Legacy JSON template top-level document structure.
+#[derive(serde::Deserialize)]
+struct LegacyPacker {
+    /// Optional template description.
+    description: Option<String>,
+    /// Legacy builder definitions.
+    #[serde(default)]
+    builders: Vec<LegacyBuilder>,
+    /// Legacy provisioner definitions.
+    #[serde(default)]
+    provisioners: Vec<LegacyProvisioner>,
+    /// Legacy error cleanup provisioner definitions.
+    #[serde(default, rename = "error-cleanup-provisioner")]
+    error_cleanup_provisioners: Vec<LegacyProvisioner>,
+    /// Legacy post-processor definitions.
+    #[serde(default, rename = "post-processors")]
+    post_processors: Vec<LegacyPostProcessor>,
+    /// Legacy user variable defaults.
+    #[serde(default)]
+    variables: std::collections::HashMap<String, String>,
+    /// Optional Packer block configuration.
+    #[serde(default)]
+    packer: Option<crate::template::PackerConfig>,
+    /// Optional HCP Packer registry configuration.
+    #[serde(default)]
+    hcp_packer_registry: Option<crate::template::HcpPackerRegistryConfig>,
+}
+
+/// Legacy JSON builder entry.
+#[derive(serde::Deserialize)]
+struct LegacyBuilder {
+    /// Builder type name.
+    #[serde(rename = "type")]
+    builder_type: String,
+    /// Optional builder instance name.
+    name: Option<String>,
+    /// Optional builder dependencies.
+    #[serde(default)]
+    depends_on: Vec<String>,
+    /// Flattened builder-specific attributes.
+    #[serde(flatten)]
+    extra: std::collections::HashMap<String, serde_json::Value>,
+}
+
+/// Legacy JSON post-processor entry.
+#[derive(serde::Deserialize)]
+struct LegacyPostProcessor {
+    /// Post-processor type name.
+    #[serde(rename = "type")]
+    post_processor_type: String,
+    /// Whether to retain input artifacts.
+    #[serde(default)]
+    keep_input_artifact: bool,
+    /// Included builder names.
+    #[serde(default)]
+    only: Vec<String>,
+    /// Excluded builder names.
+    #[serde(default)]
+    except: Vec<String>,
+    /// Flattened post-processor attributes.
+    #[serde(flatten)]
+    extra: std::collections::HashMap<String, serde_json::Value>,
+}
+
+/// Legacy JSON provisioner entry.
+#[derive(serde::Deserialize)]
+struct LegacyProvisioner {
+    /// Provisioner type name.
+    #[serde(rename = "type")]
+    provisioner_type: String,
+    /// Included builder names.
+    #[serde(default)]
+    only: Vec<String>,
+    /// Excluded builder names.
+    #[serde(default)]
+    except: Vec<String>,
+    /// Flattened provisioner attributes.
+    #[serde(flatten)]
+    extra: std::collections::HashMap<String, serde_json::Value>,
+}
+
+/// Converts a map of JSON values into stringified key-value configuration entries.
+fn flatten_json_map(
+    extra: std::collections::HashMap<String, serde_json::Value>,
+) -> std::collections::HashMap<String, String> {
+    extra
+        .into_iter()
+        .map(|(k, v)| {
+            let val_str = match v {
+                serde_json::Value::String(s) => s,
+                other => other.to_string(),
+            };
+            (k, val_str)
+        })
+        .collect()
+}
+
+/// Converts legacy JSON builder entries into [`BuilderConfig`] items.
+fn convert_legacy_builders(items: Vec<LegacyBuilder>) -> Vec<BuilderConfig> {
+    items
+        .into_iter()
+        .map(|b| {
+            let name = b.name.unwrap_or_else(|| b.builder_type.clone());
+            BuilderConfig {
+                builder_type: b.builder_type,
+                name,
+                depends_on: b.depends_on,
+                config: flatten_json_map(b.extra),
+                expressions: std::collections::HashMap::new(),
+            }
+        })
+        .collect()
+}
+
+/// Converts legacy JSON provisioner entries into [`ProvisionerConfig`] items.
+fn convert_legacy_provisioners(items: Vec<LegacyProvisioner>) -> Vec<ProvisionerConfig> {
+    items
+        .into_iter()
+        .map(|p| ProvisionerConfig {
+            provisioner_type: p.provisioner_type,
+            only: p.only,
+            except: p.except,
+            config: flatten_json_map(p.extra),
+            expressions: std::collections::HashMap::new(),
+        })
+        .collect()
+}
+
+/// Converts legacy JSON post-processor entries into [`crate::template::PostProcessorConfig`] items.
+fn convert_legacy_post_processors(
+    items: Vec<LegacyPostProcessor>,
+) -> Vec<crate::template::PostProcessorConfig> {
+    items
+        .into_iter()
+        .map(|p| crate::template::PostProcessorConfig {
+            post_processor_type: p.post_processor_type,
+            keep_input_artifact: p.keep_input_artifact,
+            only: p.only,
+            except: p.except,
+            config: flatten_json_map(p.extra),
+            expressions: std::collections::HashMap::new(),
+        })
+        .collect()
+}
+
 /// Parses a JSON configuration string into a `Template`.
 ///
-/// # Errors
+/// # Arguments
+/// * `input` - Raw JSON template content.
+/// * `vars` - User variable overrides.
 ///
-/// Returns a `StampError::Parse` if the JSON cannot be parsed.
+/// # Errors
+/// Returns `StampError::Json` or `StampError::Parse` if the JSON cannot be parsed.
 pub fn parse_json<S: ::std::hash::BuildHasher>(
     input: &str,
     vars: &std::collections::HashMap<String, String, S>,
 ) -> Result<Template, StampError> {
-    // Legacy packer templates have top-level "builders" and "provisioners" arrays.
-    // They also sometimes have a "description" field.
-    #[derive(serde::Deserialize)]
-    struct LegacyPacker {
-        description: Option<String>,
-        #[serde(default)]
-        builders: Vec<LegacyBuilder>,
-        #[serde(default)]
-        provisioners: Vec<LegacyProvisioner>,
-        #[serde(default, rename = "error-cleanup-provisioner")]
-        error_cleanup_provisioners: Vec<LegacyProvisioner>,
-        #[serde(default, rename = "post-processors")]
-        post_processors: Vec<LegacyPostProcessor>,
-        #[serde(default)]
-        variables: std::collections::HashMap<String, String>,
-        #[serde(default)]
-        packer: Option<crate::template::PackerConfig>,
-        #[serde(default)]
-        hcp_packer_registry: Option<crate::template::HcpPackerRegistryConfig>,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct LegacyBuilder {
-        #[serde(rename = "type")]
-        builder_type: String,
-        name: Option<String>,
-        #[serde(default)]
-        depends_on: Vec<String>,
-        #[serde(flatten)]
-        extra: std::collections::HashMap<String, serde_json::Value>,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct LegacyPostProcessor {
-        #[serde(rename = "type")]
-        post_processor_type: String,
-        #[serde(default)]
-        keep_input_artifact: bool,
-        #[serde(default)]
-        only: Vec<String>,
-        #[serde(default)]
-        except: Vec<String>,
-        #[serde(flatten)]
-        extra: std::collections::HashMap<String, serde_json::Value>,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct LegacyProvisioner {
-        #[serde(rename = "type")]
-        provisioner_type: String,
-        #[serde(default)]
-        only: Vec<String>,
-        #[serde(default)]
-        except: Vec<String>,
-        #[serde(flatten)]
-        extra: std::collections::HashMap<String, serde_json::Value>,
-    }
-
     let mut raw_val: serde_json::Value = serde_json::from_str(input)?;
 
     let mut macro_ctx = crate::engine::legacy_macro::LegacyMacroContext::new();
@@ -95,92 +185,24 @@ pub fn parse_json<S: ::std::hash::BuildHasher>(
 
     let parsed: LegacyPacker = serde_json::from_value(raw_val)?;
 
-    let mut builders = Vec::new();
-    for b in parsed.builders {
-        let name = b.name.unwrap_or_else(|| b.builder_type.clone());
-        let mut config = std::collections::HashMap::new();
-        for (k, v) in b.extra {
-            let val_str = match v {
-                serde_json::Value::String(s) => s,
-                other => other.to_string(),
-            };
-            config.insert(k, val_str);
-        }
-        builders.push(BuilderConfig {
-            builder_type: b.builder_type,
-            name,
-            depends_on: b.depends_on,
-            config,
-            expressions: std::collections::HashMap::new(),
-        });
-    }
+    let builders = convert_legacy_builders(parsed.builders);
+    let provisioners = convert_legacy_provisioners(parsed.provisioners);
+    let error_cleanup_provisioners = convert_legacy_provisioners(parsed.error_cleanup_provisioners);
+    let post_processors = convert_legacy_post_processors(parsed.post_processors);
 
-    let mut provisioners = Vec::new();
-    for p in parsed.provisioners {
-        let mut config = std::collections::HashMap::new();
-        for (k, v) in p.extra {
-            let val_str = match v {
-                serde_json::Value::String(s) => s,
-                other => other.to_string(),
-            };
-            config.insert(k, val_str);
-        }
-        provisioners.push(ProvisionerConfig {
-            provisioner_type: p.provisioner_type,
-            only: p.only,
-            except: p.except,
-            config,
-            expressions: std::collections::HashMap::new(),
-        });
-    }
-
-    let mut error_cleanup_provisioners = Vec::new();
-    for p in parsed.error_cleanup_provisioners {
-        let mut config = std::collections::HashMap::new();
-        for (k, v) in p.extra {
-            let val_str = match v {
-                serde_json::Value::String(s) => s,
-                other => other.to_string(),
-            };
-            config.insert(k, val_str);
-        }
-        error_cleanup_provisioners.push(ProvisionerConfig {
-            provisioner_type: p.provisioner_type,
-            only: p.only,
-            except: p.except,
-            config,
-            expressions: std::collections::HashMap::new(),
-        });
-    }
-
-    let mut post_processors = Vec::new();
-    for p in parsed.post_processors {
-        let mut config = std::collections::HashMap::new();
-        for (k, v) in p.extra {
-            let val_str = match v {
-                serde_json::Value::String(s) => s,
-                other => other.to_string(),
-            };
-            config.insert(k, val_str);
-        }
-        post_processors.push(crate::template::PostProcessorConfig {
-            post_processor_type: p.post_processor_type,
-            keep_input_artifact: p.keep_input_artifact,
-            only: p.only,
-            except: p.except,
-            config,
-            expressions: std::collections::HashMap::new(),
-        });
-    }
-
-    let mut variables = std::collections::HashMap::new();
-    for (k, v) in parsed.variables {
-        let var = crate::template::VariableConfig {
-            default: Some(v),
-            ..crate::template::VariableConfig::default()
-        };
-        variables.insert(k, var);
-    }
+    let variables = parsed
+        .variables
+        .into_iter()
+        .map(|(k, v)| {
+            (
+                k,
+                crate::template::VariableConfig {
+                    default: Some(v),
+                    ..crate::template::VariableConfig::default()
+                },
+            )
+        })
+        .collect();
 
     let packer = parsed.packer.or_else(|| {
         parsed
@@ -204,7 +226,6 @@ pub fn parse_json<S: ::std::hash::BuildHasher>(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 

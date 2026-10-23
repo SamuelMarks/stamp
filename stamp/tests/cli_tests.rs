@@ -111,7 +111,7 @@ fn test_go_style_flags_build() -> Result<(), StampError> {
     assert!(timestamp_ui);
     assert!(force);
     assert!(debug);
-    assert_eq!(on_error, Some("abort".to_string()));
+    assert_eq!(on_error, Some(stamp::BuildOnError::Abort));
     assert_eq!(parallel, Some(false));
     assert_eq!(only, Some("qemu.vm,virtualbox-iso.vm".to_string()));
     assert_eq!(except, Some("parallels-iso.vm".to_string()));

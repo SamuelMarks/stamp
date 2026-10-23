@@ -22,7 +22,7 @@ flate2 = { version = "1.1", default-features = false, features = ["rust_backend"
 fs2 = { version = "0.4", default-features = false }
 futures-util = { version = "0.3", default-features = false }
 libc = { version = "0.2", default-features = false }
-hashicorp-configuration-language-rs = { version = "0.0.1", path = "../../hashicorp-configuration-language-rs", default-features = false }
+hashicorp-configuration-language-rs = { git = "https://github.com/SamuelMarks/hashicorp-configuration-language-rs.git", branch = "master", default-features = false }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 serde = { version = "1.0", default-features = false, features = ["derive"] }

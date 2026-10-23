@@ -130,7 +130,6 @@ impl PostProcessor for GoPluginPostProcessor {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
     use crate::r#gen::packer::post_processor_server::{
@@ -171,20 +170,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_go_plugin_post_processor_rpc() -> Result<(), StampError> {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let local_addr = listener.local_addr().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let local_addr = listener.local_addr()?;
 
         tokio::spawn(async move {
-            tonic::transport::Server::builder()
+            let _ = tonic::transport::Server::builder()
                 .add_service(PostProcessorServer::new(MockPostProcessorService))
                 .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-                .await
-                .unwrap();
+                .await;
         });
 
         let config = GoPluginPostProcessorConfig {
             post_processor_type: "custom".to_string(),
-            plugin_path: "".to_string(),
+            plugin_path: String::new(),
             endpoint: Some(local_addr.to_string()),
         };
         let pp = GoPluginPostProcessor::new(config);

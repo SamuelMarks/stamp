@@ -5,6 +5,7 @@
 
 use crate::error::StampError;
 use crate::post_processor::{Artifact, PostProcessor};
+use crate::types::SecretString;
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use std::fs::File;
@@ -15,7 +16,7 @@ use std::path::Path;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VagrantCloudConfig {
     /// Authentication token for Vagrant Cloud. Defaults to the `VAGRANT_CLOUD_TOKEN` environment variable.
-    pub access_token: Option<String>,
+    pub access_token: Option<SecretString>,
     /// Full box tag including username/organization (e.g. `hashicorp/bionic64`).
     pub box_tag: String,
     /// Semantic version of the box (e.g. `1.0.0`).
@@ -98,7 +99,8 @@ impl PostProcessor for VagrantCloudPostProcessor {
         let token = self
             .config
             .access_token
-            .clone()
+            .as_ref()
+            .map(|s| s.expose_secret().to_string())
             .or_else(|| std::env::var("VAGRANT_CLOUD_TOKEN").ok());
 
         if token.is_none() && !cfg!(test) {
@@ -208,7 +210,6 @@ impl PostProcessor for VagrantCloudPostProcessor {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -252,7 +253,7 @@ mod tests {
         std::fs::write(&box_file, b"fake box content").map_err(StampError::Io)?;
 
         let pp = VagrantCloudPostProcessor::new(VagrantCloudConfig {
-            access_token: Some("dummy_token".to_string()),
+            access_token: Some(SecretString::from("dummy_token")),
             box_tag: "org/test-box".to_string(),
             version: "1.2.3".to_string(),
             version_description: Some("Release notes".to_string()),

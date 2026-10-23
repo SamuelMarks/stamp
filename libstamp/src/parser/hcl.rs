@@ -84,6 +84,85 @@ fn extract_packer(
     *packer_config = Some(config);
 }
 
+/// Extracts an inline `source` block inside a `build` block into `BuilderConfig`.
+fn extract_build_source(
+    inner: &Block,
+    builders: &mut Vec<crate::template::BuilderConfig>,
+) -> Result<(), StampError> {
+    let (b_type, b_name) = if inner.labels.len() == 2 {
+        (inner.labels[0].clone(), inner.labels[1].clone())
+    } else if inner.labels.len() == 1 {
+        let parts: Vec<&str> = inner.labels[0].split('.').collect();
+        if parts.len() == 2 {
+            (parts[0].to_string(), parts[1].to_string())
+        } else {
+            (inner.labels[0].clone(), inner.labels[0].clone())
+        }
+    } else {
+        return Err(StampError::Parse(
+            "source block inside build must have one or two labels".to_string(),
+        ));
+    };
+
+    let mut config = std::collections::HashMap::new();
+    let mut expressions = std::collections::HashMap::new();
+    for (k, attr) in &inner.body.attributes {
+        config.insert(k.clone(), expr_to_string(&attr.expr));
+        expressions.insert(k.clone(), attr.expr.clone());
+    }
+    builders.push(crate::template::BuilderConfig {
+        builder_type: b_type,
+        name: b_name,
+        config,
+        expressions,
+        depends_on: vec![],
+    });
+    Ok(())
+}
+
+/// Extracts attributes and nested blocks from a provisioner or post-processor block.
+#[allow(clippy::type_complexity)]
+fn extract_component_attributes(
+    block: &Block,
+) -> (
+    std::collections::HashMap<String, String>,
+    std::collections::HashMap<String, Expression>,
+    Vec<String>,
+    Vec<String>,
+    bool,
+) {
+    let mut config = std::collections::HashMap::new();
+    let mut expressions = std::collections::HashMap::new();
+    let mut only = Vec::new();
+    let mut except = Vec::new();
+    let mut keep_input_artifact = false;
+
+    for (attr_name, attr) in &block.body.attributes {
+        if attr_name == "only" {
+            only = expr_to_vec_string(&attr.expr);
+        } else if attr_name == "except" {
+            except = expr_to_vec_string(&attr.expr);
+        } else if attr_name == "keep_input_artifact" {
+            keep_input_artifact = expr_to_string(&attr.expr) == "true";
+        } else {
+            config.insert(attr_name.clone(), expr_to_string(&attr.expr));
+            expressions.insert(attr_name.clone(), attr.expr.clone());
+        }
+    }
+
+    for nested in &block.body.blocks {
+        for (k, attr) in &nested.body.attributes {
+            config.insert(
+                format!("{}.{}", nested.block_type, k),
+                expr_to_string(&attr.expr),
+            );
+            expressions.insert(format!("{}.{}", nested.block_type, k), attr.expr.clone());
+        }
+    }
+
+    (config, expressions, only, except, keep_input_artifact)
+}
+
 /// Extracts a build block into active provisioners, post-processors, and builds.
 fn extract_build(
     block: &Block,
@@ -121,142 +200,59 @@ fn extract_build(
 
     for inner in &block.body.blocks {
         if inner.block_type == "source" {
-            let (b_type, b_name) = if inner.labels.len() == 2 {
-                (inner.labels[0].clone(), inner.labels[1].clone())
-            } else if inner.labels.len() == 1 {
-                let parts: Vec<&str> = inner.labels[0].split('.').collect();
-                if parts.len() == 2 {
-                    (parts[0].to_string(), parts[1].to_string())
-                } else {
-                    (inner.labels[0].clone(), inner.labels[0].clone())
-                }
-            } else {
-                return Err(crate::error::StampError::Parse(
-                    "source block inside build must have one or two labels".to_string(),
-                ));
-            };
-
-            let mut config = std::collections::HashMap::new();
-            let mut expressions = std::collections::HashMap::new();
-            for (k, attr) in &inner.body.attributes {
-                config.insert(k.clone(), expr_to_string(&attr.expr));
-                expressions.insert(k.clone(), attr.expr.clone());
-            }
-            builders.push(crate::template::BuilderConfig {
-                builder_type: b_type,
-                name: b_name,
-                config,
-                expressions,
-                depends_on: vec![],
-            });
+            extract_build_source(inner, builders)?;
         } else if inner.block_type == "provisioner"
             || inner.block_type == "error-cleanup-provisioner"
             || inner.block_type == "post-processor"
         {
-            if inner.labels.len() == 1 {
-                let type_name = inner.labels[0].clone();
-                let mut config = std::collections::HashMap::new();
-                let mut expressions = std::collections::HashMap::new();
-                let mut only = Vec::new();
-                let mut except = Vec::new();
-                let mut keep_input_artifact = false;
-
-                for (attr_name, attr) in &inner.body.attributes {
-                    if attr_name == "only" {
-                        only = expr_to_vec_string(&attr.expr);
-                    } else if attr_name == "except" {
-                        except = expr_to_vec_string(&attr.expr);
-                    } else if attr_name == "keep_input_artifact" {
-                        keep_input_artifact = expr_to_string(&attr.expr) == "true";
-                    } else {
-                        config.insert(attr_name.clone(), expr_to_string(&attr.expr));
-                        expressions.insert(attr_name.clone(), attr.expr.clone());
-                    }
-                }
-
-                for nested in &inner.body.blocks {
-                    for (k, attr) in &nested.body.attributes {
-                        config.insert(
-                            format!("{}.{}", nested.block_type, k),
-                            expr_to_string(&attr.expr),
-                        );
-                        expressions
-                            .insert(format!("{}.{}", nested.block_type, k), attr.expr.clone());
-                    }
-                }
-
-                if inner.block_type == "provisioner" {
-                    let prov = crate::template::ProvisionerConfig {
-                        provisioner_type: type_name,
-                        only,
-                        except,
-                        config,
-                        expressions,
-                    };
-                    current_build_provs.push(prov.clone());
-                    provs.push(prov);
-                } else if inner.block_type == "post-processor" {
-                    let post = crate::template::PostProcessorConfig {
-                        post_processor_type: type_name,
-                        keep_input_artifact,
-                        only,
-                        except,
-                        config,
-                        expressions,
-                    };
-                    current_build_posts.push(post.clone());
-                    posts.push(post);
-                } else if inner.block_type == "error-cleanup-provisioner" {
-                    let err_prov = crate::template::ProvisionerConfig {
-                        provisioner_type: type_name,
-                        only,
-                        except,
-                        config,
-                        expressions,
-                    };
-                    current_build_err_provs.push(err_prov.clone());
-                    err_provs.push(err_prov);
-                }
-            } else {
+            if inner.labels.len() != 1 {
                 return Err(crate::error::StampError::Parse(format!(
                     "{} block must have exactly one label",
                     inner.block_type
                 )));
             }
+            let type_name = inner.labels[0].clone();
+            let (config, expressions, only, except, keep_input_artifact) =
+                extract_component_attributes(inner);
+
+            if inner.block_type == "provisioner" {
+                let prov = crate::template::ProvisionerConfig {
+                    provisioner_type: type_name,
+                    only,
+                    except,
+                    config,
+                    expressions,
+                };
+                current_build_provs.push(prov.clone());
+                provs.push(prov);
+            } else if inner.block_type == "post-processor" {
+                let post = crate::template::PostProcessorConfig {
+                    post_processor_type: type_name,
+                    keep_input_artifact,
+                    only,
+                    except,
+                    config,
+                    expressions,
+                };
+                current_build_posts.push(post.clone());
+                posts.push(post);
+            } else {
+                let err_prov = crate::template::ProvisionerConfig {
+                    provisioner_type: type_name,
+                    only,
+                    except,
+                    config,
+                    expressions,
+                };
+                current_build_err_provs.push(err_prov.clone());
+                err_provs.push(err_prov);
+            }
         } else if inner.block_type == "post-processors" {
             for nested in &inner.body.blocks {
                 if nested.block_type == "post-processor" && nested.labels.len() == 1 {
                     let type_name = nested.labels[0].clone();
-                    let mut config = std::collections::HashMap::new();
-                    let mut expressions = std::collections::HashMap::new();
-                    let mut only = Vec::new();
-                    let mut except = Vec::new();
-                    let mut keep_input_artifact = false;
-
-                    for (attr_name, attr) in &nested.body.attributes {
-                        if attr_name == "only" {
-                            only = expr_to_vec_string(&attr.expr);
-                        } else if attr_name == "except" {
-                            except = expr_to_vec_string(&attr.expr);
-                        } else if attr_name == "keep_input_artifact" {
-                            keep_input_artifact = expr_to_string(&attr.expr) == "true";
-                        } else {
-                            config.insert(attr_name.clone(), expr_to_string(&attr.expr));
-                            expressions.insert(attr_name.clone(), attr.expr.clone());
-                        }
-                    }
-
-                    for sub in &nested.body.blocks {
-                        for (k, attr) in &sub.body.attributes {
-                            config.insert(
-                                format!("{}.{}", sub.block_type, k),
-                                expr_to_string(&attr.expr),
-                            );
-                            expressions
-                                .insert(format!("{}.{}", sub.block_type, k), attr.expr.clone());
-                        }
-                    }
-
+                    let (config, expressions, only, except, keep_input_artifact) =
+                        extract_component_attributes(nested);
                     let post = crate::template::PostProcessorConfig {
                         post_processor_type: type_name,
                         keep_input_artifact,
@@ -349,7 +345,7 @@ fn expr_to_map_string(expr: &Expression) -> std::collections::HashMap<String, St
     map
 }
 
-/// Internal documentation missing.
+/// Extracts a `test` block and its assertions into the template test suite.
 fn extract_test(block: &Block, tests: &mut Vec<crate::template::TestBlock>) {
     if block.labels.len() != 1 {
         return;
@@ -382,6 +378,130 @@ fn extract_test(block: &Block, tests: &mut Vec<crate::template::TestBlock>) {
     tests.push(crate::template::TestBlock { name, assertions });
 }
 
+/// Extracts a top-level `data` block into `DataSourceConfig`.
+fn extract_data_source(
+    block: &Block,
+    data_sources: &mut Vec<crate::template::DataSourceConfig>,
+) -> Result<(), StampError> {
+    if block.labels.len() < 2 {
+        return Err(StampError::Parse(
+            "data block must have exactly two labels".to_string(),
+        ));
+    }
+    let stype = block.labels[0].clone();
+    let sname = block.labels[1].clone();
+    if data_sources
+        .iter()
+        .any(|d: &crate::template::DataSourceConfig| d.source_type == stype && d.name == sname)
+    {
+        return Err(StampError::Parse(format!(
+            "Data source '{stype}.{sname}' defined multiple times"
+        )));
+    }
+    let mut config = std::collections::HashMap::new();
+    let mut expressions = std::collections::HashMap::new();
+    for (k, attr) in &block.body.attributes {
+        config.insert(k.clone(), expr_to_string(&attr.expr));
+        expressions.insert(k.clone(), attr.expr.clone());
+    }
+    for inner_block in &block.body.blocks {
+        for (k, attr) in &inner_block.body.attributes {
+            config.insert(
+                format!("{}.{}", inner_block.block_type, k),
+                expr_to_string(&attr.expr),
+            );
+            expressions.insert(
+                format!("{}.{}", inner_block.block_type, k),
+                attr.expr.clone(),
+            );
+        }
+    }
+    data_sources.push(crate::template::DataSourceConfig {
+        source_type: stype,
+        name: sname,
+        config,
+        expressions,
+    });
+    Ok(())
+}
+
+/// Extracts a top-level `source` block into `BuilderConfig`.
+fn extract_top_level_source(
+    block: &Block,
+    builders: &mut Vec<crate::template::BuilderConfig>,
+) -> Result<(), StampError> {
+    if block.labels.len() < 2 {
+        return Err(StampError::Parse(
+            "source block must have exactly two labels".to_string(),
+        ));
+    }
+    let btype = block.labels[0].clone();
+    let bname = block.labels[1].clone();
+    if builders
+        .iter()
+        .any(|b: &crate::template::BuilderConfig| b.builder_type == btype && b.name == bname)
+    {
+        return Err(StampError::Parse(format!(
+            "Source '{btype}.{bname}' defined multiple times"
+        )));
+    }
+    let mut config = std::collections::HashMap::new();
+    let mut expressions = std::collections::HashMap::new();
+    for (k, attr) in &block.body.attributes {
+        config.insert(k.clone(), expr_to_string(&attr.expr));
+        expressions.insert(k.clone(), attr.expr.clone());
+    }
+    builders.push(crate::template::BuilderConfig {
+        builder_type: btype,
+        name: bname,
+        config,
+        expressions,
+        depends_on: vec![],
+    });
+    Ok(())
+}
+
+/// Extracts a `variable` block into the template variables map.
+fn extract_variable(
+    block: &Block,
+    variables: &mut std::collections::HashMap<String, crate::template::VariableConfig>,
+) -> Result<(), StampError> {
+    if let Some(label) = block.labels.first() {
+        if variables.contains_key(label) {
+            return Err(StampError::Parse(format!(
+                "Variable '{label}' defined multiple times"
+            )));
+        }
+        let mut var = crate::template::VariableConfig::default();
+        for (k, attr) in &block.body.attributes {
+            let v = expr_to_string(&attr.expr);
+            if k == "default" {
+                var.default = Some(v);
+            } else if k == "description" {
+                var.description = Some(v);
+            } else if k == "type" {
+                var.variable_type = Some(v);
+            } else if k == "sensitive" {
+                if v == "true" {
+                    var.sensitive = Some(true);
+                } else if v == "false" {
+                    var.sensitive = Some(false);
+                }
+            }
+        }
+        for v_block in &block.body.validations {
+            var.validations.push(crate::template::VariableValidation {
+                condition: expr_to_string(&v_block.condition),
+                error_message: expr_to_string(&v_block.error_message),
+                condition_expr: Some(v_block.condition.clone()),
+                error_message_expr: Some(v_block.error_message.clone()),
+            });
+        }
+        variables.insert(label.clone(), var);
+    }
+    Ok(())
+}
+
 /// Ingests a parsed HCL2 AST [`Body`](hashicorp_configuration_language_rs::ast::structure::Body) into Stamp's unified [`Template`] container,
 /// preserving AST expressions for dynamic runtime evaluation and enforcing duplicate checks.
 ///
@@ -409,84 +529,12 @@ pub fn parse_body_to_template(
     let mut packer = None;
 
     for block in &body.blocks {
-        if block.block_type == "packer" {
-            extract_packer(block, &mut required_plugins, &mut packer);
-        } else if block.block_type == "test" {
-            extract_test(block, &mut tests);
-        } else if block.block_type == "data" {
-            if block.labels.len() >= 2 {
-                let stype = block.labels[0].clone();
-                let sname = block.labels[1].clone();
-                if data_sources
-                    .iter()
-                    .any(|d: &crate::template::DataSourceConfig| {
-                        d.source_type == stype && d.name == sname
-                    })
-                {
-                    return Err(crate::error::StampError::Parse(format!(
-                        "Data source '{stype}.{sname}' defined multiple times"
-                    )));
-                }
-                let mut config = std::collections::HashMap::new();
-                let mut expressions = std::collections::HashMap::new();
-                for (k, attr) in &block.body.attributes {
-                    config.insert(k.clone(), expr_to_string(&attr.expr));
-                    expressions.insert(k.clone(), attr.expr.clone());
-                }
-                for inner_block in &block.body.blocks {
-                    for (k, attr) in &inner_block.body.attributes {
-                        config.insert(
-                            format!("{}.{}", inner_block.block_type, k),
-                            expr_to_string(&attr.expr),
-                        );
-                        expressions.insert(
-                            format!("{}.{}", inner_block.block_type, k),
-                            attr.expr.clone(),
-                        );
-                    }
-                }
-                data_sources.push(crate::template::DataSourceConfig {
-                    source_type: stype,
-                    name: sname,
-                    config,
-                    expressions,
-                });
-            } else {
-                return Err(crate::error::StampError::Parse(
-                    "data block must have exactly two labels".to_string(),
-                ));
-            }
-        } else if block.block_type == "source" {
-            if block.labels.len() >= 2 {
-                let btype = block.labels[0].clone();
-                let bname = block.labels[1].clone();
-                if builders.iter().any(|b: &crate::template::BuilderConfig| {
-                    b.builder_type == btype && b.name == bname
-                }) {
-                    return Err(crate::error::StampError::Parse(format!(
-                        "Source '{btype}.{bname}' defined multiple times"
-                    )));
-                }
-                let mut config = std::collections::HashMap::new();
-                let mut expressions = std::collections::HashMap::new();
-                for (k, attr) in &block.body.attributes {
-                    config.insert(k.clone(), expr_to_string(&attr.expr));
-                    expressions.insert(k.clone(), attr.expr.clone());
-                }
-                builders.push(crate::template::BuilderConfig {
-                    builder_type: btype,
-                    name: bname,
-                    config,
-                    expressions,
-                    depends_on: vec![],
-                });
-            } else {
-                return Err(crate::error::StampError::Parse(
-                    "source block must have exactly two labels".to_string(),
-                ));
-            }
-        } else if block.block_type == "build" {
-            extract_build(
+        match block.block_type.as_str() {
+            "packer" => extract_packer(block, &mut required_plugins, &mut packer),
+            "test" => extract_test(block, &mut tests),
+            "data" => extract_data_source(block, &mut data_sources)?,
+            "source" => extract_top_level_source(block, &mut builders)?,
+            "build" => extract_build(
                 block,
                 &mut builds,
                 &mut provisioners,
@@ -494,51 +542,20 @@ pub fn parse_body_to_template(
                 &mut post_processors,
                 &mut description,
                 &mut builders,
-            )?;
-        } else if block.block_type == "variable" {
-            if let Some(label) = block.labels.first() {
-                if variables.contains_key(label) {
-                    return Err(crate::error::StampError::Parse(format!(
-                        "Variable '{label}' defined multiple times"
-                    )));
-                }
-                let mut var = crate::template::VariableConfig::default();
+            )?,
+            "variable" => extract_variable(block, &mut variables)?,
+            "locals" => {
                 for (k, attr) in &block.body.attributes {
-                    let v = expr_to_string(&attr.expr);
-                    if k == "default" {
-                        var.default = Some(v);
-                    } else if k == "description" {
-                        var.description = Some(v);
-                    } else if k == "type" {
-                        var.variable_type = Some(v);
-                    } else if k == "sensitive" {
-                        if v == "true" {
-                            var.sensitive = Some(true);
-                        } else if v == "false" {
-                            var.sensitive = Some(false);
-                        }
+                    if locals.contains_key(k) {
+                        return Err(StampError::Parse(format!(
+                            "Local '{k}' defined multiple times"
+                        )));
                     }
+                    locals.insert(k.clone(), expr_to_string(&attr.expr));
+                    local_expressions.insert(k.clone(), attr.expr.clone());
                 }
-                for v_block in &block.body.validations {
-                    var.validations.push(crate::template::VariableValidation {
-                        condition: expr_to_string(&v_block.condition),
-                        error_message: expr_to_string(&v_block.error_message),
-                        condition_expr: Some(v_block.condition.clone()),
-                        error_message_expr: Some(v_block.error_message.clone()),
-                    });
-                }
-                variables.insert(label.clone(), var);
             }
-        } else if block.block_type == "locals" {
-            for (k, attr) in &block.body.attributes {
-                if locals.contains_key(k) {
-                    return Err(crate::error::StampError::Parse(format!(
-                        "Local '{k}' defined multiple times"
-                    )));
-                }
-                locals.insert(k.clone(), expr_to_string(&attr.expr));
-                local_expressions.insert(k.clone(), attr.expr.clone());
-            }
+            _ => {}
         }
     }
 
@@ -584,7 +601,6 @@ pub fn parse_hcl<S: ::std::hash::BuildHasher>(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -640,35 +656,15 @@ mod tests {
         assert_eq!(tmpl.post_processors.len(), 1);
         assert_eq!(tmpl.post_processors[0].post_processor_type, "docker-tag");
 
-        assert_eq!(
-            tmpl.variables
-                .get("foo")
-                .unwrap_or_else(|| panic!("failed"))
-                .default
-                .as_deref(),
-            Some("bar")
-        );
-        assert_eq!(
-            tmpl.variables
-                .get("foo")
-                .unwrap_or_else(|| panic!("failed"))
-                .description
-                .as_deref(),
-            Some("foo desc")
-        );
-        assert_eq!(
-            tmpl.variables
-                .get("foo")
-                .unwrap_or_else(|| panic!("failed"))
-                .variable_type
-                .as_deref(),
-            Some("string")
-        );
+        let foo_var = tmpl
+            .variables
+            .get("foo")
+            .ok_or_else(|| StampError::Parse("missing foo".to_string()))?;
+        assert_eq!(foo_var.default.as_deref(), Some("bar"));
+        assert_eq!(foo_var.description.as_deref(), Some("foo desc"));
+        assert_eq!(foo_var.variable_type.as_deref(), Some("string"));
 
-        assert_eq!(
-            tmpl.locals.get("bar").unwrap_or_else(|| panic!("failed")),
-            "baz"
-        );
+        assert_eq!(tmpl.locals.get("bar").map(String::as_str), Some("baz"));
         Ok(())
     }
 
@@ -757,25 +753,17 @@ mod tests {
         let vars = std::collections::HashMap::new();
         let tpl = crate::parser::hcl::parse_hcl(input, &vars)?;
         assert_eq!(tpl.required_plugins.len(), 2); // Only my_plugin has string values for version/source
-        assert_eq!(
-            tpl.required_plugins
-                .get("my_plugin")
-                .unwrap_or_else(|| panic!("failed"))
-                .version,
-            "1.0"
-        );
-        assert_eq!(
-            tpl.required_plugins
-                .get("my_plugin")
-                .unwrap_or_else(|| panic!("failed"))
-                .source,
-            "github.com/my/plugin"
-        );
+        let my_plugin = tpl
+            .required_plugins
+            .get("my_plugin")
+            .ok_or_else(|| StampError::Parse("missing my_plugin".to_string()))?;
+        assert_eq!(my_plugin.version, "1.0");
+        assert_eq!(my_plugin.source, "github.com/my/plugin");
         Ok(())
     }
 
     #[test]
-    fn test_parse_hcl_provisioner_no_labels() -> Result<(), crate::error::StampError> {
+    fn test_parse_hcl_provisioner_no_labels() {
         let input = r"
             build {
                 provisioner {
@@ -785,7 +773,6 @@ mod tests {
         let vars = std::collections::HashMap::new();
         let res = crate::parser::hcl::parse_hcl(input, &vars);
         assert!(res.is_err());
-        Ok(())
     }
 
     #[test]
@@ -936,7 +923,10 @@ mod tests {
         let vars = std::collections::HashMap::new();
         let tpl = crate::parser::hcl::parse_hcl(input, &vars)?;
         assert_eq!(tpl.variables.len(), 1);
-        let var = tpl.variables.get("image_name").unwrap();
+        let var = tpl
+            .variables
+            .get("image_name")
+            .ok_or_else(|| StampError::Parse("missing image_name".to_string()))?;
         assert_eq!(var.variable_type.as_deref(), Some("string"));
         assert_eq!(var.default.as_deref(), Some("my-image"));
         assert_eq!(var.description.as_deref(), Some("Name of image"));
@@ -1016,8 +1006,14 @@ mod tests {
         "#;
         let vars = std::collections::HashMap::new();
         let tpl = crate::parser::hcl::parse_hcl(input, &vars)?;
-        let packer_cfg = tpl.packer.as_ref().unwrap();
-        let reg = packer_cfg.hcp_packer_registry.as_ref().unwrap();
+        let packer_cfg = tpl
+            .packer
+            .as_ref()
+            .ok_or_else(|| StampError::Parse("missing packer".to_string()))?;
+        let reg = packer_cfg
+            .hcp_packer_registry
+            .as_ref()
+            .ok_or_else(|| StampError::Parse("missing registry".to_string()))?;
         assert_eq!(reg.bucket_name.0, "learn-packer-ubuntu");
         assert_eq!(reg.description.as_deref(), Some("Ubuntu base image"));
         assert_eq!(reg.channels, vec!["production", "staging"]);
@@ -1090,9 +1086,15 @@ mod tests {
         let vars = std::collections::HashMap::new();
         let tpl = crate::parser::hcl::parse_hcl(input, &vars)?;
 
-        let packer_cfg = tpl.packer.as_ref().unwrap();
+        let packer_cfg = tpl
+            .packer
+            .as_ref()
+            .ok_or_else(|| StampError::Parse("missing packer".to_string()))?;
         assert_eq!(packer_cfg.required_version.as_deref(), Some(">= 1.7.0"));
-        let reg = packer_cfg.hcp_packer_registry.as_ref().unwrap();
+        let reg = packer_cfg
+            .hcp_packer_registry
+            .as_ref()
+            .ok_or_else(|| StampError::Parse("missing registry".to_string()))?;
         assert_eq!(
             reg.build_labels.get("os").map(String::as_str),
             Some("linux")
@@ -1103,7 +1105,10 @@ mod tests {
             Some("infra")
         );
 
-        let sec_var = tpl.variables.get("secret_var").unwrap();
+        let sec_var = tpl
+            .variables
+            .get("secret_var")
+            .ok_or_else(|| StampError::Parse("missing secret_var".to_string()))?;
         assert_eq!(sec_var.sensitive, Some(true));
         assert_eq!(sec_var.validations.len(), 1);
         assert_eq!(sec_var.validations[0].condition, "true");

@@ -31,78 +31,45 @@ pub fn infer_hcl_type(val: &JsonValue) -> &'static str {
 pub fn rewrite_legacy_expression(val_str: &str) -> String {
     let mut result = val_str.to_string();
 
-    // 1. {{ user `var_name` }} / 'var_name' / "var_name" -> ${var.var_name}
-    let re_user = regex::Regex::new(r#"\{\{\s*user\s+[`'"]([^`'"]+)[`'"]\s*\}\}"#)
-        .unwrap_or_else(|_| regex::Regex::new("$a").unwrap_or_else(|_| unreachable!()));
-    result = re_user
-        .replace_all(&result, |caps: &regex::Captures| {
-            format!("${{var.{}}}", &caps[1])
-        })
-        .to_string();
-
-    // 2. {{ env `ENV_VAR` }} / 'ENV_VAR' / "ENV_VAR" -> ${env("ENV_VAR")}
-    let re_env = regex::Regex::new(r#"\{\{\s*env\s+[`'"]([^`'"]+)[`'"]\s*\}\}"#)
-        .unwrap_or_else(|_| regex::Regex::new("$a").unwrap_or_else(|_| unreachable!()));
-    result = re_env
-        .replace_all(&result, |caps: &regex::Captures| {
-            format!(r#"${{env("{}")}}"#, &caps[1])
-        })
-        .to_string();
-
-    // 3. {{ build `ID` }} / 'ID' / "ID" -> ${build.ID}
-    let re_build = regex::Regex::new(r#"\{\{\s*build\s+[`'"]([^`'"]+)[`'"]\s*\}\}"#)
-        .unwrap_or_else(|_| regex::Regex::new("$a").unwrap_or_else(|_| unreachable!()));
-    result = re_build
-        .replace_all(&result, |caps: &regex::Captures| {
-            format!("${{build.{}}}", &caps[1])
-        })
-        .to_string();
-
-    // 4. {{ clean_resource_name `name` }} -> ${clean_resource_name("name")}
-    let re_clean = regex::Regex::new(r#"\{\{\s*clean_resource_name\s+[`'"]([^`'"]+)[`'"]\s*\}\}"#)
-        .unwrap_or_else(|_| regex::Regex::new("$a").unwrap_or_else(|_| unreachable!()));
-    result = re_clean
-        .replace_all(&result, |caps: &regex::Captures| {
-            format!(r#"${{clean_resource_name("{}")}}"#, &caps[1])
-        })
-        .to_string();
-
-    // 5. {{ isotime `format` }} -> ${legacy_isotime("format")}
-    let re_isotime_fmt = regex::Regex::new(r#"\{\{\s*isotime\s+[`'"]([^`'"]+)[`'"]\s*\}\}"#)
-        .unwrap_or_else(|_| regex::Regex::new("$a").unwrap_or_else(|_| unreachable!()));
-    result = re_isotime_fmt
-        .replace_all(&result, |caps: &regex::Captures| {
-            format!(r#"${{legacy_isotime("{}")}}"#, &caps[1])
-        })
-        .to_string();
-
-    // 6. {{ split `val` `sep` }} -> ${split("sep", "val")}
-    let re_split =
-        regex::Regex::new(r#"\{\{\s*split\s+[`'"]([^`'"]+)[`'"]\s+[`'"]([^`'"]+)[`'"]\s*\}\}"#)
-            .unwrap_or_else(|_| regex::Regex::new("$a").unwrap_or_else(|_| unreachable!()));
-    result = re_split
-        .replace_all(&result, |caps: &regex::Captures| {
-            format!(r#"${{split("{}", "{}")}}"#, &caps[2], &caps[1])
-        })
-        .to_string();
-
-    // 7. {{ lower `val` }} -> ${lower("val")}
-    let re_lower = regex::Regex::new(r#"\{\{\s*lower\s+[`'"]([^`'"]+)[`'"]\s*\}\}"#)
-        .unwrap_or_else(|_| regex::Regex::new("$a").unwrap_or_else(|_| unreachable!()));
-    result = re_lower
-        .replace_all(&result, |caps: &regex::Captures| {
-            format!(r#"${{lower("{}")}}"#, &caps[1])
-        })
-        .to_string();
-
-    // 8. {{ upper `val` }} -> ${upper("val")}
-    let re_upper = regex::Regex::new(r#"\{\{\s*upper\s+[`'"]([^`'"]+)[`'"]\s*\}\}"#)
-        .unwrap_or_else(|_| regex::Regex::new("$a").unwrap_or_else(|_| unreachable!()));
-    result = re_upper
-        .replace_all(&result, |caps: &regex::Captures| {
-            format!(r#"${{upper("{}")}}"#, &caps[1])
-        })
-        .to_string();
+    for (pattern, replacement_fn) in [
+        (
+            r#"\{\{\s*user\s+[`'"]([^`'"]+)[`'"]\s*\}\}"#,
+            (|caps: &regex::Captures| format!("${{var.{}}}", &caps[1]))
+                as fn(&regex::Captures) -> String,
+        ),
+        (
+            r#"\{\{\s*env\s+[`'"]([^`'"]+)[`'"]\s*\}\}"#,
+            |caps: &regex::Captures| format!(r#"${{env("{}")}}"#, &caps[1]),
+        ),
+        (
+            r#"\{\{\s*build\s+[`'"]([^`'"]+)[`'"]\s*\}\}"#,
+            |caps: &regex::Captures| format!("${{build.{}}}", &caps[1]),
+        ),
+        (
+            r#"\{\{\s*clean_resource_name\s+[`'"]([^`'"]+)[`'"]\s*\}\}"#,
+            |caps: &regex::Captures| format!(r#"${{clean_resource_name("{}")}}"#, &caps[1]),
+        ),
+        (
+            r#"\{\{\s*isotime\s+[`'"]([^`'"]+)[`'"]\s*\}\}"#,
+            |caps: &regex::Captures| format!(r#"${{legacy_isotime("{}")}}"#, &caps[1]),
+        ),
+        (
+            r#"\{\{\s*split\s+[`'"]([^`'"]+)[`'"]\s+[`'"]([^`'"]+)[`'"]\s*\}\}"#,
+            |caps: &regex::Captures| format!(r#"${{split("{}", "{}")}}"#, &caps[2], &caps[1]),
+        ),
+        (
+            r#"\{\{\s*lower\s+[`'"]([^`'"]+)[`'"]\s*\}\}"#,
+            |caps: &regex::Captures| format!(r#"${{lower("{}")}}"#, &caps[1]),
+        ),
+        (
+            r#"\{\{\s*upper\s+[`'"]([^`'"]+)[`'"]\s*\}\}"#,
+            |caps: &regex::Captures| format!(r#"${{upper("{}")}}"#, &caps[1]),
+        ),
+    ] {
+        if let Ok(re) = regex::Regex::new(pattern) {
+            result = re.replace_all(&result, replacement_fn).to_string();
+        }
+    }
 
     // 9. Builtin keywords
     result = result.replace("{{ timestamp }}", "${timestamp()}");
@@ -652,7 +619,6 @@ pub fn upgrade_json_to_structured_hcl2(content: &str) -> Result<StructuredHcl2, 
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -660,7 +626,7 @@ mod tests {
     fn test_infer_hcl_type() {
         assert_eq!(infer_hcl_type(&serde_json::json!(true)), "bool");
         assert_eq!(infer_hcl_type(&serde_json::json!(42)), "number");
-        assert_eq!(infer_hcl_type(&serde_json::json!(3.14)), "number");
+        assert_eq!(infer_hcl_type(&serde_json::json!(3.25)), "number");
         assert_eq!(infer_hcl_type(&serde_json::json!("hello")), "string");
         assert_eq!(infer_hcl_type(&serde_json::json!(null)), "string");
         assert_eq!(infer_hcl_type(&serde_json::json!([])), "list(string)");
@@ -987,8 +953,8 @@ mod tests {
         assert!(upgrade_json_to_structured_hcl2(not_obj).is_err());
         let missing_b_type = r#"{"builders": [{}]}"#;
         assert!(upgrade_json_to_structured_hcl2(missing_b_type).is_err());
-        let missing_p_type = r#"{"provisioners": [{}]}"#;
-        assert!(upgrade_json_to_structured_hcl2(missing_p_type).is_err());
+        let missing_prov_type = r#"{"provisioners": [{}]}"#;
+        assert!(upgrade_json_to_structured_hcl2(missing_prov_type).is_err());
         let missing_pp_type = r#"{"post-processors": [{}]}"#;
         assert!(upgrade_json_to_structured_hcl2(missing_pp_type).is_err());
         let missing_sub_pp_type = r#"{"post-processors": [[{}]]}"#;
@@ -1000,6 +966,6 @@ mod tests {
         let s1 = StructuredHcl2::default();
         let s2 = s1.clone();
         assert_eq!(s1, s2);
-        assert_eq!(format!("{s1:?}"), format!("{s2:?}"));
+        assert!(format!("{s1:?}").contains("StructuredHcl2"));
     }
 }

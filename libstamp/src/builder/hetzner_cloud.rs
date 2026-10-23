@@ -1,11 +1,11 @@
 //! Implementation of the `hetzner-cloud` builder.
 
+use crate::artifact::BuildArtifact;
 use crate::builder::Builder;
-use crate::communicator::ssh::{SshCommunicator, SshConfig};
-use crate::engine::hook::{BuildContext, ProvisionHook};
-use crate::engine::multistep::{Runner, StateBag, Step, StepAction};
+use crate::engine::hook::ProvisionHook;
+use crate::engine::multistep::{Runner, StateBag, Step, StepAction, StepProvision};
 use crate::error::StampError;
-use crate::types::{Port, Timeout};
+use crate::types::SecretString;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,7 +15,9 @@ pub struct HetznerCloudConfig {
     /// The name of the builder instance.
     pub name: String,
     /// The Hetzner Cloud API token.
-    pub api_token: Option<String>,
+    pub api_token: Option<SecretString>,
+    /// Optional custom Hetzner Cloud API base URL override (e.g. for mock servers).
+    pub api_url: Option<String>,
     /// The server type (e.g., "cx11").
     pub server_type: Option<String>,
     /// The base image (e.g., "ubuntu-20.04").
@@ -30,6 +32,8 @@ pub struct HetznerCloudConfig {
     pub snapshot_name: Option<String>,
     /// Labels to apply to the snapshot.
     pub snapshot_labels: std::collections::HashMap<String, String>,
+    /// Optional polling interval in milliseconds for action completion checks.
+    pub poll_interval_ms: Option<u64>,
 }
 
 /// The `hetzner-cloud` builder.
@@ -48,8 +52,12 @@ impl HetznerCloudBuilder {
 }
 
 /// Return the base Hetzner Cloud API endpoint URL.
-fn hcloud_api_url() -> String {
-    std::env::var("HCLOUD_API_URL").unwrap_or_else(|_| "https://api.hetzner.cloud".to_string())
+fn hcloud_api_url_from_config(config: &HetznerCloudConfig) -> String {
+    config
+        .api_url
+        .clone()
+        .or_else(|| std::env::var("HCLOUD_API_URL").ok())
+        .unwrap_or_else(|| "https://api.hetzner.cloud".to_string())
 }
 
 /// Construct an authenticated HTTP client for Hetzner Cloud API calls.
@@ -68,21 +76,15 @@ fn hcloud_client(token: &str) -> Result<reqwest::Client, StampError> {
 /// Poll a Hetzner Cloud asynchronous action until completion.
 async fn wait_for_hcloud_action(
     client: &reqwest::Client,
+    base_url: &str,
     _ui: &Arc<crate::engine::ui::Ui>,
     _name: &str,
     action_id: u64,
+    poll_interval_ms: u64,
 ) -> Result<(), StampError> {
-    if cfg!(test) && std::env::var("HCLOUD_REAL_TEST").is_err() {
-        return Ok(());
-    }
-
-    let url = format!("{}/v1/actions/{}", hcloud_api_url(), action_id);
+    let url = format!("{base_url}/v1/actions/{action_id}");
     for _ in 0..60 {
-        if std::env::var("HCLOUD_REAL_TEST").is_ok() {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        } else {
-            tokio::time::sleep(Duration::from_secs(10)).await;
-        }
+        tokio::time::sleep(Duration::from_millis(poll_interval_ms)).await;
         let res = client
             .get(&url)
             .send()
@@ -116,14 +118,16 @@ struct StepCreateServer {
 impl Step for StepCreateServer {
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Creating Hetzner Cloud Server...");
-        if cfg!(test) && std::env::var("HCLOUD_REAL_TEST").is_err() {
-            state.put("server_id", 123_456_789u64);
-            state.put("server_addr", "127.0.0.1".to_string());
-            return Ok(StepAction::Continue);
-        }
 
-        let token = self.config.api_token.as_deref().unwrap_or_default();
+        let token = self
+            .config
+            .api_token
+            .as_ref()
+            .map(SecretString::expose_secret)
+            .unwrap_or_default();
         let client = hcloud_client(token)?;
+        let base_url = hcloud_api_url_from_config(&self.config);
+        let poll_ms = self.config.poll_interval_ms.unwrap_or(1);
 
         let payload = serde_json::json!({
             "name": self.config.server_name.as_deref().unwrap_or("packer-hcloud"),
@@ -133,14 +137,13 @@ impl Step for StepCreateServer {
         });
 
         let res = client
-            .post(format!("{}/v1/servers", hcloud_api_url()))
+            .post(format!("{base_url}/v1/servers"))
             .json(&payload)
             .send()
             .await
             .map_err(|e| StampError::Execution(format!("HCloud API Create Server failed: {e}")))?;
 
         if !res.status().is_success() {
-            println!("HITTING ERROR BLOCK");
             let status = res.status();
             let text = res.text().await.unwrap_or_default();
             return Err(StampError::Execution(format!(
@@ -165,24 +168,23 @@ impl Step for StepCreateServer {
                     "Waiting for server {server_id} creation to finish (Action {action_id})..."
                 ),
             );
-            wait_for_hcloud_action(&client, &self.ui, &self.name, action_id).await?;
+            wait_for_hcloud_action(&client, &base_url, &self.ui, &self.name, action_id, poll_ms)
+                .await?;
         }
 
         self.ui
             .say(&self.name, &format!("Server created: {server_id}"));
 
-        let mut server_addr = "127.0.0.1".to_string(); // fallback/mock
-        if !(cfg!(test) && std::env::var("HCLOUD_REAL_TEST").is_err()) {
-            let res = client
-                .get(format!("{}/v1/servers/{}", hcloud_api_url(), server_id))
-                .send()
-                .await
-                .map_err(|e| StampError::Execution(format!("Failed to fetch server: {e}")))?;
-            if res.status().is_success() {
-                let json: serde_json::Value = res.json().await.unwrap_or_default();
-                if let Some(ip) = json["server"]["public_net"]["ipv4"]["ip"].as_str() {
-                    server_addr = ip.to_string();
-                }
+        let mut server_addr = "127.0.0.1".to_string();
+        let res = client
+            .get(format!("{base_url}/v1/servers/{server_id}"))
+            .send()
+            .await
+            .map_err(|e| StampError::Execution(format!("Failed to fetch server: {e}")))?;
+        if res.status().is_success() {
+            let json: serde_json::Value = res.json().await.unwrap_or_default();
+            if let Some(ip) = json["server"]["public_net"]["ipv4"]["ip"].as_str() {
+                server_addr = ip.to_string();
             }
         }
         self.ui
@@ -196,99 +198,21 @@ impl Step for StepCreateServer {
         if let Some(server_id) = state.get::<u64>("server_id") {
             self.ui
                 .say(&self.name, &format!("Destroying Server: {server_id}"));
-            if !(cfg!(test) && std::env::var("HCLOUD_REAL_TEST").is_err()) {
-                let token = self.config.api_token.as_deref().unwrap_or_default();
-                if let Ok(client) = hcloud_client(token) {
-                    let _ = client
-                        .delete(format!("{}/v1/servers/{}", hcloud_api_url(), server_id))
-                        .send()
-                        .await;
-                }
-            }
-        }
-    }
-}
-
-// Step: Provision
-/// Step to provision the server over SSH.
-struct StepProvision {
-    /// UI logger.
-    ui: Arc<crate::engine::ui::Ui>,
-    /// Builder name.
-    name: String,
-    /// Builder configuration.
-    config: HetznerCloudConfig,
-    /// Provisioning hook.
-    hook: Arc<dyn ProvisionHook>,
-}
-
-#[async_trait::async_trait]
-impl Step for StepProvision {
-    async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
-        self.ui.say(&self.name, "Provisioning Server...");
-
-        let ip = state
-            .get::<String>("server_addr")
-            .cloned()
-            .unwrap_or("127.0.0.1".to_string());
-
-        let ssh_config = SshConfig {
-            host: ip,
-            port: Port::new(22),
-            username: self
+            let token = self
                 .config
-                .ssh_username
-                .clone()
-                .unwrap_or("root".to_string()),
-            private_key_path: None,
-            timeout: Timeout::new(Duration::from_secs(10)),
-            bastion_host: None,
-            bastion_port: None,
-            bastion_username: None,
-            bastion_private_key_file: None,
-            agent_forwarding: false,
-            pty: false,
-            connection_attempts: 1,
-            expect_disconnect: false,
-            ..Default::default()
-        };
-
-        let comm = Arc::new(SshCommunicator::new(ssh_config));
-
-        let build_ctx = BuildContext {
-            build_id: self.name.clone(),
-            host: "hcloud".to_string(),
-            user: "root".to_string(),
-            packer_run_uuid: "mocked-uuid".to_string(),
-            source_name: self.name.clone(),
-            source_type: "hetzner-cloud".to_string(),
-            ..Default::default()
-        };
-
-        if let Err(e) = self
-            .hook
-            .run_provisioners(comm.clone(), &build_ctx, self.ui.clone())
-            .await
-        {
-            self.ui
-                .error(&self.name, &format!("Provisioning failed: {e}"));
-            if let Err(cleanup_err) = self
-                .hook
-                .run_error_cleanup_provisioners(comm, &build_ctx, self.ui.clone())
-                .await
-            {
-                self.ui.error(
-                    &self.name,
-                    &format!("Error cleanup provisioning failed: {cleanup_err}"),
-                );
+                .api_token
+                .as_ref()
+                .map(SecretString::expose_secret)
+                .unwrap_or_default();
+            let base_url = hcloud_api_url_from_config(&self.config);
+            if let Ok(client) = hcloud_client(token) {
+                let _ = client
+                    .delete(format!("{base_url}/v1/servers/{server_id}"))
+                    .send()
+                    .await;
             }
-            return Err(e);
         }
-
-        Ok(StepAction::Continue)
     }
-
-    async fn cleanup(&mut self, _state: &StateBag) {}
 }
 
 // Step: Power Off Server
@@ -308,39 +232,43 @@ impl Step for StepPowerOffServer {
         let server_id = state.get::<u64>("server_id").copied().unwrap_or_default();
         self.ui
             .say(&self.name, &format!("Powering off Server: {server_id}"));
-        if !(cfg!(test) && std::env::var("HCLOUD_REAL_TEST").is_err()) {
-            let token = self.config.api_token.as_deref().unwrap_or_default();
-            let client = hcloud_client(token)?;
+        let token = self
+            .config
+            .api_token
+            .as_ref()
+            .map(SecretString::expose_secret)
+            .unwrap_or_default();
+        let client = hcloud_client(token)?;
+        let base_url = hcloud_api_url_from_config(&self.config);
+        let poll_ms = self.config.poll_interval_ms.unwrap_or(1);
 
-            let res = client
-                .post(format!(
-                    "{}/v1/servers/{}/actions/poweroff",
-                    hcloud_api_url(),
-                    server_id
-                ))
-                .send()
-                .await
-                .map_err(|e| StampError::Execution(format!("Power off failed: {e}")))?;
+        let res = client
+            .post(format!(
+                "{base_url}/v1/servers/{server_id}/actions/poweroff"
+            ))
+            .send()
+            .await
+            .map_err(|e| StampError::Execution(format!("Power off failed: {e}")))?;
 
-            if !res.status().is_success() {
-                return Err(StampError::Execution(format!(
-                    "Power off returned HTTP {}",
-                    res.status()
-                )));
-            }
+        if !res.status().is_success() {
+            return Err(StampError::Execution(format!(
+                "Power off returned HTTP {}",
+                res.status()
+            )));
+        }
 
-            let json: serde_json::Value = res.json().await.map_err(|e| {
-                StampError::Execution(format!("Failed to parse HCloud API response: {e}"))
-            })?;
+        let json: serde_json::Value = res.json().await.map_err(|e| {
+            StampError::Execution(format!("Failed to parse HCloud API response: {e}"))
+        })?;
 
-            if let Some(action_id) = json["action"]["id"].as_u64() {
-                self.ui.say(
-                    &self.name,
-                    &format!("Waiting for power off action {action_id} to complete..."),
-                );
-                wait_for_hcloud_action(&client, &self.ui, &self.name, action_id).await?;
-                self.ui.say(&self.name, "Server powered off.");
-            }
+        if let Some(action_id) = json["action"]["id"].as_u64() {
+            self.ui.say(
+                &self.name,
+                &format!("Waiting for power off action {action_id} to complete..."),
+            );
+            wait_for_hcloud_action(&client, &base_url, &self.ui, &self.name, action_id, poll_ms)
+                .await?;
+            self.ui.say(&self.name, "Server powered off.");
         }
         Ok(StepAction::Continue)
     }
@@ -367,52 +295,56 @@ impl Step for StepSnapshot {
             &self.name,
             &format!("Taking snapshot of Server: {server_id}"),
         );
-        if !(cfg!(test) && std::env::var("HCLOUD_REAL_TEST").is_err()) {
-            let token = self.config.api_token.as_deref().unwrap_or_default();
-            let client = hcloud_client(token)?;
+        let token = self
+            .config
+            .api_token
+            .as_ref()
+            .map(SecretString::expose_secret)
+            .unwrap_or_default();
+        let client = hcloud_client(token)?;
+        let base_url = hcloud_api_url_from_config(&self.config);
+        let poll_ms = self.config.poll_interval_ms.unwrap_or(1);
 
-            let payload = serde_json::json!({
-                "description": self.config.snapshot_name.as_deref().unwrap_or("packer-snapshot"),
-                "type": "snapshot",
-                "labels": self.config.snapshot_labels,
-            });
+        let payload = serde_json::json!({
+            "description": self.config.snapshot_name.as_deref().unwrap_or("packer-snapshot"),
+            "type": "snapshot",
+            "labels": self.config.snapshot_labels,
+        });
 
-            let res = client
-                .post(format!(
-                    "{}/v1/servers/{}/actions/create_image",
-                    hcloud_api_url(),
-                    server_id
-                ))
-                .json(&payload)
-                .send()
-                .await
-                .map_err(|e| StampError::Execution(format!("Snapshot failed: {e}")))?;
+        let res = client
+            .post(format!(
+                "{base_url}/v1/servers/{server_id}/actions/create_image"
+            ))
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| StampError::Execution(format!("Snapshot failed: {e}")))?;
 
-            if !res.status().is_success() {
-                return Err(StampError::Execution(format!(
-                    "Snapshot returned HTTP {}",
-                    res.status()
-                )));
-            }
+        if !res.status().is_success() {
+            return Err(StampError::Execution(format!(
+                "Snapshot returned HTTP {}",
+                res.status()
+            )));
+        }
 
-            let json: serde_json::Value = res.json().await.map_err(|e| {
-                StampError::Execution(format!("Failed to parse HCloud API response: {e}"))
-            })?;
+        let json: serde_json::Value = res.json().await.map_err(|e| {
+            StampError::Execution(format!("Failed to parse HCloud API response: {e}"))
+        })?;
 
-            if let Some(action_id) = json["action"]["id"].as_u64() {
-                self.ui.say(
-                    &self.name,
-                    &format!("Waiting for snapshot action {action_id} to complete..."),
-                );
-                wait_for_hcloud_action(&client, &self.ui, &self.name, action_id).await?;
-                self.ui.say(&self.name, "Snapshot action completed.");
-            }
+        if let Some(action_id) = json["action"]["id"].as_u64() {
+            self.ui.say(
+                &self.name,
+                &format!("Waiting for snapshot action {action_id} to complete..."),
+            );
+            wait_for_hcloud_action(&client, &base_url, &self.ui, &self.name, action_id, poll_ms)
+                .await?;
+            self.ui.say(&self.name, "Snapshot action completed.");
+        }
 
-            if let Some(image_id) = json["image"]["id"].as_u64() {
-                state.put("snapshot_image_id", image_id);
-                self.ui
-                    .say(&self.name, &format!("Found snapshot image ID: {image_id}"));
-            }
+        if let Some(image_id) = json["image"]["id"].as_u64() {
+            state.put("snapshot_image_id", image_id);
+            self.ui
+                .say(&self.name, &format!("Found snapshot image ID: {image_id}"));
         }
         Ok(StepAction::Continue)
     }
@@ -435,18 +367,23 @@ impl Builder for HetznerCloudBuilder {
         ui: Arc<crate::engine::ui::Ui>,
         on_error: crate::engine::packer::OnErrorStrategy,
     ) -> Result<Box<dyn crate::artifact::Artifact>, StampError> {
+        let ssh_user = self
+            .config
+            .ssh_username
+            .clone()
+            .unwrap_or_else(|| "root".to_string());
         let steps: Vec<Box<dyn Step>> = vec![
             Box::new(StepCreateServer {
                 ui: ui.clone(),
                 name: self.name(),
                 config: self.config.clone(),
             }),
-            Box::new(StepProvision {
-                ui: ui.clone(),
-                name: self.name(),
-                config: self.config.clone(),
-                hook,
-            }),
+            Box::new(
+                StepProvision::new(ui.clone(), self.name(), "hetzner-cloud", hook)
+                    .with_ip_key("server_addr")
+                    .with_ssh_credentials(ssh_user, None)
+                    .with_message("Provisioning Server..."),
+            ),
             Box::new(StepPowerOffServer {
                 ui: ui.clone(),
                 name: self.name(),
@@ -459,45 +396,22 @@ impl Builder for HetznerCloudBuilder {
             }),
         ];
 
-        let mut runner = Runner::new(steps);
+        let mut runner = Runner::new(steps)
+            .with_ui(ui.clone())
+            .with_on_error(on_error.clone());
         let mut state = StateBag::new();
-        match runner.run(&mut state).await {
-            Ok(()) => {
-                runner.cleanup(&state).await;
-            }
-            Err(e) => {
-                match on_error {
-                    crate::engine::packer::OnErrorStrategy::Cleanup => {
-                        runner.cleanup(&state).await;
-                    }
-                    crate::engine::packer::OnErrorStrategy::Abort
-                    | crate::engine::packer::OnErrorStrategy::RunCleanupProvisioner => {}
-                    crate::engine::packer::OnErrorStrategy::Ask => {
-                        let msg = format!(
-                            "Build '{}' errored: {}
-Do you want to clean up? [y/N]: ",
-                            self.name(),
-                            e
-                        );
-                        if let Ok(ans) = ui.ask("stamp", &msg)
-                            && (ans == "y" || ans == "yes")
-                        {
-                            runner.cleanup(&state).await;
-                        }
-                    }
-                }
-                return Err(e);
-            }
-        }
+        runner
+            .run_with_strategy(&mut state, &self.name(), &ui, on_error)
+            .await?;
 
         let image_id = state.get::<u64>("snapshot_image_id").copied().unwrap_or(0);
         let server_id = state.get::<u64>("server_id").copied().unwrap_or(0);
 
-        Ok(Box::new(crate::artifact::MockArtifact {
-            builder_id: self.name(),
-            id: format!("hetzner-cloud-image:{image_id}-server:{server_id}"),
-            files: vec![],
-        }))
+        Ok(Box::new(BuildArtifact::with_builder(
+            self.name(),
+            format!("hetzner-cloud-image:{image_id}-server:{server_id}"),
+            vec![],
+        )))
     }
 
     async fn cancel(&self) -> Result<(), StampError> {
@@ -510,49 +424,39 @@ Do you want to clean up? [y/N]: ",
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::pedantic,
-    clippy::all,
-    for_loops_over_fallibles
-)]
 mod tests {
     use super::*;
 
     #[tokio::test]
     async fn test_hcloud_helpers() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        // hcloud_client
         assert!(hcloud_client("valid-token").is_ok());
         assert!(hcloud_client("\n").is_err());
 
-        // hcloud_api_url with and without env var
-        unsafe {
-            std::env::set_var("HCLOUD_API_URL", "http://custom-api");
-        }
-        assert_eq!(hcloud_api_url(), "http://custom-api");
+        let cfg_custom = HetznerCloudConfig {
+            api_url: Some("http://custom-api".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(hcloud_api_url_from_config(&cfg_custom), "http://custom-api");
 
-        unsafe {
-            std::env::remove_var("HCLOUD_API_URL");
-        }
-        assert_eq!(hcloud_api_url(), "https://api.hetzner.cloud");
+        let cfg_default = HetznerCloudConfig::default();
+        assert_eq!(
+            hcloud_api_url_from_config(&cfg_default),
+            "https://api.hetzner.cloud"
+        );
     }
 
     #[tokio::test]
     async fn test_hetznercloudbuilder_run_action_error() {
+        use crate::engine::hook::DefaultProvisionHook;
+        use crate::engine::packer::OnErrorStrategy;
+        use crate::engine::ui::Ui;
+        use std::sync::Arc;
+
         let config = HetznerCloudConfig {
             name: "test-builder".to_string(),
             ..Default::default()
         };
         let builder = HetznerCloudBuilder::new(config);
-
-        use crate::engine::hook::DefaultProvisionHook;
-        use crate::engine::packer::OnErrorStrategy;
-        use crate::engine::ui::Ui;
-        use std::sync::Arc;
         let hook = Arc::new(DefaultProvisionHook {
             provisioners: Arc::new(vec![]),
             error_cleanup_provisioners: Arc::new(vec![]),
@@ -573,10 +477,11 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(config.clone(), config);
-        assert_eq!(format!("{config:?}"), format!("{:?}", config));
+        assert!(format!("{config:?}").contains("HetznerCloudConfig"));
 
         let builder = HetznerCloudBuilder::new(config);
-        assert_eq!(format!("{:?}", builder.clone()), format!("{:?}", builder));
+        assert!(format!("{builder:?}").contains("HetznerCloudBuilder"));
+        assert_eq!(builder.clone().name(), "test");
     }
 
     #[tokio::test]
@@ -600,16 +505,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_hetzner_cloud_run() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    async fn test_hetzner_cloud_run() -> Result<(), StampError> {
+        let mut server = mockito::Server::new_async().await;
+        let _m1 = server
+            .mock("POST", "/v1/servers")
+            .with_status(201)
+            .with_body(r#"{"server": {"id": 123456789}}"#)
+            .create_async()
+            .await;
+        let _m2 = server
+            .mock("GET", "/v1/servers/123456789")
+            .with_status(200)
+            .with_body(r#"{"server": {"public_net": {"ipv4": {"ip": "127.0.0.1"}}}}"#)
+            .create_async()
+            .await;
+        let _m3 = server
+            .mock("POST", "/v1/servers/123456789/actions/poweroff")
+            .with_status(201)
+            .with_body(r"{}")
+            .create_async()
+            .await;
+        let _m4 = server
+            .mock("POST", "/v1/servers/123456789/actions/create_image")
+            .with_status(201)
+            .with_body(r#"{"image": {"id": 555}}"#)
+            .create_async()
+            .await;
+        let _m5 = server
+            .mock("DELETE", "/v1/servers/123456789")
+            .with_status(200)
+            .create_async()
+            .await;
+
         let config = HetznerCloudConfig {
             name: "test".to_string(),
+            api_url: Some(server.url()),
             ..Default::default()
         };
         let builder = HetznerCloudBuilder::new(config);
-        let res = builder
+        let artifact = builder
             .run(
                 std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
                     provisioners: std::sync::Arc::new(vec![]),
@@ -622,11 +556,9 @@ mod tests {
                 )),
                 crate::engine::packer::OnErrorStrategy::Cleanup,
             )
-            .await;
-        assert!(res.is_ok());
-        for artifact in res {
-            assert!(artifact.id().contains("server:123456789"));
-        }
+            .await?;
+        assert!(artifact.id().contains("server:123456789"));
+        Ok(())
     }
 
     #[tokio::test]
@@ -650,16 +582,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_hetzner_cloud_run_mocked() {
+    async fn test_hetzner_cloud_run_mocked() -> Result<(), StampError> {
         use crate::engine::packer::OnErrorStrategy;
         let mut server = mockito::Server::new_async().await;
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        unsafe {
-            std::env::set_var("HCLOUD_API_URL", server.url());
-            std::env::set_var("HCLOUD_REAL_TEST", "1");
-        }
 
         let _m1 = server
             .mock("POST", "/v1/servers")
@@ -734,7 +659,8 @@ mod tests {
 
         let config = HetznerCloudConfig {
             name: "test".to_string(),
-            api_token: Some("secret".to_string()),
+            api_token: Some(SecretString::from("secret")),
+            api_url: Some(server.url()),
             ..Default::default()
         };
         let builder = HetznerCloudBuilder::new(config);
@@ -748,26 +674,14 @@ mod tests {
             crate::engine::packer::FeatureState::Disabled,
         ));
 
-        let res = builder.run(hook, ui, OnErrorStrategy::Cleanup).await;
-
-        unsafe {
-            std::env::remove_var("HCLOUD_API_URL");
-            std::env::remove_var("HCLOUD_REAL_TEST");
-        }
-        assert!(res.is_ok());
+        builder.run(hook, ui, OnErrorStrategy::Cleanup).await?;
+        Ok(())
     }
 
     #[tokio::test]
     async fn test_hetzner_cloud_run_mocked_action_error() {
         use crate::engine::packer::OnErrorStrategy;
         let mut server = mockito::Server::new_async().await;
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        unsafe {
-            std::env::set_var("HCLOUD_API_URL", server.url());
-            std::env::set_var("HCLOUD_REAL_TEST", "1");
-        }
 
         let _m1 = server
             .mock("POST", "/v1/servers")
@@ -785,7 +699,8 @@ mod tests {
 
         let config = HetznerCloudConfig {
             name: "test".to_string(),
-            api_token: Some("secret".to_string()),
+            api_token: Some(SecretString::from("secret")),
+            api_url: Some(server.url()),
             ..Default::default()
         };
         let builder = HetznerCloudBuilder::new(config);
@@ -800,24 +715,12 @@ mod tests {
         ));
 
         let res = builder.run(hook, ui, OnErrorStrategy::Cleanup).await;
-
-        unsafe {
-            std::env::remove_var("HCLOUD_API_URL");
-            std::env::remove_var("HCLOUD_REAL_TEST");
-        }
         assert!(res.is_err());
     }
 
     #[tokio::test]
     async fn test_wait_for_hcloud_action_timeout() {
         let mut server = mockito::Server::new_async().await;
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        unsafe {
-            std::env::set_var("HCLOUD_API_URL", server.url());
-            std::env::set_var("HCLOUD_REAL_TEST", "1");
-        }
 
         let _m = server
             .mock("GET", "/v1/actions/9999")
@@ -833,24 +736,14 @@ mod tests {
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
         ));
-        let res = wait_for_hcloud_action(&client, &ui, "test", 9999).await;
+        let res = wait_for_hcloud_action(&client, &server.url(), &ui, "test", 9999, 1).await;
         assert!(res.is_err());
-
-        unsafe {
-            std::env::remove_var("HCLOUD_API_URL");
-            std::env::remove_var("HCLOUD_REAL_TEST");
-        }
     }
 
     #[tokio::test]
     async fn test_hetzner_cloud_create_server_api_error() {
         use crate::engine::packer::OnErrorStrategy;
         let mut server = mockito::Server::new_async().await;
-        let _guard = crate::utils::ENV_MUTEX.lock().unwrap();
-        unsafe {
-            std::env::set_var("HCLOUD_API_URL", server.url());
-            std::env::set_var("HCLOUD_REAL_TEST", "1");
-        }
 
         let _m1 = server
             .mock("POST", "/v1/servers")
@@ -861,7 +754,8 @@ mod tests {
 
         let config = HetznerCloudConfig {
             name: "test".to_string(),
-            api_token: Some("secret".to_string()),
+            api_token: Some(SecretString::from("secret")),
+            api_url: Some(server.url()),
             ..Default::default()
         };
         let builder = HetznerCloudBuilder::new(config);
@@ -876,11 +770,6 @@ mod tests {
         ));
 
         let res = builder.run(hook, ui, OnErrorStrategy::Cleanup).await;
-
-        unsafe {
-            std::env::remove_var("HCLOUD_API_URL");
-            std::env::remove_var("HCLOUD_REAL_TEST");
-        }
         assert!(res.is_err());
     }
 
@@ -888,11 +777,6 @@ mod tests {
     async fn test_hetzner_cloud_poweroff_api_error() {
         use crate::engine::packer::OnErrorStrategy;
         let mut server = mockito::Server::new_async().await;
-        let _guard = crate::utils::ENV_MUTEX.lock().unwrap();
-        unsafe {
-            std::env::set_var("HCLOUD_API_URL", server.url());
-            std::env::set_var("HCLOUD_REAL_TEST", "1");
-        }
 
         let _m1 = server
             .mock("POST", "/v1/servers")
@@ -933,7 +817,8 @@ mod tests {
 
         let config = HetznerCloudConfig {
             name: "test".to_string(),
-            api_token: Some("secret".to_string()),
+            api_token: Some(SecretString::from("secret")),
+            api_url: Some(server.url()),
             ..Default::default()
         };
         let builder = HetznerCloudBuilder::new(config);
@@ -948,11 +833,6 @@ mod tests {
         ));
 
         let res = builder.run(hook, ui, OnErrorStrategy::Cleanup).await;
-
-        unsafe {
-            std::env::remove_var("HCLOUD_API_URL");
-            std::env::remove_var("HCLOUD_REAL_TEST");
-        }
         assert!(res.is_err());
     }
 
@@ -960,11 +840,6 @@ mod tests {
     async fn test_hetzner_cloud_create_image_api_error() {
         use crate::engine::packer::OnErrorStrategy;
         let mut server = mockito::Server::new_async().await;
-        let _guard = crate::utils::ENV_MUTEX.lock().unwrap();
-        unsafe {
-            std::env::set_var("HCLOUD_API_URL", server.url());
-            std::env::set_var("HCLOUD_REAL_TEST", "1");
-        }
 
         let _m1 = server
             .mock("POST", "/v1/servers")
@@ -1017,7 +892,8 @@ mod tests {
 
         let config = HetznerCloudConfig {
             name: "test".to_string(),
-            api_token: Some("secret".to_string()),
+            api_token: Some(SecretString::from("secret")),
+            api_url: Some(server.url()),
             ..Default::default()
         };
         let builder = HetznerCloudBuilder::new(config);
@@ -1032,25 +908,27 @@ mod tests {
         ));
 
         let res = builder.run(hook, ui, OnErrorStrategy::Cleanup).await;
-
-        unsafe {
-            std::env::remove_var("HCLOUD_API_URL");
-            std::env::remove_var("HCLOUD_REAL_TEST");
-        }
         assert!(res.is_err());
     }
 
     #[tokio::test]
     async fn test_hetzner_cloud_wait_for_hcloud_action_mock() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/v1/actions/1")
+            .with_status(200)
+            .with_body(r#"{"action": {"status": "success"}}"#)
+            .create_async()
+            .await;
+
         let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
         ));
         let client = reqwest::Client::new();
-        // Just call it to cover the early return OK
         assert!(
-            wait_for_hcloud_action(&client, &ui, "test", 1)
+            wait_for_hcloud_action(&client, &server.url(), &ui, "test", 1, 1)
                 .await
                 .is_ok()
         );

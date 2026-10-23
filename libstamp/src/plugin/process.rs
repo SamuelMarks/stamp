@@ -114,15 +114,21 @@ impl PluginSubprocess {
                         stderr: captured_stderr,
                     });
                 }
+                let _ = child.kill().await;
+                let _ = child.wait().await;
                 Err(StampError::PluginHandshake(format!(
                     "Timed out waiting for handshake from plugin {}",
                     path.display()
                 )))
             }
-            Ok(Err(e)) => Err(StampError::PluginHandshake(format!(
-                "Failed to read handshake stdout from plugin {}: {e}",
-                path.display()
-            ))),
+            Ok(Err(e)) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                Err(StampError::PluginHandshake(format!(
+                    "Failed to read handshake stdout from plugin {}: {e}",
+                    path.display()
+                )))
+            }
             Ok(Ok(_)) => {
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
@@ -135,13 +141,22 @@ impl PluginSubprocess {
                             stderr: captured_stderr,
                         });
                     }
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
                     return Err(StampError::PluginHandshake(format!(
                         "Plugin {} terminated without emitting handshake line",
                         path.display()
                     )));
                 }
 
-                let handshake = trimmed.parse::<Handshake>()?;
+                let handshake = match trimmed.parse::<Handshake>() {
+                    Ok(h) => h,
+                    Err(e) => {
+                        let _ = child.kill().await;
+                        let _ = child.wait().await;
+                        return Err(e);
+                    }
+                };
 
                 Ok(Self {
                     binary_path: path,
@@ -249,7 +264,6 @@ impl Drop for PluginSubprocess {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -299,15 +313,14 @@ exit 42
         }
 
         let res = PluginSubprocess::spawn(&script_path, &[]).await;
-        match res {
+        assert!(matches!(
+            res,
             Err(StampError::PluginCrashed {
-                exit_code, stderr, ..
-            }) => {
-                assert_eq!(exit_code, Some(42));
-                assert!(stderr.contains("Fatal plugin bootstrap failure"));
-            }
-            _ => assert!(false, "Expected PluginCrashed"),
-        }
+                exit_code: Some(42),
+                ref stderr,
+                ..
+            }) if stderr.contains("Fatal plugin bootstrap failure")
+        ));
         let _ = std::fs::remove_file(&script_path);
         Ok(())
     }
@@ -333,15 +346,14 @@ exit 7
         let proc = PluginSubprocess::spawn(&script_path, &[]).await?;
         tokio::time::sleep(Duration::from_millis(300)).await;
         let crash_res = proc.check_crashed().await;
-        match crash_res {
+        assert!(matches!(
+            crash_res,
             Err(StampError::PluginCrashed {
-                exit_code, stderr, ..
-            }) => {
-                assert_eq!(exit_code, Some(7));
-                assert!(stderr.contains("Plugin crashed during run"));
-            }
-            _ => assert!(false, "Expected PluginCrashed"),
-        }
+                exit_code: Some(7),
+                ref stderr,
+                ..
+            }) if stderr.contains("Plugin crashed during run")
+        ));
         let collected_stderr = proc.stderr().await;
         assert!(collected_stderr.contains("Plugin crashed during run"));
 

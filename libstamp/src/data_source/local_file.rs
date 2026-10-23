@@ -65,7 +65,6 @@ impl DataSource for LocalFileDataSource {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -74,10 +73,12 @@ mod tests {
         let config = LocalFileConfig {
             path: "/path/to/file".to_string(),
         };
-        assert_eq!(config.clone(), config);
-        assert_eq!(format!("{config:?}"), format!("{config:?}"));
+        let cloned = config.clone();
+        assert_eq!(cloned.path, "/path/to/file");
+        assert!(format!("{config:?}").contains("/path/to/file"));
         let ds = LocalFileDataSource::new(config);
-        assert_eq!(format!("{ds:?}"), format!("{:?}", ds.clone()));
+        assert!(format!("{ds:?}").contains("LocalFileDataSource"));
+        assert_eq!(ds.clone().config.path, "/path/to/file");
         let def_config = LocalFileConfig::default();
         assert_eq!(def_config.path, "");
         let def_ds = LocalFileDataSource::default();
@@ -85,47 +86,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_existing_file() {
-        let temp_dir = std::env::temp_dir();
-        let file_path = temp_dir.join("test_stamp_data_source_file.txt");
-        let write_res = tokio::fs::write(&file_path, "hello world stamp").await;
-        assert!(write_res.is_ok());
+    async fn test_read_existing_file() -> Result<(), StampError> {
+        let temp_dir = tempfile::tempdir()?;
+        let file_path = temp_dir.path().join("test_stamp_data_source_file.txt");
+        tokio::fs::write(&file_path, "hello world stamp").await?;
 
         let ds = LocalFileDataSource::new(LocalFileConfig {
             path: file_path.to_string_lossy().to_string(),
         });
-        let res = ds.read().await;
+        let val = ds.read().await?;
         assert_eq!(
-            res.ok()
-                .as_ref()
-                .and_then(|v| v.get("content"))
-                .and_then(Value::as_str),
+            val.get("content").and_then(Value::as_str),
             Some("hello world stamp")
         );
-        let val_opt = ds.read().await.ok();
-        assert_eq!(
-            val_opt
-                .as_ref()
-                .and_then(|v| v.get("size"))
-                .and_then(Value::as_u64),
-            Some(17)
-        );
-        assert!(
-            val_opt
-                .as_ref()
-                .and_then(|v| v.get("sha256"))
-                .and_then(Value::as_str)
-                .is_some()
-        );
-        assert!(
-            val_opt
-                .as_ref()
-                .and_then(|v| v.get("content_base64"))
-                .and_then(Value::as_str)
-                .is_some()
-        );
-
-        let _ = tokio::fs::remove_file(file_path).await;
+        assert_eq!(val.get("size").and_then(Value::as_u64), Some(17));
+        assert!(val.get("sha256").and_then(Value::as_str).is_some());
+        assert!(val.get("content_base64").and_then(Value::as_str).is_some());
+        Ok(())
     }
 
     #[tokio::test]

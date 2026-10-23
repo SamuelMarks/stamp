@@ -202,15 +202,14 @@ impl PostProcessor for ManifestPostProcessor {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
     #[tokio::test]
     async fn test_manifest_process_success() -> Result<(), StampError> {
-        let temp_dir = std::env::temp_dir();
-        let output_path = temp_dir.join(format!("stamp_manifest_{}.json", uuid::Uuid::new_v4()));
-        let dummy_file = temp_dir.join(format!("stamp_art_{}.txt", uuid::Uuid::new_v4()));
+        let temp_dir = tempfile::tempdir()?;
+        let output_path = temp_dir.path().join("stamp_manifest.json");
+        let dummy_file = temp_dir.path().join("stamp_art.txt");
         fs::write(&dummy_file, b"manifest file content").map_err(StampError::Io)?;
 
         let mut custom = HashMap::new();
@@ -247,16 +246,13 @@ mod tests {
                 .map(String::as_str),
             Some("abcdef")
         );
-
-        let _ = fs::remove_file(dummy_file);
-        let _ = fs::remove_file(output_path);
         Ok(())
     }
 
     #[tokio::test]
     async fn test_manifest_append_existing() -> Result<(), StampError> {
-        let temp_dir = std::env::temp_dir();
-        let output_path = temp_dir.join(format!("stamp_manifest_{}.json", uuid::Uuid::new_v4()));
+        let temp_dir = tempfile::tempdir()?;
+        let output_path = temp_dir.path().join("stamp_manifest.json");
 
         let config = ManifestConfig {
             output: output_path.to_string_lossy().to_string(),
@@ -277,8 +273,6 @@ mod tests {
         assert_eq!(parsed.builds.len(), 2);
         assert_eq!(parsed.builds[0].artifact_id, "b1");
         assert_eq!(parsed.builds[1].artifact_id, "b2");
-
-        let _ = fs::remove_file(output_path);
         Ok(())
     }
 
@@ -300,9 +294,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_manifest_git_commit_and_custom_tags() -> Result<(), StampError> {
-        let temp_dir = std::env::temp_dir();
-        let output_path =
-            temp_dir.join(format!("stamp_manifest_tags_{}.json", uuid::Uuid::new_v4()));
+        let temp_dir = tempfile::tempdir()?;
+        let output_path = temp_dir.path().join("stamp_manifest_tags.json");
 
         let mut tags = HashMap::new();
         tags.insert("Environment".to_string(), "Production".to_string());
@@ -329,8 +322,6 @@ mod tests {
                 .map(String::as_str),
             Some("Production")
         );
-
-        let _ = fs::remove_file(output_path);
         Ok(())
     }
 
@@ -339,9 +330,10 @@ mod tests {
         let config1 = ManifestConfig::default();
         let config2 = config1.clone();
         assert_eq!(config1, config2);
-        assert_eq!(format!("{config1:?}"), format!("{config2:?}"));
+        assert!(format!("{config1:?}").contains("ManifestConfig"));
         let st1 = ManifestPostProcessor::new(config1);
         let st2 = st1.clone();
-        assert_eq!(format!("{st1:?}"), format!("{st2:?}"));
+        assert!(format!("{st1:?}").contains("ManifestPostProcessor"));
+        assert_eq!(st1.config, st2.config);
     }
 }

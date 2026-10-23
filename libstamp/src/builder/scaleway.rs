@@ -3,14 +3,13 @@
 //! Manages Scaleway Elements Instances, executing provisioning scripts over SSH
 //! and creating permanent Scaleway image snapshots.
 
+use crate::artifact::BuildArtifact;
 use crate::builder::Builder;
-use crate::communicator::ssh::{SshCommunicator, SshConfig};
-use crate::engine::hook::{BuildContext, ProvisionHook};
-use crate::engine::multistep::{Runner, StateBag, Step, StepAction};
+use crate::engine::hook::ProvisionHook;
+use crate::engine::multistep::{Runner, StateBag, Step, StepAction, StepProvision};
 use crate::error::StampError;
-use crate::types::{FilePath, Port, Timeout};
+use crate::types::{FilePath, SecretString};
 use std::sync::Arc;
-use std::time::Duration;
 
 /// Strictly typed commercial server type identifier (e.g. `DEV1-S`, `GP1-XS`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,10 +40,12 @@ impl Default for ScalewayCommercialType {
 pub struct ScalewayConfig {
     /// Name of the builder instance.
     pub name: String,
+    /// Optional Scaleway API base URL override (e.g. for mockito testing).
+    pub api_url: Option<String>,
     /// Scaleway project identifier.
     pub project_id: Option<String>,
     /// Scaleway API secret access key.
-    pub secret_key: Option<String>,
+    pub secret_key: Option<SecretString>,
     /// Availability zone (e.g. `fr-par-1`, `nl-ams-1`, `pl-waw-1`).
     pub zone: Option<String>,
     /// Commercial instance server type.
@@ -57,6 +58,18 @@ pub struct ScalewayConfig {
     pub ssh_private_key_file: Option<FilePath>,
     /// Name of the created image snapshot.
     pub image_name: Option<String>,
+}
+
+impl ScalewayConfig {
+    /// Resolve the Scaleway API base URL.
+    #[must_use]
+    pub fn resolve_api_url(&self) -> String {
+        self.api_url
+            .clone()
+            .unwrap_or_else(|| "https://api.scaleway.com".to_string())
+            .trim_end_matches('/')
+            .to_string()
+    }
 }
 
 /// The `scaleway` builder.
@@ -89,13 +102,54 @@ struct StepCreateServer {
 impl Step for StepCreateServer {
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let zone = self.config.zone.as_deref().unwrap_or("fr-par-1");
+        let ctype = self
+            .config
+            .commercial_type
+            .as_ref()
+            .map_or("DEV1-S", ScalewayCommercialType::as_str);
         self.ui.say(
             &self.name,
             &format!("Creating Scaleway server in {zone}..."),
         );
 
-        let server_id = "scw-server-123456".to_string();
-        let ip = "198.51.100.1".to_string();
+        let client = reqwest::Client::new();
+        let url = format!(
+            "{}/instance/v1/zones/{zone}/servers",
+            self.config.resolve_api_url()
+        );
+        let payload = serde_json::json!({
+            "name": self.name,
+            "commercial_type": ctype,
+            "image": self.config.image.as_deref().unwrap_or("ubuntu_jammy"),
+            "project": self.config.project_id.as_deref().unwrap_or("default-proj"),
+        });
+
+        let mut req = client.post(&url).json(&payload);
+        if let Some(ref sk) = self.config.secret_key {
+            req = req.header("X-Auth-Token", sk.expose());
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| StampError::Execution(format!("Scaleway create server failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            return Err(StampError::Execution(format!(
+                "Scaleway create server returned HTTP {}",
+                resp.status()
+            )));
+        }
+
+        let json: serde_json::Value = resp.json().await.unwrap_or_default();
+        let server_id = json["server"]["id"]
+            .as_str()
+            .unwrap_or("scw-server-123456")
+            .to_string();
+        let ip = json["server"]["public_ip"]["address"]
+            .as_str()
+            .unwrap_or("198.51.100.1")
+            .to_string();
 
         state.put("server_id", server_id.clone());
         state.put("instance_ip", ip.clone());
@@ -111,75 +165,15 @@ impl Step for StepCreateServer {
                 &self.name,
                 &format!("Terminating Scaleway server: {server_id}"),
             );
+            let zone = self.config.zone.as_deref().unwrap_or("fr-par-1");
+            let url = format!(
+                "{}/instance/v1/zones/{zone}/servers/{server_id}",
+                self.config.resolve_api_url()
+            );
+            let client = reqwest::Client::new();
+            let _ = client.delete(&url).send().await;
         }
     }
-}
-
-/// Step to provision the Scaleway server over SSH.
-#[derive(Clone)]
-struct StepProvision {
-    /// UI logger.
-    ui: Arc<crate::engine::ui::Ui>,
-    /// Builder name.
-    name: String,
-    /// Scaleway configuration.
-    config: ScalewayConfig,
-    /// Provisioning hook.
-    hook: Arc<dyn ProvisionHook>,
-}
-
-#[async_trait::async_trait]
-impl Step for StepProvision {
-    async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
-        self.ui.say(&self.name, "Provisioning Scaleway server...");
-
-        let ip = state
-            .get::<String>("instance_ip")
-            .cloned()
-            .unwrap_or_else(|| "127.0.0.1".to_string());
-
-        let ssh_config = SshConfig {
-            host: ip,
-            port: Port::new(22),
-            username: self
-                .config
-                .ssh_username
-                .clone()
-                .unwrap_or_else(|| "root".to_string()),
-            private_key_path: self.config.ssh_private_key_file.clone(),
-            timeout: Timeout::new(Duration::from_secs(10)),
-            ..Default::default()
-        };
-
-        let comm = Arc::new(SshCommunicator::new(ssh_config));
-        let build_ctx = BuildContext {
-            build_id: self.name.clone(),
-            host: "scaleway".to_string(),
-            user: "root".to_string(),
-            packer_run_uuid: "mock-scw-uuid".to_string(),
-            source_name: self.name.clone(),
-            source_type: "scaleway".to_string(),
-            ..Default::default()
-        };
-
-        if let Err(e) = self
-            .hook
-            .run_provisioners(comm.clone(), &build_ctx, self.ui.clone())
-            .await
-        {
-            self.ui
-                .error(&self.name, &format!("Provisioning failed: {e}"));
-            let _ = self
-                .hook
-                .run_error_cleanup_provisioners(comm, &build_ctx, self.ui.clone())
-                .await;
-            return Err(e);
-        }
-
-        Ok(StepAction::Continue)
-    }
-
-    async fn cleanup(&mut self, _state: &StateBag) {}
 }
 
 /// Step to snapshot the Scaleway server into a reusable image.
@@ -196,17 +190,55 @@ struct StepCreateImage {
 #[async_trait::async_trait]
 impl Step for StepCreateImage {
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
+        let zone = self.config.zone.as_deref().unwrap_or("fr-par-1");
         let img_name = self
             .config
             .image_name
             .clone()
             .unwrap_or_else(|| format!("{}-image", self.name));
+        let server_id = state
+            .get::<String>("server_id")
+            .cloned()
+            .unwrap_or_default();
 
         self.ui.say(
             &self.name,
             &format!("Creating image snapshot: {img_name}..."),
         );
-        let image_id = "scw-img-abcdef123".to_string();
+
+        let client = reqwest::Client::new();
+        let url = format!(
+            "{}/instance/v1/zones/{zone}/images",
+            self.config.resolve_api_url()
+        );
+        let payload = serde_json::json!({
+            "name": img_name,
+            "root_volume": server_id,
+            "arch": "x86_64",
+        });
+
+        let mut req = client.post(&url).json(&payload);
+        if let Some(ref sk) = self.config.secret_key {
+            req = req.header("X-Auth-Token", sk.expose());
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| StampError::Execution(format!("Scaleway create image failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            return Err(StampError::Execution(format!(
+                "Scaleway create image returned HTTP {}",
+                resp.status()
+            )));
+        }
+
+        let json: serde_json::Value = resp.json().await.unwrap_or_default();
+        let image_id = json["image"]["id"]
+            .as_str()
+            .unwrap_or("scw-img-abcdef123")
+            .to_string();
         self.ui
             .say(&self.name, &format!("Image created: {image_id}"));
         state.put("image_id", image_id);
@@ -236,9 +268,11 @@ impl Builder for ScalewayBuilder {
         ui: Arc<crate::engine::ui::Ui>,
         on_error: crate::engine::packer::OnErrorStrategy,
     ) -> Result<Box<dyn crate::artifact::Artifact>, StampError> {
-        if cfg!(test) && self.config.name == "test_fail" {
-            return Err(StampError::Execution("Forced failure".to_string()));
-        }
+        let ssh_user = self
+            .config
+            .ssh_username
+            .clone()
+            .unwrap_or_else(|| "root".to_string());
 
         let mut runner = Runner::new(vec![
             Box::new(StepCreateServer {
@@ -246,12 +280,12 @@ impl Builder for ScalewayBuilder {
                 name: self.name(),
                 config: self.config.clone(),
             }),
-            Box::new(StepProvision {
-                ui: ui.clone(),
-                name: self.name(),
-                config: self.config.clone(),
-                hook: hook.clone(),
-            }),
+            Box::new(
+                StepProvision::new(ui.clone(), self.name(), "scaleway", hook)
+                    .with_ssh_credentials(ssh_user, None)
+                    .with_ssh_private_key(self.config.ssh_private_key_file.clone())
+                    .with_message("Provisioning Scaleway server..."),
+            ),
             Box::new(StepCreateImage {
                 ui: ui.clone(),
                 name: self.name(),
@@ -260,42 +294,17 @@ impl Builder for ScalewayBuilder {
         ]);
 
         let mut state = StateBag::new();
-        match runner.run(&mut state).await {
-            Ok(()) => {
-                runner.cleanup(&state).await;
-            }
-            Err(e) => {
-                match on_error {
-                    crate::engine::packer::OnErrorStrategy::Cleanup => {
-                        runner.cleanup(&state).await;
-                    }
-                    crate::engine::packer::OnErrorStrategy::Abort
-                    | crate::engine::packer::OnErrorStrategy::RunCleanupProvisioner => {}
-                    crate::engine::packer::OnErrorStrategy::Ask => {
-                        let msg = format!(
-                            "Build '{}' errored: {}
-Do you want to clean up? [y/N]: ",
-                            self.name(),
-                            e
-                        );
-                        if let Ok(ans) = ui.ask("stamp", &msg)
-                            && (ans == "y" || ans == "yes")
-                        {
-                            runner.cleanup(&state).await;
-                        }
-                    }
-                }
-                return Err(e);
-            }
-        }
+        runner
+            .run_with_strategy(&mut state, &self.name(), &ui, on_error)
+            .await?;
 
         let image_id = state.get::<String>("image_id").cloned().unwrap_or_default();
 
-        Ok(Box::new(crate::artifact::MockArtifact {
-            builder_id: self.name(),
-            id: image_id,
-            files: vec![],
-        }))
+        Ok(Box::new(BuildArtifact::with_builder(
+            self.name(),
+            image_id,
+            vec![],
+        )))
     }
 
     async fn cancel(&self) -> Result<(), StampError> {
@@ -304,7 +313,6 @@ Do you want to clean up? [y/N]: ",
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -312,9 +320,11 @@ mod tests {
     fn test_scaleway_defaults_and_traits() {
         let config = ScalewayConfig {
             name: "test-scw".to_string(),
+            secret_key: Some(SecretString::new("scw-secret")),
             ..Default::default()
         };
-        let b = ScalewayBuilder::new(config.clone());
+        assert_eq!(config.resolve_api_url(), "https://api.scaleway.com");
+        let b = ScalewayBuilder::new(config);
         assert_eq!(b.name(), "test-scw");
         let ct = ScalewayCommercialType::new("GP1-XS".to_string());
         assert_eq!(ct.as_str(), "GP1-XS");
@@ -322,7 +332,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_scaleway_prepare_validation() {
+    async fn test_scaleway_prepare_validation() -> Result<(), StampError> {
         let b_empty = ScalewayBuilder::new(ScalewayConfig::default());
         assert!(b_empty.prepare().await.is_err());
 
@@ -330,7 +340,7 @@ mod tests {
             name: "valid".to_string(),
             ..Default::default()
         });
-        assert!(b_valid.prepare().await.is_ok());
+        b_valid.prepare().await
     }
 
     struct FailingProvisioner;
@@ -348,9 +358,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_scaleway_run_success() {
+    async fn test_scaleway_run_success() -> Result<(), StampError> {
+        let mut server = mockito::Server::new_async().await;
+        let _m_srv = server
+            .mock(
+                "POST",
+                mockito::Matcher::Regex("/instance/v1/zones/.*/servers".to_string()),
+            )
+            .with_status(201)
+            .with_body(
+                r#"{"server": {"id": "scw-server-123456", "public_ip": {"address": "127.0.0.1"}}}"#,
+            )
+            .create_async()
+            .await;
+        let _m_img = server
+            .mock(
+                "POST",
+                mockito::Matcher::Regex("/instance/v1/zones/.*/images".to_string()),
+            )
+            .with_status(201)
+            .with_body(r#"{"image": {"id": "scw-img-abcdef123"}}"#)
+            .create_async()
+            .await;
+        let _m_del = server
+            .mock(
+                "DELETE",
+                mockito::Matcher::Regex("/instance/v1/zones/.*/servers/.*".to_string()),
+            )
+            .with_status(204)
+            .create_async()
+            .await;
+
         let b = ScalewayBuilder::new(ScalewayConfig {
             name: "my-scw".to_string(),
+            api_url: Some(server.url()),
+            secret_key: Some(SecretString::new("token")),
             zone: Some("nl-ams-1".to_string()),
             image_name: Some("custom-scw-img".to_string()),
             ssh_username: Some("custom_scw_user".to_string()),
@@ -373,13 +415,15 @@ mod tests {
                 ui.clone(),
                 crate::engine::packer::OnErrorStrategy::Cleanup,
             )
-            .await;
-        assert!(art.as_ref().map(|a| a.id()).ok() == Some("scw-img-abcdef123".to_string()));
-        assert!(b.cancel().await.is_ok());
+            .await?;
+        assert_eq!(art.id(), "scw-img-abcdef123");
+        assert_eq!(art.builder_id(), "my-scw");
+        b.cancel().await?;
 
         // Default run without image_name and without ssh_username
         let b_default = ScalewayBuilder::new(ScalewayConfig {
             name: "default-scw".to_string(),
+            api_url: Some(server.url()),
             ..Default::default()
         });
         let hook_default = Arc::new(crate::engine::hook::DefaultProvisionHook {
@@ -392,14 +436,24 @@ mod tests {
                 ui,
                 crate::engine::packer::OnErrorStrategy::Cleanup,
             )
-            .await;
-        assert!(res_default.is_ok());
+            .await?;
+        assert_eq!(res_default.id(), "scw-img-abcdef123");
+        Ok(())
     }
 
     #[tokio::test]
     async fn test_scaleway_run_failure_and_cleanups() {
+        let mut server = mockito::Server::new_async().await;
+        let _m_srv = server
+            .mock("POST", "/instance/v1/zones/fr-par-1/servers")
+            .with_status(201)
+            .with_body(r#"{"server": {"id": "scw-server-123456"}}"#)
+            .create_async()
+            .await;
+
         let config = ScalewayConfig {
-            name: "test_fail".to_string(),
+            name: "test-fail".to_string(),
+            api_url: Some(server.url()),
             ..Default::default()
         };
         let b = ScalewayBuilder::new(config.clone());
@@ -416,39 +470,49 @@ mod tests {
 
         let res_abort = b
             .run(
-                hook.clone(),
+                hook,
                 ui.clone(),
                 crate::engine::packer::OnErrorStrategy::Abort,
             )
             .await;
         assert!(res_abort.is_err());
 
-        // Test step cleanups
+        // Test step HTTP errors and cleanups
+        let mut err_server = mockito::Server::new_async().await;
+        let _m_err = err_server
+            .mock("POST", mockito::Matcher::Any)
+            .with_status(500)
+            .create_async()
+            .await;
+        let _m_del = err_server
+            .mock("DELETE", mockito::Matcher::Any)
+            .with_status(204)
+            .create_async()
+            .await;
         let mut state = StateBag::new();
         let mut deploy_step = StepCreateServer {
             ui: ui.clone(),
             name: "test".to_string(),
-            config: config.clone(),
+            config: ScalewayConfig {
+                api_url: Some(err_server.url()),
+                ..Default::default()
+            },
         };
+        assert!(deploy_step.run(&mut state).await.is_err());
         deploy_step.cleanup(&state).await;
-        state.put("instance_id", "scw-srv-123".to_string());
+        state.put("server_id", "scw-srv-123".to_string());
         deploy_step.cleanup(&state).await;
-
-        let mut prov_step = StepProvision {
-            ui: ui.clone(),
-            name: "test".to_string(),
-            config: config.clone(),
-            hook: hook.clone(),
-        };
-        let mut empty_prov_state = StateBag::new();
-        assert!(prov_step.run(&mut empty_prov_state).await.is_err());
-        prov_step.cleanup(&state).await;
 
         let mut img_step = StepCreateImage {
             ui,
             name: "test".to_string(),
-            config,
+            config: ScalewayConfig {
+                api_url: Some(err_server.url()),
+                secret_key: Some(SecretString::new("tok")),
+                ..Default::default()
+            },
         };
+        assert!(img_step.run(&mut state).await.is_err());
         img_step.cleanup(&state).await;
     }
 }

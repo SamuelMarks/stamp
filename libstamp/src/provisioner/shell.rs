@@ -6,6 +6,16 @@ use crate::provisioner::Provisioner;
 use crate::types::{FilePath, Timeout};
 use std::path::PathBuf;
 
+/// Shebang interpreter execution mode for shell scripts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ShebangMode {
+    /// Use the script's shebang line (default).
+    #[default]
+    Enabled,
+    /// Ignore shebang and invoke `/bin/sh` explicitly.
+    Disabled,
+}
+
 /// Configuration for the `shell` provisioner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellConfig {
@@ -37,8 +47,8 @@ pub struct ShellConfig {
     pub max_retries: u32,
     /// Whether the script is an executable binary rather than an interpreted shell script. Defaults to false.
     pub binary: bool,
-    /// Whether to use shebang line execution or default shell interpreter. Defaults to true.
-    pub use_shebang: bool,
+    /// Whether to use shebang line execution or default shell interpreter. Defaults to [`ShebangMode::Enabled`].
+    pub use_shebang: ShebangMode,
     /// Whether to expect a connection disconnect during execution (e.g. system reboot or network restart).
     pub expect_disconnect: bool,
     /// Optional list of builders this provisioner only applies to.
@@ -64,7 +74,7 @@ impl Default for ShellConfig {
             timeout: None,
             max_retries: 0,
             binary: false,
-            use_shebang: true,
+            use_shebang: ShebangMode::Enabled,
             expect_disconnect: false,
             only: None,
             except: None,
@@ -146,10 +156,15 @@ impl ShellProvisioner {
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(0);
         let binary = config.config.get("binary").is_some_and(|v| v == "true");
-        let use_shebang = config
+        let use_shebang = if config
             .config
             .get("use_shebang")
-            .map_or(true, |v| v != "false");
+            .is_some_and(|v| v == "false")
+        {
+            ShebangMode::Disabled
+        } else {
+            ShebangMode::Enabled
+        };
         let expect_disconnect = config
             .config
             .get("expect_disconnect")
@@ -209,7 +224,7 @@ impl ShellProvisioner {
     pub fn build_command(&self, remote_path: &str) -> String {
         let default_cmd = if self.config.binary {
             "chmod +x {{ .Path }}; {{ .Vars }} {{ .Path }}".to_string()
-        } else if !self.config.use_shebang {
+        } else if self.config.use_shebang == ShebangMode::Disabled {
             "chmod +x {{ .Path }}; {{ .Vars }} /bin/sh {{ .Path }}".to_string()
         } else {
             "chmod +x {{ .Path }}; {{ .Vars }} {{ .Path }}".to_string()
@@ -470,7 +485,6 @@ impl Provisioner for ShellProvisioner {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
     use crate::communicator::mock::MockCommunicator;
@@ -635,7 +649,7 @@ mod tests {
             inline: Some(vec!["fail_provision".to_string()]),
             valid_exit_codes: Some(vec![1]),
             binary: true,
-            use_shebang: false,
+            use_shebang: ShebangMode::Disabled,
             ..Default::default()
         };
         let prov = ShellProvisioner::new(config);
@@ -645,7 +659,7 @@ mod tests {
         );
 
         let non_binary = ShellProvisioner::new(ShellConfig {
-            use_shebang: false,
+            use_shebang: ShebangMode::Disabled,
             binary: false,
             ..Default::default()
         });
@@ -766,8 +780,8 @@ mod tests {
         cfg.config.insert("binary".to_string(), "true".to_string());
 
         let prov = ShellProvisioner::from_provisioner_config(&cfg);
-        assert_eq!(prov.config.expect_disconnect, true);
-        assert_eq!(prov.config.binary, true);
+        assert!(prov.config.expect_disconnect);
+        assert!(prov.config.binary);
         assert_eq!(prov.config.valid_exit_codes, Some(vec![0, 143]));
         assert!(prov.config.pause_before.is_some());
         assert!(prov.config.pause_after.is_some());
@@ -781,9 +795,10 @@ mod tests {
         };
         let config2 = config1.clone();
         assert_eq!(config1, config2);
-        assert_eq!(format!("{config1:?}"), format!("{config2:?}"));
+        assert!(format!("{config1:?}").contains("ShellConfig"));
         let st1 = ShellProvisioner::new(config1);
         let st2 = st1.clone();
-        assert_eq!(format!("{st1:?}"), format!("{st2:?}"));
+        assert!(format!("{st1:?}").contains("ShellProvisioner"));
+        assert_eq!(st1.config, st2.config);
     }
 }

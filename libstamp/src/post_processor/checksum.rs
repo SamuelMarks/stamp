@@ -159,26 +159,17 @@ impl PostProcessor for ChecksumPostProcessor {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::pedantic,
-    clippy::all
-)]
 mod tests {
     use super::*;
     use std::fs;
 
     #[tokio::test]
-    async fn test_checksum_sha256_sha512_md5() {
-        let tmp_dir = std::env::temp_dir();
-        let test_file = tmp_dir.join(format!("stamp_test_{}.iso", uuid::Uuid::new_v4()));
-        fs::write(&test_file, b"hello world").expect("wrote test file");
+    async fn test_checksum_sha256_sha512_md5() -> Result<(), StampError> {
+        let tmp_dir = tempfile::tempdir()?;
+        let test_file = tmp_dir.path().join("stamp_test.iso");
+        fs::write(&test_file, b"hello world")?;
 
-        let out_template = tmp_dir.join(format!(
-            "stamp_check_{}_{{ .ChecksumType }}.txt",
-            uuid::Uuid::new_v4()
-        ));
+        let out_template = tmp_dir.path().join("stamp_check_{{ .ChecksumType }}.txt");
 
         let config = ChecksumConfig {
             checksum_types: vec![
@@ -200,10 +191,7 @@ mod tests {
             ],
         );
 
-        let result = processor
-            .process(artifact)
-            .await
-            .expect("process succeeded");
+        let result = processor.process(artifact).await?;
         assert_eq!(result.id, "my_artifact-checksummed");
         assert_eq!(result.files.len(), 5); // original 2 files + 3 checksum files
 
@@ -213,28 +201,20 @@ mod tests {
         // sha256: b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
         // md5: 5eb63bbbe01eeed093cb22bb8f5acdc3
         let sha256_hash =
-            ChecksumPostProcessor::compute_file_checksum(&test_file, ChecksumAlgorithm::Sha256)
-                .expect("sha256 computed");
+            ChecksumPostProcessor::compute_file_checksum(&test_file, ChecksumAlgorithm::Sha256)?;
         assert_eq!(
             sha256_hash,
             "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
         );
 
         let md5_hash =
-            ChecksumPostProcessor::compute_file_checksum(&test_file, ChecksumAlgorithm::Md5)
-                .expect("md5 computed");
+            ChecksumPostProcessor::compute_file_checksum(&test_file, ChecksumAlgorithm::Md5)?;
         assert_eq!(md5_hash, "5eb63bbbe01eeed093cb22bb8f5acdc3");
 
         let sha512_hash =
-            ChecksumPostProcessor::compute_file_checksum(&test_file, ChecksumAlgorithm::Sha512)
-                .expect("sha512 computed");
-        assert!(!sha512_hash.is_empty());
-
-        // Clean up
-        let _ = fs::remove_file(&test_file);
-        for f in &result.files[2..] {
-            let _ = fs::remove_file(f);
-        }
+            ChecksumPostProcessor::compute_file_checksum(&test_file, ChecksumAlgorithm::Sha512)?;
+        assert_ne!(sha512_hash, "");
+        Ok(())
     }
 
     #[tokio::test]
@@ -256,10 +236,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_checksum_output_create_failure() {
-        let tmp_dir = std::env::temp_dir();
-        let test_file = tmp_dir.join(format!("stamp_test_{}.iso", uuid::Uuid::new_v4()));
-        fs::write(&test_file, b"test content").expect("wrote test file");
+    async fn test_checksum_output_create_failure() -> Result<(), StampError> {
+        let tmp_dir = tempfile::tempdir()?;
+        let test_file = tmp_dir.path().join("stamp_test.iso");
+        fs::write(&test_file, b"test content")?;
 
         let config = ChecksumConfig {
             checksum_types: vec![ChecksumAlgorithm::Sha256],
@@ -274,23 +254,23 @@ mod tests {
         );
         let res = processor.process(artifact).await;
         assert!(res.is_err());
-
-        let _ = fs::remove_file(&test_file);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_checksum_unreadable_file_failure() {
+    async fn test_checksum_unreadable_file_failure() -> Result<(), StampError> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let tmp_dir = std::env::temp_dir();
-            let test_file = tmp_dir.join(format!("stamp_unreadable_{}.iso", uuid::Uuid::new_v4()));
-            fs::write(&test_file, b"unreadable content").expect("wrote test file");
-            fs::set_permissions(&test_file, fs::Permissions::from_mode(0o000)).expect("set 000");
+            let tmp_dir = tempfile::tempdir()?;
+            let test_file = tmp_dir.path().join("stamp_unreadable.iso");
+            fs::write(&test_file, b"unreadable content")?;
+            fs::set_permissions(&test_file, fs::Permissions::from_mode(0o000))?;
 
             let config = ChecksumConfig {
                 checksum_types: vec![ChecksumAlgorithm::Sha256],
                 output: tmp_dir
+                    .path()
                     .join("check_{{ .ChecksumType }}.txt")
                     .to_string_lossy()
                     .to_string(),
@@ -305,9 +285,9 @@ mod tests {
             let res = processor.process(artifact).await;
             assert!(res.is_err());
 
-            fs::set_permissions(&test_file, fs::Permissions::from_mode(0o644)).expect("reset perm");
-            let _ = fs::remove_file(&test_file);
+            fs::set_permissions(&test_file, fs::Permissions::from_mode(0o644))?;
         }
+        Ok(())
     }
 
     #[test]
@@ -331,10 +311,11 @@ mod tests {
         let config1 = ChecksumConfig::default();
         let config2 = config1.clone();
         assert_eq!(config1, config2);
-        assert_eq!(format!("{config1:?}"), format!("{config2:?}"));
+        assert!(format!("{config1:?}").contains("ChecksumConfig"));
 
         let p1 = ChecksumPostProcessor::new(config1);
         let p2 = p1.clone();
-        assert_eq!(format!("{p1:?}"), format!("{p2:?}"));
+        assert!(format!("{p1:?}").contains("ChecksumPostProcessor"));
+        assert_eq!(p1.config, p2.config);
     }
 }

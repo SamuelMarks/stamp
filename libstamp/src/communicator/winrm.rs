@@ -508,9 +508,9 @@ impl Communicator for WinRmCommunicator {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
+    use base64::Engine;
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -749,9 +749,10 @@ mod tests {
             .create_async()
             .await;
 
-        use base64::Engine;
-        let b64 = base64::engine::general_purpose::STANDARD
-            .encode(b"hello world\n---STAMP_WINRM_EXIT_CODE:0---\n");
+        let b64 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            b"hello world\n---STAMP_WINRM_EXIT_CODE:0---\n",
+        );
         let _m_recv = server
             .mock("POST", "/wsman")
             .match_body(mockito::Matcher::Regex(r".*windows/shell/Receive.*".to_string()))
@@ -830,9 +831,10 @@ mod tests {
             .create_async()
             .await;
 
-        use base64::Engine;
-        let b64 = base64::engine::general_purpose::STANDARD
-            .encode(b"elevated output\n---STAMP_WINRM_EXIT_CODE:0---\n");
+        let b64 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            b"elevated output\n---STAMP_WINRM_EXIT_CODE:0---\n",
+        );
         let _m_recv = server
             .mock("POST", "/wsman")
             .match_body(mockito::Matcher::Regex(r".*windows/shell/Receive.*".to_string()))
@@ -909,8 +911,8 @@ mod tests {
             .create_async()
             .await;
 
-        use base64::Engine;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(b"direct stdout");
+        let b64 =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"direct stdout");
         let _m_recv = server
             .mock("POST", "/wsman")
             .match_body(mockito::Matcher::Regex(r".*windows/shell/Receive.*".to_string()))
@@ -987,10 +989,13 @@ mod tests {
             .create_async()
             .await;
 
-        use base64::Engine;
         let file_bytes = vec![b'a'; 2500];
-        let b64_dl = base64::engine::general_purpose::STANDARD.encode(&file_bytes);
-        let double_b64 = base64::engine::general_purpose::STANDARD.encode(b64_dl.as_bytes());
+        let b64_dl =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &file_bytes);
+        let double_b64 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            b64_dl.as_bytes(),
+        );
         let _m_recv = server
             .mock("POST", "/wsman")
             .match_body(mockito::Matcher::Regex(r".*windows/shell/Receive.*".to_string()))
@@ -1195,8 +1200,8 @@ mod tests {
             .create_async()
             .await;
 
-        use base64::Engine;
-        let b64_err = base64::engine::general_purpose::STANDARD.encode(b"badhash");
+        let b64_err =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"badhash");
         let _m_recv_hash_fail = server
             .mock("POST", "/wsman")
             .match_body(mockito::Matcher::Regex(r".*windows/shell/Receive.*".to_string()))
@@ -1280,8 +1285,10 @@ mod tests {
             .create_async()
             .await;
 
-        use base64::Engine;
-        let b64_dl_err = base64::engine::general_purpose::STANDARD.encode(b"download failed");
+        let b64_dl_err = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            b"download failed",
+        );
         let _m_recv_err = server
             .mock("POST", "/wsman")
             .match_body(mockito::Matcher::Regex(r".*windows/shell/Receive.*".to_string()))

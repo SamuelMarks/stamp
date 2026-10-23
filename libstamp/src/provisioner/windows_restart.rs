@@ -257,7 +257,6 @@ impl Provisioner for WindowsRestartProvisioner {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
     use crate::communicator::mock::MockCommunicator;
@@ -268,8 +267,9 @@ mod tests {
             restart_timeout: Timeout::new(Duration::from_secs(60)),
             ..Default::default()
         };
-        assert_eq!(config.clone(), config);
-        assert_eq!(format!("{config:?}"), format!("{config:?}"));
+        let cloned = config.clone();
+        assert_eq!(cloned, config);
+        assert!(format!("{config:?}").contains("WindowsRestartConfig"));
     }
 
     #[tokio::test]
@@ -372,7 +372,7 @@ mod tests {
             prov.config.restart_command.as_deref(),
             Some("shutdown /r /t 0")
         );
-        assert_eq!(prov.config.check_registry, false);
+        assert!(!prov.config.check_registry);
         assert_eq!(prov.only(), Some(&["hyperv".to_string()][..]));
         assert_eq!(prov.except(), None);
     }

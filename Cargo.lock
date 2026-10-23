@@ -1283,6 +1283,7 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 [[package]]
 name = "hashicorp-configuration-language-rs"
 version = "0.0.1"
+source = "git+https://github.com/SamuelMarks/hashicorp-configuration-language-rs.git?branch=master#8bab19922886fa325783acfd61ee6dd9b78f2adc"
 dependencies = [
  "base64 0.23.1",
  "bcrypt",
@@ -1312,6 +1313,7 @@ dependencies = [
 [[package]]
 name = "hcl-macros"
 version = "0.0.1"
+source = "git+https://github.com/SamuelMarks/hashicorp-configuration-language-rs.git?branch=master#8bab19922886fa325783acfd61ee6dd9b78f2adc"
 dependencies = [
  "proc-macro2",
  "quote",

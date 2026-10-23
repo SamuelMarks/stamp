@@ -2,6 +2,7 @@
 //! Generation 1 (BIOS) & Generation 2 (UEFI) support, dynamic memory, virtual switch binding,
 //! optical media and floppy attachment, WinRM & SSH provisioning, and IP address discovery.
 
+use crate::artifact::BuildArtifact;
 use crate::builder::Builder;
 use crate::communicator::Communicator;
 use crate::communicator::ssh::{SshCommunicator, SshConfig};
@@ -97,6 +98,8 @@ pub struct HypervIsoConfig {
     pub headless: bool,
     /// Output directory.
     pub output_directory: Option<String>,
+    /// Optional custom PowerShell binary path for execution.
+    pub powershell_binary: Option<String>,
 }
 
 /// Helper to parse string list from JSON or comma-separated string.
@@ -105,7 +108,12 @@ fn parse_string_list(val: &str) -> Vec<String> {
         list
     } else {
         val.split(',')
-            .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+            .map(|s| {
+                s.trim()
+                    .trim_matches('"')
+                    .trim_matches(char::from(0x27))
+                    .to_string()
+            })
             .filter(|s| !s.is_empty())
             .collect()
     }
@@ -186,12 +194,11 @@ impl HypervIsoConfig {
         let cd_label = cfg.get("cd_label").cloned();
         let http_directory = cfg.get("http_directory").cloned();
         let mut http_content = std::collections::HashMap::new();
-        if let Some(content_str) = cfg.get("http_content") {
-            if let Ok(parsed) =
+        if let Some(content_str) = cfg.get("http_content")
+            && let Ok(parsed) =
                 serde_json::from_str::<std::collections::HashMap<String, String>>(content_str)
-            {
-                http_content = parsed;
-            }
+        {
+            http_content = parsed;
         }
         let http_bind_address = cfg.get("http_bind_address").cloned();
         let http_port_min = cfg.get("http_port_min").and_then(|p| p.parse::<u16>().ok());
@@ -223,6 +230,7 @@ impl HypervIsoConfig {
 
         let headless = cfg.get("headless").is_some_and(|v| v == "true");
         let output_directory = cfg.get("output_directory").cloned();
+        let powershell_binary = cfg.get("powershell_binary").cloned();
 
         Ok(Self {
             name,
@@ -265,17 +273,21 @@ impl HypervIsoConfig {
             shutdown_timeout,
             headless,
             output_directory,
+            powershell_binary,
         })
     }
 }
 
-/// Helper function to execute PowerShell / WMI cmdlets for Hyper-V management.
+/// Helper function to execute PowerShell / WMI cmdlets for Hyper-V management with an optional binary override.
 ///
 /// # Errors
 ///
 /// Returns `StampError::Builder` if execution fails or PowerShell returns non-zero.
-pub async fn run_hyperv_ps(cmd: &str) -> Result<String, StampError> {
-    if cfg!(test) && std::env::var("HYPERV_REAL_POWERSHELL").is_err() {
+pub async fn run_hyperv_ps_with_bin(
+    cmd: &str,
+    custom_bin: Option<&str>,
+) -> Result<String, StampError> {
+    if custom_bin.is_none() && cfg!(test) && std::env::var("HYPERV_REAL_POWERSHELL").is_err() {
         if cmd.contains("TEST_FAIL") {
             return Err(StampError::Builder("PowerShell mock failure".to_string()));
         }
@@ -290,18 +302,20 @@ pub async fn run_hyperv_ps(cmd: &str) -> Result<String, StampError> {
         return Ok("mock-output".to_string());
     }
 
-    let shell = if tokio::process::Command::new("pwsh")
+    let shell = if let Some(bin) = custom_bin {
+        bin.to_string()
+    } else if tokio::process::Command::new("pwsh")
         .arg("-v")
         .status()
         .await
         .is_ok()
     {
-        "pwsh"
+        "pwsh".to_string()
     } else {
-        "powershell"
+        "powershell".to_string()
     };
 
-    let mut command = tokio::process::Command::new(shell);
+    let mut command = tokio::process::Command::new(&shell);
     command
         .arg("-NoProfile")
         .arg("-NonInteractive")
@@ -322,6 +336,15 @@ pub async fn run_hyperv_ps(cmd: &str) -> Result<String, StampError> {
         )));
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Helper function to execute PowerShell / WMI cmdlets for Hyper-V management.
+///
+/// # Errors
+///
+/// Returns `StampError::Builder` if execution fails or PowerShell returns non-zero.
+pub async fn run_hyperv_ps(cmd: &str) -> Result<String, StampError> {
+    run_hyperv_ps_with_bin(cmd, None).await
 }
 
 /// Extract guest IP address from Hyper-V network adapter integration services.
@@ -387,6 +410,7 @@ impl Step for StepCreateVM {
             .as_deref()
             .unwrap_or("Default Switch");
         let generation_num = if self.config.generation == 2 { 2 } else { 1 };
+        let ps_bin = self.config.powershell_binary.as_deref();
 
         self.ui.say(
             &self.name,
@@ -397,15 +421,13 @@ impl Step for StepCreateVM {
 
         let _ = tokio::fs::create_dir_all(output_dir).await;
 
-        // 1. Create VM with Generation, VHDX, and Virtual Switch
         let vhd_path = format!("{output_dir}/{vm_name}.vhdx");
         let disk_bytes = self.config.disk_size.map_or(20480, |d| d.get()) * 1024 * 1024;
         let new_vm_script = format!(
             "New-VM -Name '{vm_name}' -Generation {generation_num} -Path '{output_dir}' -NewVHDPath '{vhd_path}' -NewVHDSizeBytes {disk_bytes} -SwitchName '{switch_name}'"
         );
-        run_hyperv_ps(&new_vm_script).await?;
+        run_hyperv_ps_with_bin(&new_vm_script, ps_bin).await?;
 
-        // 2. Configure Memory, Dynamic Memory & CPU
         let mem_bytes = self.config.memory.map_or(1024, |m| m.get()) * 1024 * 1024;
         let cpus = self.config.cpus.unwrap_or(1);
         let dyn_mem_flag = if self.config.enable_dynamic_memory {
@@ -416,14 +438,12 @@ impl Step for StepCreateVM {
         let config_script = format!(
             "Set-VMMemory -VMName '{vm_name}' -StartupBytes {mem_bytes} -DynamicMemoryEnabled {dyn_mem_flag}; Set-VMProcessor -VMName '{vm_name}' -Count {cpus}"
         );
-        run_hyperv_ps(&config_script).await?;
+        run_hyperv_ps_with_bin(&config_script, ps_bin).await?;
 
-        // 3. Connect virtual switch binding
         let switch_connect_script =
             format!("Connect-VMNetworkAdapter -VMName '{vm_name}' -SwitchName '{switch_name}'");
-        run_hyperv_ps(&switch_connect_script).await?;
+        run_hyperv_ps_with_bin(&switch_connect_script, ps_bin).await?;
 
-        // 4. Attach primary boot ISO according to generation
         if let Some(ref iso) = self.config.iso_url {
             if generation_num == 2 {
                 let secure_boot_flag = if self.config.enable_secure_boot {
@@ -434,16 +454,15 @@ impl Step for StepCreateVM {
                 let g2_script = format!(
                     "Add-VMDvdDrive -VMName '{vm_name}' -ControllerNumber 0 -ControllerLocation 1 -Path '{iso}'; Set-VMFirmware -VMName '{vm_name}' -EnableSecureBoot {secure_boot_flag}"
                 );
-                run_hyperv_ps(&g2_script).await?;
+                run_hyperv_ps_with_bin(&g2_script, ps_bin).await?;
             } else {
                 let g1_script = format!(
                     "Set-VMDvdDrive -VMName '{vm_name}' -ControllerNumber 1 -ControllerLocation 0 -Path '{iso}'"
                 );
-                run_hyperv_ps(&g1_script).await?;
+                run_hyperv_ps_with_bin(&g1_script, ps_bin).await?;
             }
         }
 
-        // 5. Attach secondary unattended / cidata ISO if cd_files is specified
         if !self.config.cd_files.is_empty() {
             let cd_path = format!("{output_dir}/{vm_name}-cidata.iso");
             crate::builder::virtualization::generate_cdrom_iso(
@@ -456,16 +475,15 @@ impl Step for StepCreateVM {
                 let cd_script = format!(
                     "Add-VMDvdDrive -VMName '{vm_name}' -ControllerNumber 0 -ControllerLocation 2 -Path '{cd_path}'"
                 );
-                run_hyperv_ps(&cd_script).await?;
+                run_hyperv_ps_with_bin(&cd_script, ps_bin).await?;
             } else {
                 let cd_script = format!(
                     "Set-VMDvdDrive -VMName '{vm_name}' -ControllerNumber 1 -ControllerLocation 1 -Path '{cd_path}'"
                 );
-                run_hyperv_ps(&cd_script).await?;
+                run_hyperv_ps_with_bin(&cd_script, ps_bin).await?;
             }
         }
 
-        // 6. Floppy disk drive configuration (Generation 1 only)
         if !self.config.floppy_files.is_empty() && generation_num == 1 {
             let floppy_path = format!("{output_dir}/{vm_name}-floppy.img");
             crate::builder::virtualization::generate_floppy_disk(
@@ -475,14 +493,13 @@ impl Step for StepCreateVM {
             .await?;
             let floppy_script =
                 format!("Set-VMFloppyDiskDrive -VMName '{vm_name}' -Path '{floppy_path}'");
-            run_hyperv_ps(&floppy_script).await?;
+            run_hyperv_ps_with_bin(&floppy_script, ps_bin).await?;
         }
 
-        // 7. Configure VLAN if specified
         if let Some(vlan) = self.config.vlan_id {
             let vlan_script =
                 format!("Set-VMNetworkAdapterVlan -VMName '{vm_name}' -Access -VlanId {vlan}");
-            run_hyperv_ps(&vlan_script).await?;
+            run_hyperv_ps_with_bin(&vlan_script, ps_bin).await?;
         }
 
         Ok(StepAction::Continue)
@@ -491,7 +508,11 @@ impl Step for StepCreateVM {
     async fn cleanup(&mut self, state: &StateBag) {
         if let Some(vm_name) = state.get::<String>("vm_name") {
             self.ui.say(&self.name, &format!("Deleting VM: {vm_name}"));
-            let _ = run_hyperv_ps(&format!("Remove-VM -Name '{vm_name}' -Force")).await;
+            let _ = run_hyperv_ps_with_bin(
+                &format!("Remove-VM -Name '{vm_name}' -Force"),
+                self.config.powershell_binary.as_deref(),
+            )
+            .await;
         }
     }
 }
@@ -513,7 +534,11 @@ impl Step for StepRunVM {
         let vm_name = state.get::<String>("vm_name").cloned().unwrap_or_default();
         self.ui.say(&self.name, "Starting Hyper-V VM...");
 
-        run_hyperv_ps(&format!("Start-VM -Name '{vm_name}'")).await?;
+        run_hyperv_ps_with_bin(
+            &format!("Start-VM -Name '{vm_name}'"),
+            self.config.powershell_binary.as_deref(),
+        )
+        .await?;
 
         if let Some(ref cmds) = self.config.boot_command {
             let actions = crate::builder::virtualization::BootCommandParser::parse(
@@ -545,7 +570,11 @@ impl Step for StepRunVM {
         if let Some(vm_name) = state.get::<String>("vm_name") {
             self.ui
                 .say(&self.name, &format!("Powering off VM: {vm_name}"));
-            let _ = run_hyperv_ps(&format!("Stop-VM -Name '{vm_name}' -TurnOff -Force")).await;
+            let _ = run_hyperv_ps_with_bin(
+                &format!("Stop-VM -Name '{vm_name}' -TurnOff -Force"),
+                self.config.powershell_binary.as_deref(),
+            )
+            .await;
         }
     }
 }
@@ -567,12 +596,6 @@ struct StepProvision {
 impl Step for StepProvision {
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Provisioning Hyper-V VM...");
-
-        if let Some(handle) =
-            state.get::<crate::builder::http_server::HttpServerHandle>("http_server_handle")
-        {
-            handle.abort();
-        }
 
         let ip = state
             .get::<String>("vm_ip")
@@ -618,17 +641,24 @@ impl Step for StepProvision {
             build_id: self.name.clone(),
             host: "hyperv".to_string(),
             user: "root".to_string(),
-            packer_run_uuid: "mocked-uuid".to_string(),
+            packer_run_uuid: uuid::Uuid::new_v4().to_string(),
             source_name: self.name.clone(),
             source_type: "hyperv-iso".to_string(),
             ..Default::default()
         };
 
-        if let Err(e) = self
+        let result = self
             .hook
             .run_provisioners(comm.clone(), &build_ctx, self.ui.clone())
-            .await
+            .await;
+
+        if let Some(handle) =
+            state.get::<crate::builder::http_server::HttpServerHandle>("http_server_handle")
         {
+            handle.abort();
+        }
+
+        if let Err(e) = result {
             self.ui
                 .error(&self.name, &format!("Provisioning failed: {e}"));
             let _ = self
@@ -661,17 +691,21 @@ impl Step for StepShutdown {
         self.ui.say(&self.name, "Shutting down Hyper-V VM...");
         let vm_name = state.get::<String>("vm_name").cloned().unwrap_or_default();
 
-        if let Some(ref cmd) = self.config.shutdown_command {
-            if let Some(comm) = state.get::<Arc<dyn Communicator>>("communicator") {
-                self.ui
-                    .say(&self.name, &format!("Executing shutdown command: {cmd}"));
-                let _ = comm
-                    .execute(&crate::communicator::Command::new(cmd.clone()))
-                    .await;
-            }
+        if let Some(ref cmd) = self.config.shutdown_command
+            && let Some(comm) = state.get::<Arc<dyn Communicator>>("communicator")
+        {
+            self.ui
+                .say(&self.name, &format!("Executing shutdown command: {cmd}"));
+            let _ = comm
+                .execute(&crate::communicator::Command::new(cmd.clone()))
+                .await;
         }
 
-        let _ = run_hyperv_ps(&format!("Stop-VM -Name '{vm_name}' -Force")).await;
+        let _ = run_hyperv_ps_with_bin(
+            &format!("Stop-VM -Name '{vm_name}' -Force"),
+            self.config.powershell_binary.as_deref(),
+        )
+        .await;
         Ok(StepAction::Continue)
     }
 
@@ -693,11 +727,6 @@ impl Builder for HypervIsoBuilder {
         ui: Arc<crate::engine::ui::Ui>,
         on_error: crate::engine::packer::OnErrorStrategy,
     ) -> Result<Box<dyn crate::artifact::Artifact>, StampError> {
-        if cfg!(test) && (self.config.name == "test_bad_exit" || self.config.name == "test_missing")
-        {
-            return Err(StampError::Builder("test triggered error".to_string()));
-        }
-
         let mut http_cfg = crate::builder::http_server::HttpServerConfig::new();
         if let Some(ref dir) = self.config.http_directory {
             http_cfg = http_cfg.with_dir(std::path::PathBuf::from(dir));
@@ -743,42 +772,17 @@ impl Builder for HypervIsoBuilder {
 
         let mut runner = Runner::new(steps);
         let mut state = StateBag::new();
-        match runner.run(&mut state).await {
-            Ok(()) => {
-                runner.cleanup(&state).await;
-            }
-            Err(e) => {
-                match on_error {
-                    crate::engine::packer::OnErrorStrategy::Cleanup => {
-                        runner.cleanup(&state).await;
-                    }
-                    crate::engine::packer::OnErrorStrategy::Abort
-                    | crate::engine::packer::OnErrorStrategy::RunCleanupProvisioner => {}
-                    crate::engine::packer::OnErrorStrategy::Ask => {
-                        let msg = format!(
-                            "Build '{}' errored: {}
-Do you want to clean up? [y/N]: ",
-                            self.name(),
-                            e
-                        );
-                        if let Ok(ans) = ui.ask("stamp", &msg)
-                            && (ans == "y" || ans == "yes")
-                        {
-                            runner.cleanup(&state).await;
-                        }
-                    }
-                }
-                return Err(e);
-            }
-        }
+        runner
+            .run_with_strategy(&mut state, &self.name(), &ui, on_error)
+            .await?;
 
         let vm_name = state.get::<String>("vm_name").cloned().unwrap_or_default();
 
-        Ok(Box::new(crate::artifact::MockArtifact {
-            builder_id: self.name(),
-            id: format!("hyperv-vm:{vm_name}"),
-            files: vec![],
-        }))
+        Ok(Box::new(BuildArtifact::with_builder(
+            self.name(),
+            format!("hyperv-vm:{vm_name}"),
+            vec![],
+        )))
     }
 
     async fn cancel(&self) -> Result<(), StampError> {
@@ -791,12 +795,6 @@ Do you want to clean up? [y/N]: ",
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::pedantic,
-    clippy::all,
-    for_loops_over_fallibles
-)]
 mod tests {
     use super::*;
     use crate::engine::hook::DefaultProvisionHook;
@@ -817,15 +815,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_hypervisobuilder_run_gen1_and_gen2() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let temp_dir = tempfile::tempdir().unwrap();
+    async fn test_hypervisobuilder_run_gen1_and_gen2() -> Result<(), StampError> {
+        let temp_dir = tempfile::tempdir()?;
         let f_path = temp_dir.path().join("autounattend.xml");
-        let _ = tokio::fs::write(&f_path, b"<xml/>").await;
+        tokio::fs::write(&f_path, b"<xml/>").await?;
         let cd_path = temp_dir.path().join("SetupComplete.cmd");
-        let _ = tokio::fs::write(&cd_path, b"REM Setup").await;
+        tokio::fs::write(&cd_path, b"REM Setup").await?;
 
         for gen_val in [1, 2] {
             let config = HypervIsoConfig {
@@ -850,7 +845,7 @@ mod tests {
             };
             let builder = HypervIsoBuilder::new(config);
 
-            assert!(builder.prepare().await.is_ok());
+            builder.prepare().await?;
             assert_eq!(builder.name(), format!("test-builder-gen{gen_val}"));
 
             let hook = Arc::new(DefaultProvisionHook {
@@ -863,20 +858,16 @@ mod tests {
                 crate::engine::packer::FeatureState::Disabled,
             ));
 
-            let res = builder.run(hook, ui, OnErrorStrategy::Cleanup).await;
-            assert!(res.is_ok());
-            for artifact in res {
-                assert!(artifact.id().contains(&format!("test-vm-gen{gen_val}")));
-                assert_eq!(artifact.builder_id(), format!("test-builder-gen{gen_val}"));
-                assert!(artifact.files().is_empty());
-                assert!(artifact.state("key").is_none());
-                assert!(artifact.destroy().is_ok());
-            }
+            let artifact = builder.run(hook, ui, OnErrorStrategy::Cleanup).await?;
+            assert!(artifact.id().contains(&format!("test-vm-gen{gen_val}")));
+            assert_eq!(artifact.builder_id(), format!("test-builder-gen{gen_val}"));
+            assert_eq!(artifact.files().len(), 0);
+            assert!(artifact.state("key").is_none());
+            artifact.destroy()?;
 
-            assert!(builder.cancel().await.is_ok());
+            builder.cancel().await?;
         }
 
-        // Test with communicator: winrm
         let config_winrm = HypervIsoConfig {
             name: "winrm-builder".to_string(),
             generation: 2,
@@ -896,19 +887,12 @@ mod tests {
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
         ));
-        assert!(
-            b_winrm
-                .run(hook, ui, OnErrorStrategy::Cleanup)
-                .await
-                .is_ok()
-        );
+        let _ = b_winrm.run(hook, ui, OnErrorStrategy::Cleanup).await?;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_hyperv_from_builder_config() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+    async fn test_hyperv_from_builder_config() -> Result<(), StampError> {
         let mut builder_cfg = crate::template::BuilderConfig {
             builder_type: "hyperv-iso".to_string(),
             name: "bento-hyperv".to_string(),
@@ -958,8 +942,12 @@ mod tests {
         builder_cfg
             .config
             .insert("communicator".to_string(), "winrm".to_string());
+        builder_cfg.config.insert(
+            "http_content".to_string(),
+            r#"{"test.txt": "content"}"#.to_string(),
+        );
 
-        let cfg = HypervIsoConfig::from_builder_config(&builder_cfg).unwrap();
+        let cfg = HypervIsoConfig::from_builder_config(&builder_cfg)?;
         assert_eq!(cfg.name, "bento-hyperv");
         assert_eq!(cfg.vm_name.as_deref(), Some("my-hyperv-vm"));
         assert_eq!(cfg.generation, 2);
@@ -972,74 +960,51 @@ mod tests {
         assert_eq!(cfg.disk_size, Some(MemoryMb::new(50000)));
         assert_eq!(cfg.shutdown_command.as_deref(), Some("shutdown /s /t 5"));
         assert_eq!(cfg.communicator.as_deref(), Some("winrm"));
+        assert_eq!(
+            cfg.http_content.get("test.txt").map(String::as_str),
+            Some("content")
+        );
 
-        // parse_string_list with json and csv
         assert_eq!(parse_string_list(r#"["x", "y"]"#), vec!["x", "y"]);
         assert_eq!(parse_string_list("a,,b"), vec!["a", "b"]);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_extract_hyperv_ip() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let ip = extract_hyperv_ip("test-vm").await;
-        assert_eq!(ip.as_deref().ok(), Some("127.0.0.1"));
+    async fn test_extract_hyperv_ip_and_custom_bin() -> Result<(), StampError> {
+        let ip = extract_hyperv_ip("test-vm").await?;
+        assert_eq!(ip, "127.0.0.1");
 
-        let ip_empty = extract_hyperv_ip("EMPTY_IP").await;
-        assert_eq!(ip_empty.as_deref().ok(), Some("127.0.0.1"));
+        let ip_empty = extract_hyperv_ip("EMPTY_IP").await?;
+        assert_eq!(ip_empty, "127.0.0.1");
 
         assert!(extract_hyperv_ip("TEST_FAIL").await.is_err());
+
+        // Custom binary execution error
+        assert!(
+            run_hyperv_ps_with_bin("echo hi", Some("/nonexistent_ps_bin"))
+                .await
+                .is_err()
+        );
+        assert!(
+            run_hyperv_ps_with_bin("exit 1", Some("false"))
+                .await
+                .is_err()
+        );
+        let ok_out = run_hyperv_ps_with_bin("hello", Some("echo")).await?;
+        assert!(ok_out.contains("hello"));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_run_hyperv_ps_real_execution_error() {
-        // Force the real path
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::set_var("HYPERV_REAL_POWERSHELL", "1");
-        }
+    async fn test_prepare_and_error_strategies() -> Result<(), StampError> {
+        let b_empty = HypervIsoBuilder::new(HypervIsoConfig::default());
+        assert!(b_empty.prepare().await.is_err());
 
-        // This will either fail to spawn pwsh/powershell or fail the invalid command
-        let res = run_hyperv_ps("INVALID_COMMAND_THAT_SHOULD_FAIL").await;
-
-        unsafe {
-            std::env::remove_var("HYPERV_REAL_POWERSHELL");
-        }
-
-        assert!(res.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_run_hyperv_ps_fail() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        assert!(run_hyperv_ps("TEST_FAIL").await.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_prepare_failure() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let config = HypervIsoConfig {
-            name: String::new(),
-            ..Default::default()
-        };
-        let b = HypervIsoBuilder::new(config);
-        assert!(b.prepare().await.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_hypervisobuilder_error_strategies() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let temp_dir = tempfile::tempdir()?;
         let config = HypervIsoConfig {
             name: "test_runner_error".to_string(),
+            output_directory: Some(temp_dir.path().to_string_lossy().to_string()),
             ..Default::default()
         };
         let b = HypervIsoBuilder::new(config);
@@ -1063,44 +1028,12 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert!(
-            b.run(failing_hook, ui.clone(), OnErrorStrategy::Ask)
-                .await
-                .is_err()
-        );
-
-        let hook_empty = Arc::new(DefaultProvisionHook {
-            provisioners: Arc::new(vec![]),
-            error_cleanup_provisioners: Arc::new(vec![]),
-        });
-        let b_bad = HypervIsoBuilder::new(HypervIsoConfig {
-            name: "test_bad_exit".to_string(),
-            ..Default::default()
-        });
-        assert!(
-            b_bad
-                .run(hook_empty.clone(), ui.clone(), OnErrorStrategy::Cleanup)
-                .await
-                .is_err()
-        );
-
-        let b_missing = HypervIsoBuilder::new(HypervIsoConfig {
-            name: "test_missing".to_string(),
-            ..Default::default()
-        });
-        assert!(
-            b_missing
-                .run(hook_empty, ui, OnErrorStrategy::Cleanup)
-                .await
-                .is_err()
-        );
+        assert!(b.run(failing_hook, ui, OnErrorStrategy::Ask).await.is_err());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_step_provision_and_cleanup() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+    async fn test_step_provision_and_cleanup() -> Result<(), StampError> {
         let ui = Arc::new(Ui::new(
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
@@ -1120,7 +1053,6 @@ mod tests {
         assert!(prov_step.run(&mut state).await.is_err());
         prov_step.cleanup(&state).await;
 
-        // StepCreateVM cleanup
         let mut step_create = StepCreateVM {
             ui: ui.clone(),
             name: "create".to_string(),
@@ -1131,7 +1063,6 @@ mod tests {
         let empty_state = StateBag::new();
         step_create.cleanup(&empty_state).await;
 
-        // StepRunVM cleanup
         let mut step_run = StepRunVM {
             ui: ui.clone(),
             name: "run".to_string(),
@@ -1140,7 +1071,6 @@ mod tests {
         step_run.cleanup(&state).await;
         step_run.cleanup(&empty_state).await;
 
-        // StepShutdown cleanup and execution
         let mut step_shutdown = StepShutdown {
             ui,
             name: "shutdown".to_string(),
@@ -1152,43 +1082,8 @@ mod tests {
         let comm: Arc<dyn Communicator> =
             Arc::new(crate::communicator::mock::MockCommunicator::new());
         state.put("communicator", comm);
-        assert!(step_shutdown.run(&mut state).await.is_ok());
+        step_shutdown.run(&mut state).await?;
         step_shutdown.cleanup(&state).await;
-    }
-
-    #[test]
-    fn test_hyperv_derived_traits() {
-        let config1 = HypervIsoConfig::default();
-        let config2 = config1.clone();
-        assert_eq!(config1, config2);
-        assert_eq!(format!("{config1:?}"), format!("{config2:?}"));
-
-        let b1 = HypervIsoBuilder::new(config1);
-        let b2 = b1.clone();
-        assert_eq!(format!("{b1:?}"), format!("{b2:?}"));
-    }
-
-    #[test]
-    fn test_hyperv_http_content() {
-        let mut builder_cfg = crate::template::BuilderConfig {
-            builder_type: "hyperv-iso".to_string(),
-            name: "test-hyperv".to_string(),
-            ..Default::default()
-        };
-        builder_cfg.config.insert(
-            "http_content".to_string(),
-            "{\"test.txt\": \"content\"}".to_string(),
-        );
-
-        let builder = HypervIsoConfig::from_builder_config(&builder_cfg);
-        assert!(builder.is_ok());
-        let builder = builder.expect("should be ok");
-        assert_eq!(
-            builder
-                .http_content
-                .get("test.txt")
-                .expect("should have it"),
-            "content"
-        );
+        Ok(())
     }
 }

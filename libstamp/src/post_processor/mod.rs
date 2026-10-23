@@ -118,9 +118,7 @@ pub fn create_post_processor(
             docker_tag::DockerTagConfig::default(),
         ))),
         "hcp" => Ok(Box::new(hcp::HcpPostProcessor::new(
-            hcp::HcpPostProcessorConfig {
-                keep_input_artifact: false,
-            },
+            hcp::HcpPostProcessorConfig::default(),
         ))),
         "manifest" => Ok(Box::new(manifest::ManifestPostProcessor::new(
             manifest::ManifestConfig::default(),

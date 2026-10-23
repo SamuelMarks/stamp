@@ -34,6 +34,7 @@ pub mod converge;
 pub mod custom_hook;
 pub mod fabric;
 pub mod file;
+pub mod go_plugin;
 pub mod goss;
 pub mod inspec;
 pub mod powershell;
@@ -139,10 +140,7 @@ pub fn create_provisioner(config: &ProvisionerConfig) -> Result<Box<dyn Provisio
     }
 }
 
-pub mod go_plugin;
-
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 

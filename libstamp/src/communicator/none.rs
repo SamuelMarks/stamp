@@ -45,12 +45,6 @@ impl Communicator for NoneCommunicator {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::pedantic,
-    clippy::all,
-    for_loops_over_fallibles
-)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
@@ -59,40 +53,33 @@ mod tests {
     fn test_derived_traits() {
         let comm = NoneCommunicator::new();
         assert_eq!(format!("{comm:?}"), "NoneCommunicator");
-        assert_eq!(
-            format!("{:?}", NoneCommunicator::default()),
-            "NoneCommunicator"
-        );
+        assert_eq!(format!("{NoneCommunicator:?}"), "NoneCommunicator");
         let comm2 = comm;
         assert_eq!(format!("{comm2:?}"), "NoneCommunicator");
     }
 
     #[tokio::test]
-    async fn test_none_communicator_execute() {
+    async fn test_none_communicator_execute() -> Result<(), StampError> {
         let comm = NoneCommunicator::new();
         let cmd = Command::new("echo hello".to_string());
-        let res = comm.execute(&cmd).await;
-        assert!(res.is_ok());
-        for r in res {
-            assert_eq!(r.exit_code, 0);
-            assert_eq!(r.stdout, "");
-            assert_eq!(r.stderr, "");
-        }
+        let r = comm.execute(&cmd).await?;
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "");
+        assert_eq!(r.stderr, "");
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_none_communicator_upload() {
+    async fn test_none_communicator_upload() -> Result<(), StampError> {
         let comm = NoneCommunicator::new();
         let path = FilePath::new(PathBuf::from("/tmp/test"));
-        let res = comm.upload(&path, &path).await;
-        assert!(res.is_ok());
+        comm.upload(&path, &path).await
     }
 
     #[tokio::test]
-    async fn test_none_communicator_download() {
+    async fn test_none_communicator_download() -> Result<(), StampError> {
         let comm = NoneCommunicator::new();
         let path = FilePath::new(PathBuf::from("/tmp/test"));
-        let res = comm.download(&path, &path).await;
-        assert!(res.is_ok());
+        comm.download(&path, &path).await
     }
 }

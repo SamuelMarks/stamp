@@ -55,6 +55,14 @@ impl FromStr for NonEmptyString {
     }
 }
 
+impl TryFrom<String> for NonEmptyString {
+    type Error = StampError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
 /// A strongly-typed secret string that redacts its contents in `Debug` and `Display` output.
 #[derive(Clone, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub struct SecretString(pub String);
@@ -62,13 +70,19 @@ pub struct SecretString(pub String);
 impl SecretString {
     /// Create a new `SecretString`.
     #[must_use]
-    pub const fn new(secret: String) -> Self {
-        Self(secret)
+    pub fn new(secret: impl Into<String>) -> Self {
+        Self(secret.into())
     }
 
     /// Expose the underlying secret string slice.
     #[must_use]
     pub fn expose_secret(&self) -> &str {
+        &self.0
+    }
+
+    /// Expose the underlying secret string slice.
+    #[must_use]
+    pub fn expose(&self) -> &str {
         &self.0
     }
 
@@ -1202,8 +1216,9 @@ mod tests {
 
     #[test]
     fn test_secret_string() {
-        let sec = SecretString::new("super-secret".to_string());
+        let sec = SecretString::new("super-secret");
         assert_eq!(sec.expose_secret(), "super-secret");
+        assert_eq!(sec.expose(), "super-secret");
         assert!(!sec.is_empty());
         assert_eq!(format!("{sec:?}"), "***REDACTED***");
         assert_eq!(format!("{sec}"), "***REDACTED***");

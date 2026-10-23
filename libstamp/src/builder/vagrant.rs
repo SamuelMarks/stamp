@@ -28,6 +28,8 @@ pub struct VagrantConfig {
     pub output_vagrantfile: Option<String>,
     /// Whether to destroy the Vagrant VM on completion or failure. Defaults to true.
     pub teardown: bool,
+    /// Optional custom path to the `vagrant` executable.
+    pub vagrant_binary: Option<std::path::PathBuf>,
 }
 
 impl Default for VagrantConfig {
@@ -41,6 +43,7 @@ impl Default for VagrantConfig {
             output_dir: Some("./output-vagrant".to_string()),
             output_vagrantfile: None,
             teardown: true,
+            vagrant_binary: None,
         }
     }
 }
@@ -203,25 +206,9 @@ impl Builder for VagrantBuilder {
             .with_ui(ui.clone())
             .with_on_error(on_error.clone());
         let mut state = StateBag::new();
-
-        let res = runner.run(&mut state).await;
-        if let Err(e) = res {
-            match on_error {
-                OnErrorStrategy::Cleanup => {
-                    runner.cleanup(&state).await;
-                }
-                OnErrorStrategy::Abort | OnErrorStrategy::RunCleanupProvisioner => {}
-                OnErrorStrategy::Ask => {
-                    let msg = format!("Build '{}' errored: {e}. Clean up? [y/N]: ", self.name());
-                    if let Ok(ans) = ui.ask(&self.name(), &msg)
-                        && (ans == "y" || ans == "yes")
-                    {
-                        runner.cleanup(&state).await;
-                    }
-                }
-            }
-            return Err(e);
-        }
+        runner
+            .run_with_strategy(&mut state, &self.name(), &ui, on_error)
+            .await?;
 
         let mock_comm = crate::communicator::mock::MockCommunicator::new();
         let box_path = state.get::<String>("box_path").cloned().unwrap_or_default();
@@ -264,7 +251,6 @@ impl Builder for VagrantBuilder {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
     use crate::engine::packer::FeatureState;
@@ -281,12 +267,14 @@ mod tests {
             output_dir: Some("/tmp/out-box".to_string()),
             output_vagrantfile: Some("Vagrantfile".to_string()),
             teardown: true,
+            vagrant_binary: None,
         };
         assert_eq!(config.clone(), config);
-        assert_eq!(format!("{config:?}"), format!("{config:?}"));
+        assert!(format!("{config:?}").contains("VagrantConfig"));
         let builder = VagrantBuilder::new(config);
         assert_eq!(builder.name(), "test-vagrant");
-        assert_eq!(format!("{builder:?}"), format!("{:?}", builder.clone()));
+        assert!(format!("{builder:?}").contains("VagrantBuilder"));
+        assert_eq!(builder.clone().config, builder.config);
     }
 
     #[tokio::test]
@@ -309,7 +297,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_success() {
+    async fn test_run_success() -> Result<(), StampError> {
         let builder = VagrantBuilder::new(VagrantConfig {
             name: "vagrant-builder".to_string(),
             source_box: "ubuntu/focal64".to_string(),
@@ -325,16 +313,15 @@ mod tests {
             FeatureState::Disabled,
         ));
 
-        let artifact = builder.run(hook, ui, OnErrorStrategy::Cleanup).await;
-        assert!(artifact.is_ok());
-        let artifact = artifact.expect("test");
+        let artifact = builder.run(hook, ui, OnErrorStrategy::Cleanup).await?;
         assert!(artifact.id().contains("vagrant-builder"));
-        assert!(!artifact.files().is_empty());
+        assert_eq!(artifact.files().len(), 1);
         assert!(artifact.string().contains("Vagrant box"));
-        assert!(artifact.destroy().is_ok());
-        assert!(builder.cancel().await.is_ok());
+        artifact.destroy()?;
+        builder.cancel().await?;
         assert_eq!(artifact.builder_id(), "vagrant");
         assert!(artifact.state("foo").is_none());
+        Ok(())
     }
 
     #[tokio::test]

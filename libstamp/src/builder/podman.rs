@@ -38,6 +38,8 @@ pub struct PodmanConfig {
     pub tags: Vec<String>,
     /// Whether to push the image to a remote registry after building.
     pub push: bool,
+    /// Optional custom path to the `podman` executable.
+    pub podman_binary: Option<std::path::PathBuf>,
 }
 
 /// Artifact representing a created Podman container image or tarball.
@@ -157,34 +159,20 @@ impl Builder for PodmanBuilder {
             .with_ui(ui.clone())
             .with_on_error(on_error.clone());
         let mut state = StateBag::new();
-
-        let res = runner.run(&mut state).await;
-        if let Err(e) = res {
-            match on_error {
-                OnErrorStrategy::Cleanup => {
-                    runner.cleanup(&state).await;
-                }
-                OnErrorStrategy::Abort | OnErrorStrategy::RunCleanupProvisioner => {}
-                OnErrorStrategy::Ask => {
-                    let msg = format!("Build '{}' errored: {e}. Clean up? [y/N]: ", self.name());
-                    if let Ok(ans) = ui.ask(&self.name(), &msg)
-                        && (ans == "y" || ans == "yes")
-                    {
-                        runner.cleanup(&state).await;
-                    }
-                }
-            }
-            return Err(e);
-        }
+        runner
+            .run_with_strategy(&mut state, &self.name(), &ui, on_error)
+            .await?;
 
         let cnt_id = state
             .get::<String>("container_id")
             .cloned()
             .unwrap_or_default();
 
-        let comm = crate::communicator::podman::PodmanCommunicator::new(
-            crate::communicator::podman::PodmanConfig::new(&cnt_id),
-        );
+        let mut podman_cfg = crate::communicator::podman::PodmanConfig::new(&cnt_id);
+        if let Some(ref bin) = self.config.podman_binary {
+            podman_cfg = podman_cfg.with_executable(bin.to_string_lossy().to_string());
+        }
+        let comm = crate::communicator::podman::PodmanCommunicator::new(podman_cfg);
 
         let build_ctx = BuildContext {
             build_id: cnt_id.clone(),
@@ -230,7 +218,6 @@ impl Builder for PodmanBuilder {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
     use crate::engine::packer::FeatureState;
@@ -252,12 +239,14 @@ mod tests {
             tags: vec!["v1.0".to_string()],
             push: false,
             run_command: Some(vec!["sleep".to_string(), "3600".to_string()]),
+            podman_binary: None,
         };
         assert_eq!(config.clone(), config);
-        assert_eq!(format!("{config:?}"), format!("{config:?}"));
+        assert!(format!("{config:?}").contains("PodmanConfig"));
         let builder = PodmanBuilder::new(config);
         assert_eq!(builder.name(), "test-podman");
-        assert_eq!(format!("{builder:?}"), format!("{:?}", builder.clone()));
+        assert!(format!("{builder:?}").contains("PodmanBuilder"));
+        assert_eq!(builder.clone().config, builder.config);
     }
 
     #[tokio::test]

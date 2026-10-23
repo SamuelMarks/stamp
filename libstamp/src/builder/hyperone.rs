@@ -3,24 +3,25 @@
 //! Provides an API client for managing virtual machines, storage disks, and custom images
 //! on the HyperOne platform (`https://api.hyperone.com/v1`).
 
+use crate::artifact::BuildArtifact;
 use crate::builder::Builder;
-use crate::communicator::ssh::{SshCommunicator, SshConfig};
-use crate::engine::hook::{BuildContext, ProvisionHook};
-use crate::engine::multistep::{Runner, StateBag, Step, StepAction};
+use crate::engine::hook::ProvisionHook;
+use crate::engine::multistep::{Runner, StateBag, Step, StepAction, StepProvision};
 use crate::error::StampError;
-use crate::types::{Port, Timeout};
+use crate::types::SecretString;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::Duration;
 
 /// Configuration for the `hyperone` builder.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct HyperoneConfig {
     /// Name of the builder instance.
     pub name: String,
+    /// Optional custom HyperOne API endpoint URL override.
+    pub endpoint: Option<String>,
     /// HyperOne authentication token or API key.
-    pub token: Option<String>,
+    pub token: Option<SecretString>,
     /// Target project ID in HyperOne.
     pub project: Option<String>,
     /// Source image ID or name.
@@ -38,23 +39,43 @@ pub struct HyperoneConfig {
     /// SSH username for provisioner connection.
     pub ssh_username: Option<String>,
     /// SSH password.
-    pub ssh_password: Option<String>,
+    pub ssh_password: Option<SecretString>,
 }
 
 /// HyperOne Cloud platform API client.
 #[derive(Debug, Clone)]
 pub struct HyperoneClient {
     /// Authentication token.
-    pub token: Option<String>,
+    pub token: Option<SecretString>,
     /// Project ID.
     pub project: String,
+    /// Base URL for HyperOne REST API.
+    pub endpoint: String,
 }
 
 impl HyperoneClient {
     /// Create a new `HyperoneClient`.
     #[must_use]
-    pub const fn new(token: Option<String>, project: String) -> Self {
-        Self { token, project }
+    pub fn new(token: Option<SecretString>, project: String) -> Self {
+        Self {
+            token,
+            project,
+            endpoint: "https://api.hyperone.com/v1".to_string(),
+        }
+    }
+
+    /// Create a new `HyperoneClient` with a custom API endpoint.
+    #[must_use]
+    pub fn with_endpoint(
+        token: Option<SecretString>,
+        project: String,
+        endpoint: impl Into<String>,
+    ) -> Self {
+        Self {
+            token,
+            project,
+            endpoint: endpoint.into(),
+        }
     }
 
     /// Launch a new VM instance in HyperOne.
@@ -69,12 +90,18 @@ impl HyperoneClient {
         image: &str,
         disk_size_gb: u32,
     ) -> Result<String, StampError> {
-        if cfg!(test) {
-            return Ok(format!("vm-{}", uuid::Uuid::new_v4().simple()));
+        #[derive(Deserialize)]
+        struct VmResp {
+            #[serde(rename = "_id")]
+            id: String,
         }
 
         let client = reqwest::Client::new();
-        let url = format!("https://api.hyperone.com/v1/project/{}/vm", self.project);
+        let url = format!(
+            "{}/project/{}/vm",
+            self.endpoint.trim_end_matches('/'),
+            self.project
+        );
         let payload = serde_json::json!({
             "name": name,
             "type": vm_type,
@@ -86,19 +113,13 @@ impl HyperoneClient {
 
         let mut req = client.post(&url).json(&payload);
         if let Some(ref t) = self.token {
-            req = req.bearer_auth(t);
+            req = req.bearer_auth(t.expose());
         }
 
         let resp = req
             .send()
             .await
             .map_err(|e| StampError::Execution(format!("HyperOne create VM failed: {e}")))?;
-
-        #[derive(Deserialize)]
-        struct VmResp {
-            #[serde(rename = "_id")]
-            id: String,
-        }
 
         let vm: VmResp = resp
             .json()
@@ -113,25 +134,6 @@ impl HyperoneClient {
     ///
     /// Returns `StampError::Execution` if IP resolution fails.
     pub async fn get_vm_ip(&self, vm_id: &str) -> Result<String, StampError> {
-        if cfg!(test) {
-            return Ok("127.0.0.1".to_string());
-        }
-
-        let client = reqwest::Client::new();
-        let url = format!(
-            "https://api.hyperone.com/v1/project/{}/vm/{vm_id}",
-            self.project
-        );
-        let mut req = client.get(&url);
-        if let Some(ref t) = self.token {
-            req = req.bearer_auth(t);
-        }
-
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| StampError::Execution(format!("HyperOne get VM failed: {e}")))?;
-
         #[derive(Deserialize)]
         struct VmDetails {
             #[serde(default)]
@@ -146,6 +148,22 @@ impl HyperoneClient {
         struct IpEntry {
             address: Option<String>,
         }
+
+        let client = reqwest::Client::new();
+        let url = format!(
+            "{}/project/{}/vm/{vm_id}",
+            self.endpoint.trim_end_matches('/'),
+            self.project
+        );
+        let mut req = client.get(&url);
+        if let Some(ref t) = self.token {
+            req = req.bearer_auth(t.expose());
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| StampError::Execution(format!("HyperOne get VM failed: {e}")))?;
 
         if let Ok(details) = resp.json::<VmDetails>().await
             && let Some(nets) = details.net
@@ -166,18 +184,15 @@ impl HyperoneClient {
     ///
     /// Returns `StampError::Execution` if stop fails.
     pub async fn stop_vm(&self, vm_id: &str) -> Result<(), StampError> {
-        if cfg!(test) {
-            return Ok(());
-        }
-
         let client = reqwest::Client::new();
         let url = format!(
-            "https://api.hyperone.com/v1/project/{}/vm/{vm_id}/actions/stop",
+            "{}/project/{}/vm/{vm_id}/actions/stop",
+            self.endpoint.trim_end_matches('/'),
             self.project
         );
         let mut req = client.post(&url);
         if let Some(ref t) = self.token {
-            req = req.bearer_auth(t);
+            req = req.bearer_auth(t.expose());
         }
         let _ = req.send().await;
         Ok(())
@@ -189,12 +204,18 @@ impl HyperoneClient {
     ///
     /// Returns `StampError::Execution` if image creation fails.
     pub async fn create_image(&self, vm_id: &str, name: &str) -> Result<String, StampError> {
-        if cfg!(test) {
-            return Ok(format!("img-{}", uuid::Uuid::new_v4().simple()));
+        #[derive(Deserialize)]
+        struct ImgResp {
+            #[serde(rename = "_id")]
+            id: String,
         }
 
         let client = reqwest::Client::new();
-        let url = format!("https://api.hyperone.com/v1/project/{}/image", self.project);
+        let url = format!(
+            "{}/project/{}/image",
+            self.endpoint.trim_end_matches('/'),
+            self.project
+        );
         let payload = serde_json::json!({
             "name": name,
             "vm": vm_id,
@@ -202,19 +223,13 @@ impl HyperoneClient {
 
         let mut req = client.post(&url).json(&payload);
         if let Some(ref t) = self.token {
-            req = req.bearer_auth(t);
+            req = req.bearer_auth(t.expose());
         }
 
         let resp = req
             .send()
             .await
             .map_err(|e| StampError::Execution(format!("HyperOne create image failed: {e}")))?;
-
-        #[derive(Deserialize)]
-        struct ImgResp {
-            #[serde(rename = "_id")]
-            id: String,
-        }
 
         let img: ImgResp = resp
             .json()
@@ -229,18 +244,15 @@ impl HyperoneClient {
     ///
     /// Returns `StampError::Execution` if deletion fails.
     pub async fn delete_vm(&self, vm_id: &str) -> Result<(), StampError> {
-        if cfg!(test) {
-            return Ok(());
-        }
-
         let client = reqwest::Client::new();
         let url = format!(
-            "https://api.hyperone.com/v1/project/{}/vm/{vm_id}",
+            "{}/project/{}/vm/{vm_id}",
+            self.endpoint.trim_end_matches('/'),
             self.project
         );
         let mut req = client.delete(&url);
         if let Some(ref t) = self.token {
-            req = req.bearer_auth(t);
+            req = req.bearer_auth(t.expose());
         }
         let _ = req.send().await;
         Ok(())
@@ -310,73 +322,6 @@ impl Step for StepLaunchHyperoneVm {
             let _ = self.client.delete_vm(vm_id).await;
         }
     }
-}
-
-/// Step to provision the HyperOne VM over SSH.
-#[derive(Clone)]
-struct StepProvisionHyperone {
-    /// UI reference.
-    ui: Arc<crate::engine::ui::Ui>,
-    /// Builder name.
-    name: String,
-    /// Provisioning hook.
-    hook: Arc<dyn ProvisionHook>,
-    /// SSH username.
-    ssh_username: Option<String>,
-    /// SSH password.
-    ssh_password: Option<String>,
-}
-
-#[async_trait]
-impl Step for StepProvisionHyperone {
-    async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
-        self.ui.say(&self.name, "Provisioning HyperOne VM...");
-        let ip = state
-            .get::<String>("vm_ip")
-            .cloned()
-            .unwrap_or_else(|| "127.0.0.1".to_string());
-
-        let ssh_config = SshConfig {
-            host: ip,
-            port: Port::new(22),
-            username: self
-                .ssh_username
-                .clone()
-                .unwrap_or_else(|| "ubuntu".to_string()),
-            password: self.ssh_password.clone(),
-            timeout: Timeout::new(Duration::from_secs(10)),
-            ..Default::default()
-        };
-
-        let comm = Arc::new(SshCommunicator::new(ssh_config));
-        let build_ctx = BuildContext {
-            build_id: self.name.clone(),
-            host: "hyperone".to_string(),
-            user: "ubuntu".to_string(),
-            packer_run_uuid: "mocked-uuid".to_string(),
-            source_name: self.name.clone(),
-            source_type: "hyperone".to_string(),
-            ..Default::default()
-        };
-
-        if let Err(e) = self
-            .hook
-            .run_provisioners(comm.clone(), &build_ctx, self.ui.clone())
-            .await
-        {
-            self.ui
-                .error(&self.name, &format!("Provisioning failed: {e}"));
-            let _ = self
-                .hook
-                .run_error_cleanup_provisioners(comm, &build_ctx, self.ui.clone())
-                .await;
-            return Err(e);
-        }
-
-        Ok(StepAction::Continue)
-    }
-
-    async fn cleanup(&mut self, _state: &StateBag) {}
 }
 
 /// Step to capture HyperOne image.
@@ -449,13 +394,26 @@ impl Builder for HyperoneBuilder {
         ui: Arc<crate::engine::ui::Ui>,
         on_error: crate::engine::packer::OnErrorStrategy,
     ) -> Result<Box<dyn crate::artifact::Artifact>, StampError> {
-        let client = HyperoneClient::new(
-            self.config.token.clone(),
-            self.config
-                .project
-                .clone()
-                .unwrap_or_else(|| "default-project".to_string()),
-        );
+        let project = self
+            .config
+            .project
+            .clone()
+            .unwrap_or_else(|| "default-project".to_string());
+        let client = if let Some(ref ep) = self.config.endpoint {
+            HyperoneClient::with_endpoint(self.config.token.clone(), project, ep)
+        } else {
+            HyperoneClient::new(self.config.token.clone(), project)
+        };
+        let ssh_user = self
+            .config
+            .ssh_username
+            .clone()
+            .unwrap_or_else(|| "ubuntu".to_string());
+        let ssh_pass = self
+            .config
+            .ssh_password
+            .as_ref()
+            .map(|s| s.expose().to_string());
 
         let steps: Vec<Box<dyn Step>> = vec![
             Box::new(StepLaunchHyperoneVm {
@@ -464,13 +422,12 @@ impl Builder for HyperoneBuilder {
                 client: client.clone(),
                 config: self.config.clone(),
             }),
-            Box::new(StepProvisionHyperone {
-                ui: ui.clone(),
-                name: self.name(),
-                hook,
-                ssh_username: self.config.ssh_username.clone(),
-                ssh_password: self.config.ssh_password.clone(),
-            }),
+            Box::new(
+                StepProvision::new(ui.clone(), self.name(), "hyperone", hook)
+                    .with_ip_key("vm_ip")
+                    .with_ssh_credentials(ssh_user, ssh_pass)
+                    .with_message("Provisioning HyperOne VM..."),
+            ),
             Box::new(StepCaptureHyperoneImage {
                 ui: ui.clone(),
                 name: self.name(),
@@ -482,28 +439,20 @@ impl Builder for HyperoneBuilder {
         let mut runner = Runner::new(steps);
         let mut state = StateBag::new();
 
-        match runner.run(&mut state).await {
-            Ok(()) => {
-                runner.cleanup(&state).await;
-            }
-            Err(e) => {
-                if on_error == crate::engine::packer::OnErrorStrategy::Cleanup {
-                    runner.cleanup(&state).await;
-                }
-                return Err(e);
-            }
-        }
+        runner
+            .run_with_strategy(&mut state, &self.name(), &ui, on_error)
+            .await?;
 
         let artifact_id = state
             .get::<String>("artifact_id")
             .cloned()
             .unwrap_or_else(|| format!("hyperone:{}", self.name()));
 
-        Ok(Box::new(crate::artifact::MockArtifact {
-            builder_id: self.name(),
-            id: artifact_id,
-            files: vec![],
-        }))
+        Ok(Box::new(BuildArtifact::with_builder(
+            self.name(),
+            artifact_id,
+            vec![],
+        )))
     }
 
     async fn cancel(&self) -> Result<(), StampError> {
@@ -512,7 +461,6 @@ impl Builder for HyperoneBuilder {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -528,7 +476,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_hyperone_prepare() {
+    async fn test_hyperone_prepare() -> Result<(), StampError> {
         let mut c = HyperoneConfig::default();
         let b = HyperoneBuilder::new(c.clone());
         assert!(b.prepare().await.is_err());
@@ -543,23 +491,63 @@ mod tests {
 
         c.image_name = "new-img".to_string();
         let b = HyperoneBuilder::new(c);
-        assert!(b.prepare().await.is_ok());
+        b.prepare().await
     }
 
     #[tokio::test]
-    async fn test_hyperone_client_mocked() -> Result<(), StampError> {
-        let client = HyperoneClient::new(Some("token123".to_string()), "proj-1".to_string());
+    async fn test_hyperone_client_http() -> Result<(), StampError> {
+        let mut server = mockito::Server::new_async().await;
+        let url = server.url();
+
+        let _m_vm = server
+            .mock("POST", "/project/proj-1/vm")
+            .with_status(200)
+            .with_body(r#"{"_id":"vm-http-1"}"#)
+            .create_async()
+            .await;
+
+        let _m_get = server
+            .mock("GET", "/project/proj-1/vm/vm-http-1")
+            .with_status(200)
+            .with_body(r#"{"net":[{"ip":[{"address":"198.51.100.42"}]}]}"#)
+            .create_async()
+            .await;
+
+        let _m_stop = server
+            .mock("POST", "/project/proj-1/vm/vm-http-1/actions/stop")
+            .with_status(200)
+            .create_async()
+            .await;
+
+        let _m_img = server
+            .mock("POST", "/project/proj-1/image")
+            .with_status(200)
+            .with_body(r#"{"_id":"img-http-1"}"#)
+            .create_async()
+            .await;
+
+        let _m_del = server
+            .mock("DELETE", "/project/proj-1/vm/vm-http-1")
+            .with_status(200)
+            .create_async()
+            .await;
+
+        let client = HyperoneClient::with_endpoint(
+            Some(SecretString::new("token123")),
+            "proj-1".to_string(),
+            &url,
+        );
         let vm_id = client
             .create_vm("test-vm", "c1.micro", "src-img", 20)
             .await?;
-        assert!(vm_id.starts_with("vm-"));
+        assert_eq!(vm_id, "vm-http-1");
 
         let ip = client.get_vm_ip(&vm_id).await?;
-        assert_eq!(ip, "127.0.0.1");
+        assert_eq!(ip, "198.51.100.42");
 
         client.stop_vm(&vm_id).await?;
         let img_id = client.create_image(&vm_id, "custom-img").await?;
-        assert!(img_id.starts_with("img-"));
+        assert_eq!(img_id, "img-http-1");
 
         client.delete_vm(&vm_id).await?;
         Ok(())
@@ -567,11 +555,47 @@ mod tests {
 
     #[tokio::test]
     async fn test_hyperone_run() -> Result<(), StampError> {
+        let mut server = mockito::Server::new_async().await;
+        let _m_vm = server
+            .mock("POST", "/project/project-1/vm")
+            .with_status(200)
+            .with_body(r#"{"_id":"vm-123"}"#)
+            .create_async()
+            .await;
+        let _m_get = server
+            .mock("GET", "/project/project-1/vm/vm-123")
+            .with_status(200)
+            .with_body(r"{}")
+            .create_async()
+            .await;
+        let _m_stop = server
+            .mock("POST", "/project/project-1/vm/vm-123/actions/stop")
+            .with_status(200)
+            .create_async()
+            .await;
+        let _m_img = server
+            .mock("POST", "/project/project-1/image")
+            .with_status(200)
+            .with_body(r#"{"_id":"img-456"}"#)
+            .create_async()
+            .await;
+        let _m_del = server
+            .mock("DELETE", "/project/project-1/vm/vm-123")
+            .with_status(200)
+            .create_async()
+            .await;
+
+        assert_eq!(
+            HyperoneClient::new(None, "p".to_string()).endpoint,
+            "https://api.hyperone.com/v1"
+        );
         let config = HyperoneConfig {
             name: "test".to_string(),
+            endpoint: Some(server.url()),
             source_image: "src-img".to_string(),
             image_name: "custom-img".to_string(),
             project: Some("project-1".to_string()),
+            ssh_password: Some(SecretString::new("pass")),
             ..Default::default()
         };
         let b = HyperoneBuilder::new(config);
@@ -588,20 +612,8 @@ mod tests {
             .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
             .await?;
         assert!(res.id().starts_with("hyperone:img-"));
+        assert_eq!(res.builder_id(), "test");
         b.cancel().await?;
         Ok(())
-    }
-
-    #[test]
-    fn test_derived_traits() {
-        let config = HyperoneConfig {
-            name: "test".to_string(),
-            ..Default::default()
-        };
-        assert_eq!(config.clone(), config);
-        assert_eq!(format!("{config:?}"), format!("{config:?}"));
-
-        let client = HyperoneClient::new(None, "p1".to_string());
-        assert_eq!(format!("{client:?}"), format!("{client:?}"));
     }
 }

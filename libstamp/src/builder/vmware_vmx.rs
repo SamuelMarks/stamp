@@ -1,7 +1,8 @@
 //! Implementation of the `vmware-vmx` builder.
 
 pub use super::vmware_iso::{
-    VmwareDriver, discover_guest_ip, generate_vmx_content, run_govc, run_ovftool, run_vmrun,
+    VmwareDriver, discover_guest_ip, discover_guest_ip_with_cmd, generate_vmx_content, run_govc,
+    run_ovftool, run_ovftool_with_cmd, run_vmrun, run_vmrun_with_cmd,
 };
 use crate::builder::Builder;
 use crate::communicator::ssh::{SshCommunicator, SshConfig};
@@ -37,6 +38,12 @@ pub struct VmwareVmxConfig {
     pub output_directory: Option<String>,
     /// Target export format (`ova` or `ovf`).
     pub export_format: Option<String>,
+    /// Optional custom path or command for the `vmrun` executable.
+    pub vmrun_binary: Option<String>,
+    /// Optional custom path or command for the `govc` executable.
+    pub govc_binary: Option<String>,
+    /// Optional custom path or command for the `ovftool` executable.
+    pub ovftool_binary: Option<String>,
 }
 
 /// The `vmware-vmx` builder.
@@ -126,10 +133,17 @@ impl Step for StepRunVM {
         let vmx_path = state.get::<String>("vmx_path").cloned().unwrap_or_default();
         self.ui.say(&self.name, "Starting VMware VM...");
 
+        let vmrun_cmd = self.config.vmrun_binary.as_deref().unwrap_or("vmrun");
         let mode = if self.config.headless { "nogui" } else { "gui" };
-        let _ = run_vmrun(&["start", &vmx_path, mode]).await;
+        let _ = run_vmrun_with_cmd(vmrun_cmd, &["start", &vmx_path, mode]).await;
 
-        let ip = discover_guest_ip(Path::new(&vmx_path), self.config.driver).await?;
+        let driver_cmd = match self.config.driver {
+            VmwareDriver::Vmrun => vmrun_cmd,
+            VmwareDriver::Govc => self.config.govc_binary.as_deref().unwrap_or("govc"),
+        };
+        let ip =
+            discover_guest_ip_with_cmd(driver_cmd, Path::new(&vmx_path), self.config.driver, &[])
+                .await?;
         self.ui
             .say(&self.name, &format!("Discovered guest IP: {ip}"));
         state.put("vm_ip", ip);
@@ -142,7 +156,8 @@ impl Step for StepRunVM {
         if let Some(vmx_path) = state.get::<String>("vmx_path") {
             self.ui
                 .say(&self.name, &format!("Stopping VMware VM: {vmx_path}"));
-            let _ = run_vmrun(&["stop", vmx_path, "hard"]).await;
+            let vmrun_cmd = self.config.vmrun_binary.as_deref().unwrap_or("vmrun");
+            let _ = run_vmrun_with_cmd(vmrun_cmd, &["stop", vmx_path, "hard"]).await;
         }
     }
 }
@@ -184,7 +199,7 @@ impl Step for StepProvision {
             build_id: self.name.clone(),
             host: "vmware".to_string(),
             user: "root".to_string(),
-            packer_run_uuid: "mocked-uuid".to_string(),
+            packer_run_uuid: uuid::Uuid::new_v4().to_string(),
             source_name: self.name.clone(),
             source_type: "vmware-vmx".to_string(),
             ..Default::default()
@@ -217,6 +232,8 @@ struct StepShutdown {
     ui: Arc<crate::engine::ui::Ui>,
     /// Step or builder name.
     name: String,
+    /// Builder configuration.
+    config: VmwareVmxConfig,
 }
 
 #[async_trait::async_trait]
@@ -224,7 +241,8 @@ impl Step for StepShutdown {
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Shutting down VMware VM...");
         let vmx_path = state.get::<String>("vmx_path").cloned().unwrap_or_default();
-        let _ = run_vmrun(&["stop", &vmx_path, "soft"]).await;
+        let vmrun_cmd = self.config.vmrun_binary.as_deref().unwrap_or("vmrun");
+        let _ = run_vmrun_with_cmd(vmrun_cmd, &["stop", &vmx_path, "soft"]).await;
         Ok(StepAction::Continue)
     }
 
@@ -270,7 +288,8 @@ impl Step for StepExportVmx {
             ),
         );
 
-        run_ovftool(vmx_path, &export_path).await?;
+        let ovftool_cmd = self.config.ovftool_binary.as_deref().unwrap_or("ovftool");
+        run_ovftool_with_cmd(ovftool_cmd, vmx_path, &export_path).await?;
         state.put("export_path", export_path.to_string_lossy().to_string());
         Ok(StepAction::Continue)
     }
@@ -293,11 +312,6 @@ impl Builder for VmwareVmxBuilder {
         ui: Arc<crate::engine::ui::Ui>,
         on_error: crate::engine::packer::OnErrorStrategy,
     ) -> Result<Box<dyn crate::artifact::Artifact>, StampError> {
-        if cfg!(test) && (self.config.name == "test_bad_exit" || self.config.name == "test_missing")
-        {
-            return Err(StampError::Execution("test triggered error".to_string()));
-        }
-
         let steps: Vec<Box<dyn Step>> = vec![
             Box::new(StepCloneVM {
                 ui: ui.clone(),
@@ -317,6 +331,7 @@ impl Builder for VmwareVmxBuilder {
             Box::new(StepShutdown {
                 ui: ui.clone(),
                 name: self.name(),
+                config: self.config.clone(),
             }),
             Box::new(StepExportVmx {
                 ui: ui.clone(),
@@ -375,6 +390,9 @@ mod tests {
             vmx_data,
             driver: VmwareDriver::Govc,
             export_format: Some("ova".to_string()),
+            vmrun_binary: Some("echo".to_string()),
+            govc_binary: Some("echo".to_string()),
+            ovftool_binary: Some("cp".to_string()),
             ..Default::default()
         };
         let builder = VmwareVmxBuilder::new(config.clone());
@@ -408,6 +426,7 @@ mod tests {
                     .to_string_lossy()
                     .to_string(),
             ),
+            vmrun_binary: Some("echo".to_string()),
             ..Default::default()
         });
         let res_default = b_default
@@ -424,9 +443,11 @@ mod tests {
         };
         prov_step.run(&mut empty_state).await?;
 
+        let src_vmx = temp_dir.path().join("vm.vmx");
+        tokio::fs::write(&src_vmx, b".encoding = \"UTF-8\"\n").await?;
         let mut state = StateBag::new();
         state.put("vm_ip", "10.0.0.1".to_string());
-        state.put("vmx_path", "/tmp/vm.vmx".to_string());
+        state.put("vmx_path", src_vmx.to_string_lossy().to_string());
         state.put("ssh_port", 2222u16);
         prov_step.run(&mut state).await?;
         prov_step.cleanup(&state).await;
@@ -443,6 +464,7 @@ mod tests {
                         .to_string_lossy()
                         .to_string(),
                 ),
+                ovftool_binary: Some("cp".to_string()),
                 ..Default::default()
             },
         };
@@ -483,20 +505,54 @@ mod tests {
         let mut shutdown_step = StepShutdown {
             ui,
             name: "test".to_string(),
+            config,
         };
         shutdown_step.cleanup(&state).await;
         Ok(())
     }
 
-    #[test]
-    fn test_vmware_vmx_derived_traits() {
-        let config1 = VmwareVmxConfig::default();
-        let config2 = config1.clone();
-        assert_eq!(config1, config2);
-        assert_eq!(format!("{config1:?}"), format!("{config2:?}"));
+    struct FailingProvisioner;
+    #[async_trait::async_trait]
+    impl crate::provisioner::Provisioner for FailingProvisioner {
+        async fn provision(
+            &self,
+            _comm: &dyn crate::communicator::Communicator,
+            _ui: Arc<Ui>,
+        ) -> Result<(), StampError> {
+            Err(StampError::Execution("Provision failure".to_string()))
+        }
+    }
 
-        let b1 = VmwareVmxBuilder::new(config1);
-        let b2 = b1.clone();
-        assert_eq!(format!("{b1:?}"), format!("{b2:?}"));
+    #[tokio::test]
+    async fn test_vmware_vmx_prepare_and_failure() -> Result<(), StampError> {
+        let b_empty = VmwareVmxBuilder::new(VmwareVmxConfig::default());
+        assert!(b_empty.prepare().await.is_err());
+
+        let temp_dir = tempfile::tempdir()?;
+        let src_file = temp_dir.path().join("existing.vmx");
+        tokio::fs::write(&src_file, b".encoding = \"UTF-8\"\n").await?;
+
+        let b_fail = VmwareVmxBuilder::new(VmwareVmxConfig {
+            name: "test-fail".to_string(),
+            source_path: Some(src_file.to_string_lossy().to_string()),
+            output_directory: Some(temp_dir.path().join("out").to_string_lossy().to_string()),
+            ..Default::default()
+        });
+        let fail_hook = Arc::new(DefaultProvisionHook {
+            provisioners: Arc::new(vec![Box::new(FailingProvisioner)]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let ui = Arc::new(Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+        assert!(
+            b_fail
+                .run(fail_hook, ui, OnErrorStrategy::Cleanup)
+                .await
+                .is_err()
+        );
+        Ok(())
     }
 }

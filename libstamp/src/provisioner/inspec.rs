@@ -13,6 +13,8 @@ pub struct InspecConfig {
     pub profile_paths: Vec<String>,
     /// Additional arguments to pass to `inspec exec`.
     pub extra_arguments: Vec<String>,
+    /// Optional custom path to the `inspec` executable. Defaults to `"inspec"`.
+    pub inspec_binary: Option<PathBuf>,
 }
 
 /// The `inspec` provisioner.
@@ -62,7 +64,12 @@ impl Provisioner for InspecProvisioner {
         }
 
         // Construct inspec command
-        let mut cmd_str = String::from("inspec exec");
+        let inspec_bin = self
+            .config
+            .inspec_binary
+            .as_ref()
+            .map_or_else(|| "inspec".to_string(), |p| p.to_string_lossy().to_string());
+        let mut cmd_str = format!("{inspec_bin} exec");
 
         let remote_profiles: Vec<String> = (0..self.config.profile_paths.len())
             .map(|i| format!("{remote_dir}/profile_{i}"))
@@ -90,7 +97,6 @@ impl Provisioner for InspecProvisioner {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
     use crate::communicator::mock::MockCommunicator;
@@ -120,6 +126,7 @@ mod tests {
         let config = InspecConfig {
             profile_paths: vec!["my_profile".to_string()],
             extra_arguments: vec!["--chef-license=accept".to_string()],
+            inspec_binary: Some(PathBuf::from("/opt/inspec/bin/inspec")),
         };
         let prov = InspecProvisioner::new(config);
         let comm = MockCommunicator::new();
@@ -160,7 +167,32 @@ mod tests {
 
     #[tokio::test]
     async fn test_inspec_provision_failure_mkdir() -> Result<(), crate::error::StampError> {
-        // Mock communicator cannot easily fail mkdir unless hardcoded remote_dir contains fail.
+        let config = InspecConfig {
+            profile_paths: vec!["my_profile".to_string()],
+            ..Default::default()
+        };
+        let prov = InspecProvisioner::new(config);
+        let comm = MockCommunicator::new();
+        comm.add_response(
+            "mkdir -p /tmp/packer-inspec",
+            crate::communicator::CommandResult {
+                exit_code: 1,
+                stdout: String::new(),
+                stderr: "mkdir failed".to_string(),
+            },
+        )
+        .await;
+        let result = prov
+            .provision(
+                &comm,
+                std::sync::Arc::new(crate::engine::ui::Ui::new(
+                    crate::engine::packer::FeatureState::Disabled,
+                    crate::engine::packer::FeatureState::Disabled,
+                    crate::engine::packer::FeatureState::Disabled,
+                )),
+            )
+            .await;
+        assert!(matches!(result, Err(StampError::Parse(_))));
         Ok(())
     }
 
@@ -169,6 +201,7 @@ mod tests {
         let config = InspecConfig {
             profile_paths: vec!["my_profile".to_string()],
             extra_arguments: vec!["fail_provision".to_string()],
+            inspec_binary: None,
         };
         let prov = InspecProvisioner::new(config);
         let comm = MockCommunicator::new();
@@ -194,9 +227,10 @@ mod tests {
         };
         let config2 = config1.clone();
         assert_eq!(config1, config2);
-        assert_eq!(format!("{config1:?}"), format!("{config2:?}"));
+        assert!(format!("{config1:?}").contains("InspecConfig"));
         let st1 = InspecProvisioner::new(config1);
         let st2 = st1.clone();
-        assert_eq!(format!("{st1:?}"), format!("{st2:?}"));
+        assert!(format!("{st1:?}").contains("InspecProvisioner"));
+        assert_eq!(st1.config, st2.config);
     }
 }

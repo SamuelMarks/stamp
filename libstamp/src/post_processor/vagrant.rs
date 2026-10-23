@@ -172,7 +172,11 @@ impl VagrantPostProcessor {
             if ext_lower == "pvm" {
                 return "parallels".to_string();
             }
-            if ext_lower == "utm" || f_lower.ends_with(".utm") {
+            if ext_lower == "utm"
+                || Path::new(&f_lower)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("utm"))
+            {
                 return "utm".to_string();
             }
         }
@@ -339,7 +343,6 @@ impl PostProcessor for VagrantPostProcessor {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -555,7 +558,7 @@ mod tests {
 
         let pp_cfg = VagrantPostProcessor::from_post_processor_config(&cfg);
         assert_eq!(pp_cfg.config.provider_override.as_deref(), Some("utm"));
-        assert_eq!(pp_cfg.config.passthrough, true);
+        assert!(pp_cfg.config.passthrough);
         assert_eq!(pp_cfg.only(), Some(&["utm-iso.vm".to_string()][..]));
     }
 }

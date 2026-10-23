@@ -110,7 +110,8 @@ impl Artifact for BuildArtifact {
     }
 }
 
-/// A basic artifact struct for compatibility across builders and tests.
+/// A basic artifact struct for compatibility in unit tests.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MockArtifact {
     /// The builder ID.
@@ -121,12 +122,14 @@ pub struct MockArtifact {
     pub files: Vec<String>,
 }
 
+#[cfg(test)]
 impl From<MockArtifact> for BuildArtifact {
     fn from(m: MockArtifact) -> Self {
         Self::with_builder(m.builder_id, m.id, m.files)
     }
 }
 
+#[cfg(test)]
 impl Artifact for MockArtifact {
     fn builder_id(&self) -> String {
         self.builder_id.clone()

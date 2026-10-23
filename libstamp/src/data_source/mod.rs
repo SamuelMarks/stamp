@@ -151,7 +151,11 @@ pub fn create_data_source(config: &DataSourceConfig) -> Result<Box<dyn DataSourc
         "consul" | "consul-key" | "consul_key" => {
             let path = config.config.get("path").cloned().unwrap_or_default();
             let address = config.config.get("address").cloned();
-            let token = config.config.get("token").cloned();
+            let token = config
+                .config
+                .get("token")
+                .cloned()
+                .map(crate::types::SecretString::new);
             let datacenter = config.config.get("datacenter").cloned();
             Ok(Box::new(consul_key::ConsulKeyDataSource::new(
                 consul_key::ConsulKeyConfig {
@@ -166,7 +170,11 @@ pub fn create_data_source(config: &DataSourceConfig) -> Result<Box<dyn DataSourc
             let path = config.config.get("path").cloned().unwrap_or_default();
             let key = config.config.get("key").cloned();
             let address = config.config.get("address").cloned();
-            let token = config.config.get("token").cloned();
+            let token = config
+                .config
+                .get("token")
+                .cloned()
+                .map(crate::types::SecretString::new);
             Ok(Box::new(vault_secret::VaultSecretDataSource::new(
                 vault_secret::VaultSecretConfig {
                     path,
@@ -397,11 +405,9 @@ mod tests {
         let val_git = git_ds.read().await?;
         assert!(val_git.is_object());
 
-        let temp_dir = std::env::temp_dir();
-        let file_path = temp_dir.join("test_ds_file_creation.txt");
-        tokio::fs::write(&file_path, "ds file content")
-            .await
-            .map_err(|e| StampError::Execution(e.to_string()))?;
+        let temp_dir = tempfile::tempdir()?;
+        let file_path = temp_dir.path().join("test_ds_file_creation.txt");
+        tokio::fs::write(&file_path, "ds file content").await?;
         let mut file_cfg = DataSourceConfig::default();
         file_cfg.source_type = "local-file".to_string();
         file_cfg
@@ -410,12 +416,9 @@ mod tests {
         let file_ds = create_data_source(&file_cfg)?;
         let val_file = file_ds.read().await?;
         assert_eq!(val_file["content"], "ds file content");
-        let _ = tokio::fs::remove_file(file_path).await;
 
-        let state_path = temp_dir.join("test_ds_terraform.tfstate");
-        tokio::fs::write(&state_path, "{\"outputs\": {\"out\": {\"value\": 42}}}")
-            .await
-            .map_err(|e| StampError::Execution(e.to_string()))?;
+        let state_path = temp_dir.path().join("test_ds_terraform.tfstate");
+        tokio::fs::write(&state_path, "{\"outputs\": {\"out\": {\"value\": 42}}}").await?;
         let mut tf_cfg = DataSourceConfig::default();
         tf_cfg.source_type = "terraform-state".to_string();
         tf_cfg.config.insert(
@@ -428,16 +431,14 @@ mod tests {
         let tf_ds = create_data_source(&tf_cfg)?;
         let val_tf = tf_ds.read().await?;
         assert_eq!(val_tf, 42);
-        let _ = tokio::fs::remove_file(state_path).await;
 
         Ok(())
     }
 
     #[test]
-    fn test_create_data_source_unknown() -> Result<(), StampError> {
+    fn test_create_data_source_unknown() {
         let mut config = DataSourceConfig::default();
         config.source_type = "unknown".to_string();
         assert!(create_data_source(&config).is_err());
-        Ok(())
     }
 }

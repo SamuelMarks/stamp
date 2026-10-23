@@ -288,6 +288,7 @@ fn create_raw_builder(config: &BuilderConfig) -> Result<Box<dyn Builder>, StampE
         "lxc" => Ok(Box::new(lxc::LxcBuilder::new(lxc::LxcConfig {
             output_name: config.name.clone(),
             image_name: String::new(),
+            ..Default::default()
         }))),
         "oracle-oci" => Ok(Box::new(oracle::OracleOciBuilder::new(
             oracle::OracleOciConfig {
@@ -510,7 +511,7 @@ mod tests {
             name: "n".to_string(),
             ..Default::default()
         });
-        assert!(b.depends_on().is_empty());
+        assert_eq!(b.depends_on().len(), 0);
     }
 
     #[tokio::test]

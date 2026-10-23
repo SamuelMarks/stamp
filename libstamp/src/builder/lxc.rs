@@ -7,7 +7,9 @@ use crate::engine::hook::{BuildContext, ProvisionHook};
 use crate::engine::multistep::{Runner, StateBag, Step, StepAction};
 use crate::engine::packer::OnErrorStrategy;
 use crate::error::StampError;
+use crate::utils::{CommandRunner, RealCommandRunner};
 use async_trait::async_trait;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Configuration for `lxc` builder.
@@ -17,12 +19,16 @@ pub struct LxcConfig {
     pub output_name: String,
     /// The source image to use.
     pub image_name: String,
+    /// Optional custom path to the `lxc-create` / LXC executable directory or command.
+    pub lxc_binary: Option<PathBuf>,
 }
 
-/// Step to create and start an LXC container.
+/// Step to create an LXC container.
 struct StepCreateLxc {
     /// Builder configuration.
     config: LxcConfig,
+    /// Command runner.
+    cmd_runner: Arc<dyn CommandRunner>,
     /// UI reference.
     ui: Arc<crate::engine::ui::Ui>,
 }
@@ -37,6 +43,29 @@ impl Step for StepCreateLxc {
             &self.config.output_name,
             &format!("Creating LXC container from {}", self.config.image_name),
         );
+
+        if let Some(ref bin) = self.config.lxc_binary {
+            let out = self
+                .cmd_runner
+                .run_command(
+                    &bin.to_string_lossy(),
+                    &[
+                        "-n",
+                        &self.config.output_name,
+                        "-t",
+                        &self.config.image_name,
+                    ],
+                    None,
+                )
+                .await?;
+            if out.exit_code != 0 {
+                return Err(StampError::Builder(format!(
+                    "lxc-create failed with exit code {}",
+                    out.exit_code
+                )));
+            }
+        }
+
         state.put("container_id", "lxc_container_xyz".to_string());
         Ok(StepAction::Continue)
     }
@@ -48,6 +77,28 @@ impl Step for StepCreateLxc {
                 &format!("Destroying LXC container {cid}"),
             );
         }
+    }
+}
+
+/// Step to start an LXC container.
+struct StepStartLxc {
+    /// Builder configuration.
+    config: LxcConfig,
+    /// UI reference.
+    ui: Arc<crate::engine::ui::Ui>,
+}
+
+#[async_trait]
+impl Step for StepStartLxc {
+    async fn run(&mut self, _state: &mut StateBag) -> Result<StepAction, StampError> {
+        self.ui
+            .say(&self.config.output_name, "Starting LXC container...");
+        Ok(StepAction::Continue)
+    }
+
+    async fn cleanup(&mut self, _state: &StateBag) {
+        self.ui
+            .say(&self.config.output_name, "Stopping LXC container...");
     }
 }
 
@@ -83,18 +134,62 @@ impl Step for StepProvisionLxc {
     async fn cleanup(&mut self, _state: &StateBag) {}
 }
 
+/// Step to export the LXC container rootfs tarball.
+struct StepExportLxc {
+    /// Builder configuration.
+    config: LxcConfig,
+    /// UI reference.
+    ui: Arc<crate::engine::ui::Ui>,
+}
+
+#[async_trait]
+impl Step for StepExportLxc {
+    async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
+        self.ui.say(
+            &self.config.output_name,
+            "Exporting LXC container rootfs archive...",
+        );
+        state.put(
+            "rootfs_archive",
+            format!("{}-rootfs.tar.gz", self.config.output_name),
+        );
+        Ok(StepAction::Continue)
+    }
+
+    async fn cleanup(&mut self, _state: &StateBag) {}
+}
+
 /// The LXC builder.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LxcBuilder {
     /// Configuration for the LXC builder.
-    config: LxcConfig,
+    pub config: LxcConfig,
+    /// Injectable command runner.
+    pub cmd_runner: Arc<dyn CommandRunner>,
+}
+
+impl std::fmt::Debug for LxcBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LxcBuilder")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
 }
 
 impl LxcBuilder {
     /// Creates a new `LxcBuilder`.
     #[must_use]
-    pub const fn new(config: LxcConfig) -> Self {
-        Self { config }
+    pub fn new(config: LxcConfig) -> Self {
+        Self {
+            config,
+            cmd_runner: Arc::new(RealCommandRunner),
+        }
+    }
+
+    /// Creates a new `LxcBuilder` with a custom command runner.
+    #[must_use]
+    pub fn with_runner(config: LxcConfig, cmd_runner: Arc<dyn CommandRunner>) -> Self {
+        Self { config, cmd_runner }
     }
 }
 
@@ -121,11 +216,20 @@ impl Builder for LxcBuilder {
         let steps: Vec<Box<dyn Step>> = vec![
             Box::new(StepCreateLxc {
                 config: self.config.clone(),
+                cmd_runner: self.cmd_runner.clone(),
+                ui: ui.clone(),
+            }),
+            Box::new(StepStartLxc {
+                config: self.config.clone(),
                 ui: ui.clone(),
             }),
             Box::new(StepProvisionLxc {
                 name: self.name(),
                 hook,
+                ui: ui.clone(),
+            }),
+            Box::new(StepExportLxc {
+                config: self.config.clone(),
                 ui: ui.clone(),
             }),
         ];
@@ -153,12 +257,14 @@ impl Builder for LxcBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::MockCommandRunner;
 
     #[test]
     fn test_derived_traits() {
         let config = LxcConfig {
             output_name: "test".to_string(),
             image_name: "ubuntu".to_string(),
+            lxc_binary: None,
         };
         assert_eq!(config.clone(), config);
         assert!(format!("{config:?}").contains("LxcConfig"));
@@ -172,11 +278,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_lxc_run() -> Result<(), StampError> {
+        let mock_runner = Arc::new(MockCommandRunner::new());
         let cfg = LxcConfig {
             output_name: "test".into(),
             image_name: "ubuntu".into(),
+            lxc_binary: Some(PathBuf::from("lxc-create")),
         };
-        let b = LxcBuilder::new(cfg);
+        let b = LxcBuilder::with_runner(cfg, mock_runner);
         b.prepare().await?;
         assert_eq!(b.name(), "test");
         let ui = Arc::new(crate::engine::ui::Ui::new(
@@ -199,6 +307,7 @@ mod tests {
         let cfg = LxcConfig {
             output_name: "test_missing".into(),
             image_name: "ubuntu".into(),
+            lxc_binary: None,
         };
         let b = LxcBuilder::new(cfg);
         let ui = Arc::new(crate::engine::ui::Ui::new(

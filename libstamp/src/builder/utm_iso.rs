@@ -2,6 +2,16 @@
 //! UTM virtual machine bundles (`.utm` package directory containing `config.plist` and disk images)
 //! via `utmctl` CLI driver and native macOS Virtualization / QEMU bundle generation.
 
+/// Configuration types, backends, architectures, and plist generation for `utm-iso`.
+pub mod config;
+
+pub use config::{
+    UtmArch, UtmBackend, UtmDisplayType, UtmGuestAdditionsMode, UtmInterface, UtmIsoConfig,
+    discover_utm_guest_ip, discover_utm_guest_ip_with_cmd, find_utmctl_binary, generate_utm_plist,
+    parse_string_list, run_utmctl, run_utmctl_with_cmd, utmctl_binary,
+};
+
+use crate::artifact::BuildArtifact;
 use crate::builder::Builder;
 use crate::communicator::Communicator;
 use crate::communicator::ssh::{SshCommunicator, SshConfig};
@@ -9,767 +19,10 @@ use crate::communicator::winrm::{WinRmCommunicator, WinRmConfig};
 use crate::engine::hook::{BuildContext, ProvisionHook};
 use crate::engine::multistep::{Runner, StateBag, Step, StepAction};
 use crate::error::StampError;
-use crate::types::{MemoryMb, Port, Timeout};
-use std::fmt;
+use crate::types::{Port, Timeout};
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-
-/// Emulation / virtualization backend engine for UTM.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-pub enum UtmBackend {
-    /// QEMU backend hypervisor (supports x86_64, aarch64, emulation, and HVF).
-    #[default]
-    Qemu,
-    /// Native Apple Virtualization.framework backend.
-    Apple,
-}
-
-impl UtmBackend {
-    /// String representation of the UTM backend.
-    #[must_use]
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::Qemu => "qemu",
-            Self::Apple => "apple",
-        }
-    }
-}
-
-impl fmt::Display for UtmBackend {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
-}
-
-impl FromStr for UtmBackend {
-    type Err = std::convert::Infallible;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_ascii_lowercase().as_str() {
-            "apple" | "virtualization" => Ok(Self::Apple),
-            _ => Ok(Self::Qemu),
-        }
-    }
-}
-
-/// Target CPU architecture for the UTM virtual machine.
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-pub enum UtmArch {
-    /// 64-bit ARM architecture (`aarch64` / `arm64`).
-    #[default]
-    Aarch64,
-    /// 64-bit x86 architecture (`x86_64` / `amd64`).
-    X86_64,
-    /// Custom architecture.
-    Custom(String),
-}
-
-impl UtmArch {
-    /// String representation of the target architecture.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::Aarch64 => "aarch64",
-            Self::X86_64 => "x86_64",
-            Self::Custom(s) => s.as_str(),
-        }
-    }
-}
-
-impl fmt::Display for UtmArch {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
-}
-
-impl FromStr for UtmArch {
-    type Err = std::convert::Infallible;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_ascii_lowercase().as_str() {
-            "aarch64" | "arm64" => Ok(Self::Aarch64),
-            "x86_64" | "amd64" => Ok(Self::X86_64),
-            _ => Ok(Self::Custom(s.to_string())),
-        }
-    }
-}
-
-/// Storage bus controller interface for drives in UTM.
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-pub enum UtmInterface {
-    /// Non-Volatile Memory Express (NVMe) interface.
-    #[default]
-    Nvme,
-    /// VirtIO paravirtualized storage interface.
-    VirtIo,
-    /// Serial ATA (SATA) interface.
-    Sata,
-    /// Integrated Drive Electronics (IDE) interface.
-    Ide,
-    /// Universal Serial Bus (USB) optical/storage drive.
-    Usb,
-    /// Custom drive bus interface.
-    Custom(String),
-}
-
-impl UtmInterface {
-    /// String representation of the drive bus interface.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::Nvme => "nvme",
-            Self::VirtIo => "virtio",
-            Self::Sata => "sata",
-            Self::Ide => "ide",
-            Self::Usb => "usb",
-            Self::Custom(s) => s.as_str(),
-        }
-    }
-}
-
-impl fmt::Display for UtmInterface {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
-}
-
-impl FromStr for UtmInterface {
-    type Err = std::convert::Infallible;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_ascii_lowercase().as_str() {
-            "nvme" => Ok(Self::Nvme),
-            "virtio" | "virtio-blk" => Ok(Self::VirtIo),
-            "sata" => Ok(Self::Sata),
-            "ide" => Ok(Self::Ide),
-            "usb" => Ok(Self::Usb),
-            _ => Ok(Self::Custom(s.to_string())),
-        }
-    }
-}
-
-/// Display adapter hardware type in UTM.
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-pub enum UtmDisplayType {
-    /// VirtIO GPU PCI adapter.
-    #[default]
-    VirtIoGpuPci,
-    /// VirtIO RAM framebuffer adapter.
-    VirtIoRamfb,
-    /// Serial console text terminal only.
-    Console,
-    /// Headless display without virtual screen.
-    None,
-    /// Custom display adapter type.
-    Custom(String),
-}
-
-impl UtmDisplayType {
-    /// String representation of the display hardware type.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::VirtIoGpuPci => "virtio-gpu-pci",
-            Self::VirtIoRamfb => "virtio-ramfb",
-            Self::Console => "console",
-            Self::None => "none",
-            Self::Custom(s) => s.as_str(),
-        }
-    }
-}
-
-impl fmt::Display for UtmDisplayType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
-}
-
-impl FromStr for UtmDisplayType {
-    type Err = std::convert::Infallible;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_ascii_lowercase().as_str() {
-            "virtio-gpu-pci" | "virtio-gpu" => Ok(Self::VirtIoGpuPci),
-            "virtio-ramfb" => Ok(Self::VirtIoRamfb),
-            "console" | "serial" => Ok(Self::Console),
-            "none" | "headless" => Ok(Self::None),
-            _ => Ok(Self::Custom(s.to_string())),
-        }
-    }
-}
-
-/// Guest Additions mounting and installation mode for UTM.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-pub enum UtmGuestAdditionsMode {
-    /// Attach the Guest Additions / Spice ISO image to a virtual optical drive.
-    Attach,
-    /// Upload the Guest Additions ISO image to the guest via communicator.
-    Upload,
-    /// Do not attach or upload Guest Additions.
-    #[default]
-    Disable,
-}
-
-impl UtmGuestAdditionsMode {
-    /// String representation of the guest additions mode.
-    #[must_use]
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::Attach => "attach",
-            Self::Upload => "upload",
-            Self::Disable => "disable",
-        }
-    }
-}
-
-impl fmt::Display for UtmGuestAdditionsMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
-}
-
-impl FromStr for UtmGuestAdditionsMode {
-    type Err = std::convert::Infallible;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_ascii_lowercase().as_str() {
-            "attach" => Ok(Self::Attach),
-            "upload" => Ok(Self::Upload),
-            _ => Ok(Self::Disable),
-        }
-    }
-}
-
-/// Configuration for the `utm-iso` builder.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct UtmIsoConfig {
-    /// The name of the builder instance.
-    pub name: String,
-    /// VM name. Defaults to `packer-utm-iso`.
-    pub vm_name: Option<String>,
-    /// Target CPU architecture (`aarch64`, `x86_64`).
-    pub vm_arch: Option<UtmArch>,
-    /// Virtualization backend (`qemu` or `apple`).
-    pub vm_backend: UtmBackend,
-    /// Icon filename or descriptor in UTM.
-    pub vm_icon: Option<String>,
-    /// Whether to enable hypervisor hardware acceleration (HVF / KVM).
-    pub hypervisor: bool,
-    /// Whether to boot in UEFI mode.
-    pub uefi_boot: bool,
-    /// Display hardware adapter type.
-    pub display_hardware_type: Option<UtmDisplayType>,
-    /// Hard drive storage bus interface (`nvme`, `virtio`, `sata`). Defaults to `nvme`.
-    pub hard_drive_interface: UtmInterface,
-    /// Installer ISO storage bus interface (`usb`, `sata`, `ide`). Defaults to `usb`.
-    pub iso_interface: UtmInterface,
-    /// Guest additions storage bus interface. Defaults to `usb`.
-    pub guest_additions_interface: UtmInterface,
-    /// Guest additions mounting mode (`attach`, `upload`, `disable`).
-    pub guest_additions_mode: UtmGuestAdditionsMode,
-    /// URL to download Guest Additions ISO.
-    pub guest_additions_url: Option<String>,
-    /// SHA256 checksum for Guest Additions ISO.
-    pub guest_additions_sha256: Option<String>,
-    /// Target path for downloading Guest Additions ISO.
-    pub guest_additions_target_path: Option<String>,
-    /// Explicit local path to Guest Additions ISO.
-    pub guest_additions_path: Option<String>,
-    /// Whether to disable VNC display server.
-    pub disable_vnc: bool,
-    /// If true, do not pause after booting.
-    pub boot_nopause: bool,
-    /// If true, do not pause when configuring display.
-    pub display_nopause: bool,
-    /// If true, do not pause before export.
-    pub export_nopause: bool,
-    /// Number of virtual CPUs. Defaults to 2.
-    pub cpus: Option<u32>,
-    /// Memory size in MB. Defaults to 2048.
-    pub memory: Option<MemoryMb>,
-    /// Virtual disk size in MB. Defaults to 20480.
-    pub disk_size: Option<MemoryMb>,
-    /// Source installer ISO URL or path.
-    pub iso_url: Option<String>,
-    /// Checksum of the installer ISO.
-    pub iso_checksum: Option<String>,
-    /// Target path for downloading the ISO.
-    pub iso_target_path: Option<String>,
-    /// Boot command sequence.
-    pub boot_command: Option<Vec<String>>,
-    /// Wait duration before typing boot commands.
-    pub boot_wait: Option<String>,
-    /// Files to place on a virtual floppy disk.
-    pub floppy_files: Vec<String>,
-    /// Files to place on a secondary CD-ROM.
-    pub cd_files: Vec<String>,
-    /// Volume label for the secondary CD-ROM.
-    pub cd_label: Option<String>,
-    /// Communicator type (`ssh`, `winrm`, `none`).
-    pub communicator: Option<String>,
-    /// SSH username.
-    pub ssh_username: Option<String>,
-    /// SSH password.
-    pub ssh_password: Option<String>,
-    /// SSH host port.
-    pub ssh_port: Option<Port>,
-    /// SSH timeout.
-    pub ssh_timeout: Option<String>,
-    /// WinRM username.
-    pub winrm_username: Option<String>,
-    /// WinRM password.
-    pub winrm_password: Option<String>,
-    /// WinRM forwarded host port.
-    pub winrm_host_port: Option<Port>,
-    /// WinRM timeout.
-    pub winrm_timeout: Option<String>,
-    /// WinRM NTLM authentication toggle.
-    pub winrm_use_ntlm: Option<bool>,
-    /// WinRM insecure TLS toggle.
-    pub winrm_insecure: Option<bool>,
-    /// WinRM SSL toggle.
-    pub winrm_use_ssl: Option<bool>,
-    /// Command executed via communicator to initiate graceful guest shutdown.
-    pub shutdown_command: Option<String>,
-    /// Maximum duration to wait for graceful VM shutdown.
-    pub shutdown_timeout: Option<String>,
-    /// Output directory for exported `.utm` bundle.
-    pub output_directory: Option<String>,
-    /// Optional host directory containing static files to serve over HTTP to the guest installer.
-    pub http_directory: Option<String>,
-    /// Optional in-memory files to serve over HTTP (`path` -> `content`).
-    pub http_content: std::collections::HashMap<String, String>,
-    /// Optional bind address for the HTTP server.
-    pub http_bind_address: Option<String>,
-    /// Minimum port for the HTTP server port range.
-    pub http_port_min: Option<u16>,
-    /// Maximum port for the HTTP server port range.
-    pub http_port_max: Option<u16>,
-}
-
-/// Helper to parse string list from JSON or comma-separated string.
-fn parse_string_list(val: &str) -> Vec<String> {
-    if let Ok(list) = serde_json::from_str::<Vec<String>>(val) {
-        list
-    } else {
-        val.split(',')
-            .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
-    }
-}
-
-impl UtmIsoConfig {
-    /// Constructs a `UtmIsoConfig` from a strongly-typed [`BuilderConfig`](crate::template::BuilderConfig).
-    ///
-    /// # Errors
-    ///
-    /// Returns `StampError::Builder` if parsing fails or invalid types are supplied.
-    pub fn from_builder_config(
-        builder_config: &crate::template::BuilderConfig,
-    ) -> Result<Self, StampError> {
-        let name = builder_config.name.clone();
-        let cfg = &builder_config.config;
-
-        let vm_name = cfg
-            .get("vm_name")
-            .or_else(|| cfg.get("utm_vm_name"))
-            .cloned();
-
-        let vm_arch = cfg
-            .get("vm_arch")
-            .or_else(|| cfg.get("utm_vm_arch"))
-            .or_else(|| cfg.get("os_arch"))
-            .and_then(|s| s.parse().ok());
-
-        let vm_backend = cfg
-            .get("vm_backend")
-            .or_else(|| cfg.get("utm_vm_backend"))
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_default();
-
-        let vm_icon = cfg
-            .get("vm_icon")
-            .or_else(|| cfg.get("utm_vm_icon"))
-            .cloned();
-
-        let hypervisor = cfg
-            .get("hypervisor")
-            .or_else(|| cfg.get("utm_hypervisor"))
-            .is_none_or(|v| v == "true" || v == "1");
-
-        let uefi_boot = cfg
-            .get("uefi_boot")
-            .or_else(|| cfg.get("utm_uefi_boot"))
-            .is_none_or(|v| v == "true" || v == "1");
-
-        let display_hardware_type = cfg
-            .get("display_hardware_type")
-            .or_else(|| cfg.get("utm_display_hardware_type"))
-            .and_then(|s| s.parse().ok());
-
-        let hard_drive_interface = cfg
-            .get("hard_drive_interface")
-            .or_else(|| cfg.get("utm_hard_drive_interface"))
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(UtmInterface::Nvme);
-
-        let iso_interface = cfg
-            .get("iso_interface")
-            .or_else(|| cfg.get("utm_iso_interface"))
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(UtmInterface::Usb);
-
-        let guest_additions_interface = cfg
-            .get("guest_additions_interface")
-            .or_else(|| cfg.get("utm_guest_additions_interface"))
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(UtmInterface::Usb);
-
-        let guest_additions_mode = cfg
-            .get("guest_additions_mode")
-            .or_else(|| cfg.get("utm_guest_additions_mode"))
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_default();
-
-        let guest_additions_url = cfg
-            .get("guest_additions_url")
-            .or_else(|| cfg.get("utm_guest_additions_url"))
-            .cloned();
-
-        let guest_additions_sha256 = cfg
-            .get("guest_additions_sha256")
-            .or_else(|| cfg.get("utm_guest_additions_sha256"))
-            .cloned();
-
-        let guest_additions_target_path = cfg
-            .get("guest_additions_target_path")
-            .or_else(|| cfg.get("utm_guest_additions_target_path"))
-            .cloned();
-
-        let guest_additions_path = cfg
-            .get("guest_additions_path")
-            .or_else(|| cfg.get("utm_guest_additions_path"))
-            .cloned();
-
-        let disable_vnc = cfg
-            .get("disable_vnc")
-            .or_else(|| cfg.get("utm_disable_vnc"))
-            .is_some_and(|v| v == "true" || v == "1");
-
-        let boot_nopause = cfg
-            .get("boot_nopause")
-            .or_else(|| cfg.get("utm_boot_nopause"))
-            .is_none_or(|v| v == "true" || v == "1");
-
-        let display_nopause = cfg
-            .get("display_nopause")
-            .or_else(|| cfg.get("utm_display_nopause"))
-            .is_none_or(|v| v == "true" || v == "1");
-
-        let export_nopause = cfg
-            .get("export_nopause")
-            .or_else(|| cfg.get("utm_export_nopause"))
-            .is_none_or(|v| v == "true" || v == "1");
-
-        let cpus = cfg.get("cpus").and_then(|s| s.parse::<u32>().ok());
-        let memory = cfg
-            .get("memory")
-            .and_then(|s| s.parse::<u64>().ok())
-            .map(MemoryMb::new);
-        let disk_size = cfg
-            .get("disk_size")
-            .and_then(|s| s.parse::<u64>().ok())
-            .map(MemoryMb::new);
-
-        let iso_url = cfg.get("iso_url").cloned();
-        let iso_checksum = cfg.get("iso_checksum").cloned();
-        let iso_target_path = cfg.get("iso_target_path").cloned();
-
-        let boot_wait = cfg.get("boot_wait").cloned();
-        let boot_command = cfg.get("boot_command").map(|s| parse_string_list(s));
-        let floppy_files = cfg
-            .get("floppy_files")
-            .map_or_else(Vec::new, |s| parse_string_list(s));
-        let cd_files = cfg
-            .get("cd_files")
-            .map_or_else(Vec::new, |s| parse_string_list(s));
-        let cd_label = cfg.get("cd_label").cloned();
-
-        let communicator = cfg.get("communicator").cloned();
-        let ssh_username = cfg.get("ssh_username").cloned();
-        let ssh_password = cfg.get("ssh_password").cloned();
-        let ssh_port = cfg
-            .get("ssh_port")
-            .and_then(|s| s.parse::<u16>().ok())
-            .map(Port::new);
-        let ssh_timeout = cfg.get("ssh_timeout").cloned();
-
-        let winrm_username = cfg.get("winrm_username").cloned();
-        let winrm_password = cfg.get("winrm_password").cloned();
-        let winrm_host_port = cfg
-            .get("winrm_host_port")
-            .or_else(|| cfg.get("winrm_port"))
-            .and_then(|s| s.parse::<u16>().ok())
-            .map(Port::new);
-        let winrm_timeout = cfg.get("winrm_timeout").cloned();
-        let winrm_use_ntlm = cfg.get("winrm_use_ntlm").map(|v| v == "true" || v == "on");
-        let winrm_insecure = cfg.get("winrm_insecure").map(|v| v == "true" || v == "on");
-        let winrm_use_ssl = cfg.get("winrm_use_ssl").map(|v| v == "true" || v == "on");
-
-        let shutdown_command = cfg.get("shutdown_command").cloned();
-        let shutdown_timeout = cfg.get("shutdown_timeout").cloned();
-
-        let output_directory = cfg.get("output_directory").cloned();
-
-        let http_directory = cfg.get("http_directory").cloned();
-        let mut http_content = std::collections::HashMap::new();
-        if let Some(content_str) = cfg.get("http_content") {
-            if let Ok(parsed) =
-                serde_json::from_str::<std::collections::HashMap<String, String>>(content_str)
-            {
-                http_content = parsed;
-            }
-        }
-        let http_bind_address = cfg.get("http_bind_address").cloned();
-        let http_port_min = cfg.get("http_port_min").and_then(|p| p.parse::<u16>().ok());
-        let http_port_max = cfg.get("http_port_max").and_then(|p| p.parse::<u16>().ok());
-
-        Ok(Self {
-            name,
-            vm_name,
-            vm_arch,
-            vm_backend,
-            vm_icon,
-            hypervisor,
-            uefi_boot,
-            display_hardware_type,
-            hard_drive_interface,
-            iso_interface,
-            guest_additions_interface,
-            guest_additions_mode,
-            guest_additions_url,
-            guest_additions_sha256,
-            guest_additions_target_path,
-            guest_additions_path,
-            disable_vnc,
-            boot_nopause,
-            display_nopause,
-            export_nopause,
-            cpus,
-            memory,
-            disk_size,
-            iso_url,
-            iso_checksum,
-            iso_target_path,
-            boot_command,
-            boot_wait,
-            floppy_files,
-            cd_files,
-            cd_label,
-            communicator,
-            ssh_username,
-            ssh_password,
-            ssh_port,
-            ssh_timeout,
-            winrm_username,
-            winrm_password,
-            winrm_host_port,
-            winrm_timeout,
-            winrm_use_ntlm,
-            winrm_insecure,
-            winrm_use_ssl,
-            shutdown_command,
-            shutdown_timeout,
-            output_directory,
-            http_directory,
-            http_content,
-            http_bind_address,
-            http_port_min,
-            http_port_max,
-        })
-    }
-}
-
-/// Discovers candidate paths for the `utmctl` binary.
-fn utmctl_candidates() -> [PathBuf; 3] {
-    if cfg!(test) && std::env::var("UTMCTL_TEST_EMPTY_CANDIDATES").is_ok() {
-        [
-            PathBuf::from("/nonexistent/utmctl1"),
-            PathBuf::from("/nonexistent/utmctl2"),
-            PathBuf::from("/nonexistent/utmctl3"),
-        ]
-    } else {
-        [
-            PathBuf::from("/Applications/UTM.app/Contents/MacOS/utmctl"),
-            PathBuf::from("/usr/local/bin/utmctl"),
-            PathBuf::from("/usr/bin/utmctl"),
-        ]
-    }
-}
-
-/// Discovers the path to the `utmctl` CLI executable on the host system.
-#[must_use]
-pub fn find_utmctl_binary() -> PathBuf {
-    let env_bin = std::env::var("UTMCTL_PATH")
-        .ok()
-        .map(PathBuf::from)
-        .filter(|p| p.exists());
-
-    env_bin.unwrap_or_else(|| {
-        utmctl_candidates()
-            .into_iter()
-            .find(|c| c.exists())
-            .unwrap_or_else(|| PathBuf::from("utmctl"))
-    })
-}
-
-/// Execute a `utmctl` command with arguments.
-///
-/// # Errors
-///
-/// Returns `StampError::Builder` if `utmctl` fails.
-pub async fn run_utmctl(args: &[&str]) -> Result<String, StampError> {
-    run_utmctl_with_cmd(utmctl_binary(), args).await
-}
-
-/// Resolves the default `utmctl` binary name for execution.
-fn utmctl_binary() -> &'static str {
-    if cfg!(test) && std::env::var("UTMCTL_REAL_BIN").is_err() {
-        "echo"
-    } else {
-        "utmctl"
-    }
-}
-
-/// Execute a specific command as `utmctl` driver.
-///
-/// # Errors
-///
-/// Returns `StampError::Builder` if the `utmctl` command fails or cannot be spawned.
-pub async fn run_utmctl_with_cmd(cmd: &str, args: &[&str]) -> Result<String, StampError> {
-    let output = tokio::process::Command::new(cmd)
-        .args(args)
-        .output()
-        .await
-        .map_err(|e| StampError::Builder(format!("Failed to execute utmctl: {e}")))?;
-
-    if !output.status.success() {
-        let code = output.status.code().unwrap_or(1);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let msg = if stderr.trim().is_empty() {
-            stdout.trim()
-        } else {
-            stderr.trim()
-        };
-        return Err(StampError::Builder(format!(
-            "utmctl command '{cmd} {args:?}' failed with exit code {code}: {msg}"
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-/// Discovers the guest IP address of a running `UTM` VM via `utmctl ip-address`.
-///
-/// # Errors
-///
-/// Returns `StampError::Builder` if discovery fails.
-pub async fn discover_utm_guest_ip(vm_name: &str) -> Result<String, StampError> {
-    discover_utm_guest_ip_with_cmd(utmctl_binary(), vm_name).await
-}
-
-/// Discovers the guest IP address using a specific command runner.
-///
-/// # Errors
-///
-/// Returns `StampError::Builder` if discovery fails.
-pub async fn discover_utm_guest_ip_with_cmd(
-    cmd: &str,
-    vm_name: &str,
-) -> Result<String, StampError> {
-    let output = run_utmctl_with_cmd(cmd, &["ip-address", vm_name]).await?;
-    let ip = output.trim();
-    if !ip.is_empty() && ip != "unknown" && !ip.starts_with("ip-address") {
-        Ok(ip.to_string())
-    } else {
-        Ok("127.0.0.1".to_string())
-    }
-}
-
-/// Generate XML property list `config.plist` representing the UTM bundle specification.
-#[must_use]
-pub fn generate_utm_plist(config: &UtmIsoConfig, vm_name: &str) -> String {
-    let arch_str = config.vm_arch.as_ref().map_or("aarch64", UtmArch::as_str);
-    let backend_str = config.vm_backend.as_str();
-    let mem_mb = config.memory.map_or(2048, |m| m.get());
-    let cpus = config.cpus.unwrap_or(2);
-    let uefi = if config.uefi_boot { "true" } else { "false" };
-    let hdd_if = config.hard_drive_interface.as_str();
-    let iso_if = config.iso_interface.as_str();
-    let display_str = config
-        .display_hardware_type
-        .as_ref()
-        .map_or("virtio-gpu-pci", UtmDisplayType::as_str);
-
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>Backend</key>
-	<string>{backend_str}</string>
-	<key>ConfigurationVersion</key>
-	<integer>4</integer>
-	<key>Information</key>
-	<dict>
-		<key>Icon</key>
-		<string>linux</string>
-		<key>Name</key>
-		<string>{vm_name}</string>
-	</dict>
-	<key>System</key>
-	<dict>
-		<key>Architecture</key>
-		<string>{arch_str}</string>
-		<key>CPUCount</key>
-		<integer>{cpus}</integer>
-		<key>Memory</key>
-		<integer>{mem_mb}</integer>
-		<key>UefiBoot</key>
-		<{uefi}/>
-	</dict>
-	<key>Display</key>
-	<dict>
-		<key>Hardware</key>
-		<string>{display_str}</string>
-	</dict>
-	<key>Drives</key>
-	<array>
-		<dict>
-			<key>DriveInterface</key>
-			<string>{hdd_if}</string>
-			<key>ImageName</key>
-			<string>disk-0.qcow2</string>
-			<key>Removable</key>
-			<false/>
-		</dict>
-		<dict>
-			<key>DriveInterface</key>
-			<string>{iso_if}</string>
-			<key>ImageName</key>
-			<string>cdrom-0.iso</string>
-			<key>Removable</key>
-			<true/>
-		</dict>
-	</array>
-</dict>
-</plist>
-"#
-    )
-}
 
 /// The `utm-iso` builder.
 #[derive(Debug, Clone)]
@@ -903,10 +156,15 @@ impl Step for StepRunVM {
                 state.http_port(),
                 None,
             );
-            let vnc_port = 5900;
-            let vnc_addr = format!("127.0.0.1:{vnc_port}");
-            crate::builder::virtualization::send_vnc_boot_command(&vnc_addr, None, &actions)
+            if let Some(vnc_addr) = state.get::<String>("vnc_addr") {
+                crate::builder::virtualization::send_vnc_boot_command(vnc_addr, None, &actions)
+                    .await?;
+            } else {
+                crate::builder::virtualization::send_apple_virtualization_boot_command(
+                    &vm_name, &actions, None,
+                )
                 .await?;
+            }
         }
 
         Ok(StepAction::Continue)
@@ -1037,7 +295,7 @@ impl Step for StepProvision {
             build_id: self.name.clone(),
             host: "utm".to_string(),
             user: "root".to_string(),
-            packer_run_uuid: "mocked-uuid".to_string(),
+            packer_run_uuid: uuid::Uuid::new_v4().to_string(),
             source_name: self.name.clone(),
             source_type: "utm-iso".to_string(),
             ..Default::default()
@@ -1203,45 +461,20 @@ impl Builder for UtmIsoBuilder {
 
         let mut runner = Runner::new(steps);
         let mut state = StateBag::new();
-        match runner.run(&mut state).await {
-            Ok(()) => {
-                runner.cleanup(&state).await;
-            }
-            Err(e) => {
-                match on_error {
-                    crate::engine::packer::OnErrorStrategy::Cleanup => {
-                        runner.cleanup(&state).await;
-                    }
-                    crate::engine::packer::OnErrorStrategy::Abort
-                    | crate::engine::packer::OnErrorStrategy::RunCleanupProvisioner => {}
-                    crate::engine::packer::OnErrorStrategy::Ask => {
-                        let msg = format!(
-                            "Build '{}' errored: {}
-Do you want to clean up? [y/N]: ",
-                            self.name(),
-                            e
-                        );
-                        if let Ok(ans) = ui.ask("stamp", &msg)
-                            && (ans == "y" || ans == "yes")
-                        {
-                            runner.cleanup(&state).await;
-                        }
-                    }
-                }
-                return Err(e);
-            }
-        }
+        runner
+            .run_with_strategy(&mut state, &self.name(), &ui, on_error)
+            .await?;
 
         let utm_bundle = state
             .get::<String>("utm_bundle")
             .cloned()
             .unwrap_or_default();
 
-        Ok(Box::new(crate::artifact::MockArtifact {
-            builder_id: self.name(),
-            id: format!("utm-bundle:{utm_bundle}"),
-            files: vec![],
-        }))
+        Ok(Box::new(BuildArtifact::with_builder(
+            self.name(),
+            format!("utm-bundle:{utm_bundle}"),
+            vec![],
+        )))
     }
 
     async fn cancel(&self) -> Result<(), StampError> {
@@ -1254,17 +487,13 @@ Do you want to clean up? [y/N]: ",
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::pedantic,
-    clippy::all,
-    for_loops_over_fallibles
-)]
 mod tests {
     use super::*;
     use crate::engine::hook::DefaultProvisionHook;
     use crate::engine::packer::OnErrorStrategy;
     use crate::engine::ui::Ui;
+    use crate::types::MemoryMb;
+    use std::str::FromStr;
 
     #[derive(Clone)]
     struct FailingProvisioner;
@@ -1283,33 +512,28 @@ mod tests {
     }
 
     #[test]
-    fn test_utm_derived_traits_and_enums() {
+    fn test_utm_derived_traits_and_enums() -> Result<(), std::convert::Infallible> {
         let config1 = UtmIsoConfig::default();
         let config2 = config1.clone();
         assert_eq!(config1, config2);
-        assert_eq!(format!("{config1:?}"), format!("{config2:?}"));
-
-        let b1 = UtmIsoBuilder::new(config1);
-        let b2 = b1.clone();
-        assert_eq!(format!("{b1:?}"), format!("{b2:?}"));
 
         // UtmBackend
         assert_eq!(UtmBackend::Qemu.as_str(), "qemu");
         assert_eq!(UtmBackend::Apple.as_str(), "apple");
         assert_eq!(format!("{}", UtmBackend::Qemu), "qemu");
-        assert_eq!(UtmBackend::from_str("apple").unwrap(), UtmBackend::Apple);
-        assert_eq!(UtmBackend::from_str("qemu").unwrap(), UtmBackend::Qemu);
-        assert_eq!(UtmBackend::from_str("other").unwrap(), UtmBackend::Qemu);
+        assert_eq!(UtmBackend::from_str("apple")?, UtmBackend::Apple);
+        assert_eq!(UtmBackend::from_str("qemu")?, UtmBackend::Qemu);
+        assert_eq!(UtmBackend::from_str("other")?, UtmBackend::Qemu);
 
         // UtmArch
         assert_eq!(UtmArch::Aarch64.as_str(), "aarch64");
         assert_eq!(UtmArch::X86_64.as_str(), "x86_64");
         assert_eq!(UtmArch::Custom("riscv64".to_string()).as_str(), "riscv64");
         assert_eq!(format!("{}", UtmArch::Aarch64), "aarch64");
-        assert_eq!(UtmArch::from_str("aarch64").unwrap(), UtmArch::Aarch64);
-        assert_eq!(UtmArch::from_str("x86_64").unwrap(), UtmArch::X86_64);
+        assert_eq!(UtmArch::from_str("aarch64")?, UtmArch::Aarch64);
+        assert_eq!(UtmArch::from_str("x86_64")?, UtmArch::X86_64);
         assert_eq!(
-            UtmArch::from_str("other").unwrap(),
+            UtmArch::from_str("other")?,
             UtmArch::Custom("other".to_string())
         );
 
@@ -1324,16 +548,13 @@ mod tests {
             "custom"
         );
         assert_eq!(format!("{}", UtmInterface::Nvme), "nvme");
-        assert_eq!(UtmInterface::from_str("nvme").unwrap(), UtmInterface::Nvme);
+        assert_eq!(UtmInterface::from_str("nvme")?, UtmInterface::Nvme);
+        assert_eq!(UtmInterface::from_str("virtio")?, UtmInterface::VirtIo);
+        assert_eq!(UtmInterface::from_str("sata")?, UtmInterface::Sata);
+        assert_eq!(UtmInterface::from_str("ide")?, UtmInterface::Ide);
+        assert_eq!(UtmInterface::from_str("usb")?, UtmInterface::Usb);
         assert_eq!(
-            UtmInterface::from_str("virtio").unwrap(),
-            UtmInterface::VirtIo
-        );
-        assert_eq!(UtmInterface::from_str("sata").unwrap(), UtmInterface::Sata);
-        assert_eq!(UtmInterface::from_str("ide").unwrap(), UtmInterface::Ide);
-        assert_eq!(UtmInterface::from_str("usb").unwrap(), UtmInterface::Usb);
-        assert_eq!(
-            UtmInterface::from_str("other").unwrap(),
+            UtmInterface::from_str("other")?,
             UtmInterface::Custom("other".to_string())
         );
 
@@ -1351,23 +572,20 @@ mod tests {
             "virtio-gpu-pci"
         );
         assert_eq!(
-            UtmDisplayType::from_str("virtio-gpu-pci").unwrap(),
+            UtmDisplayType::from_str("virtio-gpu-pci")?,
             UtmDisplayType::VirtIoGpuPci
         );
         assert_eq!(
-            UtmDisplayType::from_str("virtio-ramfb").unwrap(),
+            UtmDisplayType::from_str("virtio-ramfb")?,
             UtmDisplayType::VirtIoRamfb
         );
         assert_eq!(
-            UtmDisplayType::from_str("console").unwrap(),
+            UtmDisplayType::from_str("console")?,
             UtmDisplayType::Console
         );
+        assert_eq!(UtmDisplayType::from_str("none")?, UtmDisplayType::None);
         assert_eq!(
-            UtmDisplayType::from_str("none").unwrap(),
-            UtmDisplayType::None
-        );
-        assert_eq!(
-            UtmDisplayType::from_str("other").unwrap(),
+            UtmDisplayType::from_str("other")?,
             UtmDisplayType::Custom("other".to_string())
         );
 
@@ -1377,21 +595,22 @@ mod tests {
         assert_eq!(UtmGuestAdditionsMode::Disable.as_str(), "disable");
         assert_eq!(format!("{}", UtmGuestAdditionsMode::Disable), "disable");
         assert_eq!(
-            UtmGuestAdditionsMode::from_str("attach").unwrap(),
+            UtmGuestAdditionsMode::from_str("attach")?,
             UtmGuestAdditionsMode::Attach
         );
         assert_eq!(
-            UtmGuestAdditionsMode::from_str("upload").unwrap(),
+            UtmGuestAdditionsMode::from_str("upload")?,
             UtmGuestAdditionsMode::Upload
         );
         assert_eq!(
-            UtmGuestAdditionsMode::from_str("disable").unwrap(),
+            UtmGuestAdditionsMode::from_str("disable")?,
             UtmGuestAdditionsMode::Disable
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_utm_from_builder_config() {
+    async fn test_utm_from_builder_config() -> Result<(), StampError> {
         let mut builder_cfg = crate::template::BuilderConfig {
             builder_type: "utm-iso".to_string(),
             name: "bento-utm".to_string(),
@@ -1488,7 +707,7 @@ mod tests {
             "output-utm-custom".to_string(),
         );
 
-        let cfg = UtmIsoConfig::from_builder_config(&builder_cfg).unwrap();
+        let cfg = UtmIsoConfig::from_builder_config(&builder_cfg)?;
         assert_eq!(cfg.name, "bento-utm");
         assert_eq!(cfg.vm_name.as_deref(), Some("my-utm-vm"));
         assert_eq!(cfg.vm_arch, Some(UtmArch::Aarch64));
@@ -1523,10 +742,11 @@ mod tests {
         assert_eq!(cfg.disk_size, Some(MemoryMb::new(60000)));
         assert_eq!(cfg.shutdown_command.as_deref(), Some("poweroff"));
         assert_eq!(cfg.output_directory.as_deref(), Some("output-utm-custom"));
+        Ok(())
     }
 
     #[test]
-    fn test_utm_fallback_config_aliases() {
+    fn test_utm_fallback_config_aliases() -> Result<(), StampError> {
         let mut builder_cfg = crate::template::BuilderConfig {
             builder_type: "utm-iso".to_string(),
             name: "bento-utm".to_string(),
@@ -1616,7 +836,7 @@ mod tests {
             .config
             .insert("http_content".to_string(), "invalid json".to_string());
 
-        let cfg = UtmIsoConfig::from_builder_config(&builder_cfg).expect("parse utm config");
+        let cfg = UtmIsoConfig::from_builder_config(&builder_cfg)?;
         assert!(!cfg.hypervisor);
         assert!(!cfg.uefi_boot);
         assert_eq!(cfg.display_hardware_type, Some(UtmDisplayType::Console));
@@ -1639,326 +859,263 @@ mod tests {
         assert_eq!(cfg.http_port_min, Some(8000));
         assert_eq!(cfg.http_port_max, Some(8010));
         assert!(cfg.http_content.is_empty());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_utm_iso_run() {
-        let temp_dir = tempfile::tempdir();
-        assert!(temp_dir.is_ok());
-        for td in temp_dir {
-            let f_path = td.path().join("preseed.cfg");
-            let _ = tokio::fs::write(&f_path, b"d-i test").await;
-            let cd_path = td.path().join("user-data");
-            let _ = tokio::fs::write(&cd_path, b"#cloud-config").await;
+    async fn test_utm_iso_run() -> Result<(), StampError> {
+        let td = tempfile::tempdir()?;
+        let f_path = td.path().join("preseed.cfg");
+        tokio::fs::write(&f_path, b"d-i test").await?;
+        let cd_path = td.path().join("user-data");
+        tokio::fs::write(&cd_path, b"#cloud-config").await?;
 
-            let config = UtmIsoConfig {
-                name: "test-utm".to_string(),
-                vm_name: Some("test-vm".to_string()),
-                vm_arch: Some(UtmArch::Aarch64),
-                vm_backend: UtmBackend::Qemu,
-                vm_icon: Some("ubuntu".to_string()),
-                hypervisor: true,
-                uefi_boot: true,
-                display_hardware_type: Some(UtmDisplayType::VirtIoGpuPci),
-                hard_drive_interface: UtmInterface::Nvme,
-                iso_interface: UtmInterface::Usb,
-                guest_additions_mode: UtmGuestAdditionsMode::Attach,
-                guest_additions_path: Some("/tmp/spice.iso".to_string()),
-                cpus: Some(2),
-                memory: Some(MemoryMb::new(2048)),
-                disk_size: Some(MemoryMb::new(20480)),
-                iso_url: Some("/tmp/ubuntu.iso".to_string()),
-                floppy_files: vec![f_path.to_string_lossy().to_string()],
-                cd_files: vec![cd_path.to_string_lossy().to_string()],
-                boot_command: Some(vec!["<enter>".to_string()]),
-                shutdown_command: Some("poweroff".to_string()),
-                ssh_port: Some(Port::new(2222)),
-                output_directory: Some(td.path().to_string_lossy().to_string()),
-                ..Default::default()
-            };
-            let builder = UtmIsoBuilder::new(config);
+        let config = UtmIsoConfig {
+            name: "test-utm".to_string(),
+            vm_name: Some("test-vm".to_string()),
+            vm_arch: Some(UtmArch::Aarch64),
+            vm_backend: UtmBackend::Qemu,
+            vm_icon: Some("ubuntu".to_string()),
+            hypervisor: true,
+            uefi_boot: true,
+            display_hardware_type: Some(UtmDisplayType::VirtIoGpuPci),
+            hard_drive_interface: UtmInterface::Nvme,
+            iso_interface: UtmInterface::Usb,
+            guest_additions_mode: UtmGuestAdditionsMode::Attach,
+            guest_additions_path: Some("/tmp/spice.iso".to_string()),
+            cpus: Some(2),
+            memory: Some(MemoryMb::new(2048)),
+            disk_size: Some(MemoryMb::new(20480)),
+            iso_url: Some("/tmp/ubuntu.iso".to_string()),
+            floppy_files: vec![f_path.to_string_lossy().to_string()],
+            cd_files: vec![cd_path.to_string_lossy().to_string()],
+            boot_command: Some(vec!["<enter>".to_string()]),
+            shutdown_command: Some("poweroff".to_string()),
+            ssh_port: Some(Port::new(2222)),
+            output_directory: Some(td.path().to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let builder = UtmIsoBuilder::new(config);
 
-            assert!(builder.prepare().await.is_ok());
-            assert_eq!(builder.name(), "test-utm");
+        builder.prepare().await?;
+        assert_eq!(builder.name(), "test-utm");
 
-            let hook = Arc::new(DefaultProvisionHook {
-                provisioners: Arc::new(vec![]),
-                error_cleanup_provisioners: Arc::new(vec![]),
-            });
-            let ui = Arc::new(Ui::new(
-                crate::engine::packer::FeatureState::Disabled,
-                crate::engine::packer::FeatureState::Disabled,
-                crate::engine::packer::FeatureState::Disabled,
-            ));
+        let hook = Arc::new(DefaultProvisionHook {
+            provisioners: Arc::new(vec![]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let ui = Arc::new(Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
 
-            let res = builder
-                .run(hook.clone(), ui.clone(), OnErrorStrategy::Cleanup)
-                .await;
-            assert!(res.is_ok());
-            for art in res {
-                assert!(art.id().contains("test-vm.utm"));
-            }
+        let art = builder
+            .run(hook.clone(), ui.clone(), OnErrorStrategy::Cleanup)
+            .await?;
+        assert!(art.id().contains("test-vm.utm"));
+        assert_eq!(art.builder_id(), "test-utm");
 
-            // Verify bundle structure
-            let bundle_path = td.path().join("test-vm.utm");
-            assert!(bundle_path.exists());
-            assert!(bundle_path.join("config.plist").exists());
+        let bundle_path = td.path().join("test-vm.utm");
+        assert!(bundle_path.exists());
+        assert!(bundle_path.join("config.plist").exists());
 
-            // Run with communicator: winrm and guest_additions_mode: upload
-            let winrm_cfg = UtmIsoConfig {
-                name: "winrm-utm".to_string(),
-                communicator: Some("winrm".to_string()),
-                winrm_host_port: Some(Port::new(5985)),
-                guest_additions_mode: UtmGuestAdditionsMode::Upload,
-                output_directory: Some(td.path().to_string_lossy().to_string()),
-                ..Default::default()
-            };
-            let b_winrm = UtmIsoBuilder::new(winrm_cfg);
-            let res_winrm = b_winrm
-                .run(hook.clone(), ui.clone(), OnErrorStrategy::Cleanup)
-                .await;
-            assert!(res_winrm.is_ok());
+        let winrm_cfg = UtmIsoConfig {
+            name: "winrm-utm".to_string(),
+            communicator: Some("winrm".to_string()),
+            winrm_host_port: Some(Port::new(5985)),
+            guest_additions_mode: UtmGuestAdditionsMode::Upload,
+            output_directory: Some(td.path().to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let b_winrm = UtmIsoBuilder::new(winrm_cfg);
+        let _ = b_winrm.run(hook, ui, OnErrorStrategy::Cleanup).await?;
 
-            assert!(builder.cancel().await.is_ok());
+        builder.cancel().await
+    }
+
+    #[tokio::test]
+    async fn test_utmctl_commands_and_helpers() -> Result<(), StampError> {
+        let td = tempfile::tempdir()?;
+        run_utmctl(&["list"]).await?;
+        assert!(
+            run_utmctl_with_cmd("/nonexistent_utmctl", &["list"])
+                .await
+                .is_err()
+        );
+        assert!(
+            run_utmctl_with_cmd("sh", &["-c", "echo 'utmctl error' >&2; exit 1"])
+                .await
+                .is_err()
+        );
+        assert!(
+            run_utmctl_with_cmd("sh", &["-c", "echo 'stdout failure'; exit 1"])
+                .await
+                .is_err()
+        );
+
+        assert_eq!(discover_utm_guest_ip("test-vm").await?, "127.0.0.1");
+
+        let script = td.path().join("fake_utmctl.sh");
+        tokio::fs::write(&script, b"#!/bin/sh\necho 192.168.64.5\n").await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))?;
         }
-    }
+        let ip_sh = discover_utm_guest_ip_with_cmd(&script.to_string_lossy(), "test-vm").await?;
+        assert_eq!(ip_sh, "192.168.64.5");
 
-    #[tokio::test]
-    async fn test_utmctl_commands_and_helpers() {
-        let temp_dir = tempfile::tempdir();
-        assert!(temp_dir.is_ok());
-        for td in temp_dir {
-            // run_utmctl
-            assert!(run_utmctl(&["list"]).await.is_ok());
-            assert!(
-                run_utmctl_with_cmd("/nonexistent_utmctl", &["list"])
-                    .await
-                    .is_err()
+        let script_unknown = td.path().join("fake_utmctl_unknown.sh");
+        tokio::fs::write(&script_unknown, b"#!/bin/sh\necho 'unknown'\n").await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_unknown, std::fs::Permissions::from_mode(0o755))?;
+        }
+        let ip_unknown =
+            discover_utm_guest_ip_with_cmd(&script_unknown.to_string_lossy(), "test-vm").await?;
+        assert_eq!(ip_unknown, "127.0.0.1");
+
+        let script_prefix = td.path().join("fake_utmctl_prefix.sh");
+        tokio::fs::write(&script_prefix, b"#!/bin/sh\necho 'ip-address error'\n").await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_prefix, std::fs::Permissions::from_mode(0o755))?;
+        }
+        let ip_prefix =
+            discover_utm_guest_ip_with_cmd(&script_prefix.to_string_lossy(), "test-vm").await?;
+        assert_eq!(ip_prefix, "127.0.0.1");
+
+        assert!(
+            discover_utm_guest_ip_with_cmd("/nonexistent_utmctl_binary_path", "test-vm")
+                .await
+                .is_err()
+        );
+
+        let fake_utmctl = td.path().join("utmctl");
+        tokio::fs::write(&fake_utmctl, b"#!/bin/sh\n").await?;
+        {
+            let _env = crate::utils::ScopedEnvVar::set(
+                "UTMCTL_PATH",
+                fake_utmctl.to_string_lossy().as_ref(),
             );
-            assert!(
-                run_utmctl_with_cmd("sh", &["-c", "echo 'utmctl error' >&2; exit 1"])
-                    .await
-                    .is_err()
-            );
-            assert!(
-                run_utmctl_with_cmd("sh", &["-c", "echo 'stdout failure'; exit 1"])
-                    .await
-                    .is_err()
-            );
-
-            // discover_utm_guest_ip
-            assert_eq!(
-                discover_utm_guest_ip("test-vm").await.expect("ip default"),
-                "127.0.0.1"
-            );
-
-            let script = td.path().join("fake_utmctl.sh");
-            let _ = tokio::fs::write(
-                &script,
-                b"#!/bin/sh
-echo 192.168.64.5
-",
-            )
-            .await;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755));
-            }
-            let ip_sh = discover_utm_guest_ip_with_cmd(&script.to_string_lossy(), "test-vm").await;
-            assert_eq!(ip_sh.expect("ip from script"), "192.168.64.5");
-
-            let script_unknown = td.path().join("fake_utmctl_unknown.sh");
-            let _ = tokio::fs::write(
-                &script_unknown,
-                b"#!/bin/sh
-echo 'unknown'
-",
-            )
-            .await;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(
-                    &script_unknown,
-                    std::fs::Permissions::from_mode(0o755),
-                );
-            }
-            let ip_unknown =
-                discover_utm_guest_ip_with_cmd(&script_unknown.to_string_lossy(), "test-vm").await;
-            assert_eq!(ip_unknown.expect("unknown fallback"), "127.0.0.1");
-
-            let script_prefix = td.path().join("fake_utmctl_prefix.sh");
-            let _ = tokio::fs::write(
-                &script_prefix,
-                b"#!/bin/sh
-echo 'ip-address error'
-",
-            )
-            .await;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(
-                    &script_prefix,
-                    std::fs::Permissions::from_mode(0o755),
-                );
-            }
-            let ip_prefix =
-                discover_utm_guest_ip_with_cmd(&script_prefix.to_string_lossy(), "test-vm").await;
-            assert_eq!(ip_prefix.expect("prefix fallback"), "127.0.0.1");
-
-            assert!(
-                discover_utm_guest_ip_with_cmd("/nonexistent_utmctl_binary_path", "test-vm")
-                    .await
-                    .is_err()
-            );
-
-            // find_utmctl_binary
-            let fake_utmctl = td.path().join("utmctl");
-            let _ = tokio::fs::write(
-                &fake_utmctl,
-                b"#!/bin/sh
-",
-            )
-            .await;
-            unsafe {
-                std::env::set_var("UTMCTL_PATH", fake_utmctl.to_string_lossy().to_string());
-            }
             assert_eq!(find_utmctl_binary(), fake_utmctl);
-            unsafe {
-                std::env::set_var("UTMCTL_PATH", "/nonexistent/utmctl/path");
-            }
-            let _ = find_utmctl_binary();
-            unsafe {
-                std::env::remove_var("UTMCTL_PATH");
-            }
-            let _ = find_utmctl_binary();
-
-            unsafe {
-                std::env::set_var("UTMCTL_TEST_EMPTY_CANDIDATES", "1");
-            }
-            assert_eq!(find_utmctl_binary(), PathBuf::from("utmctl"));
-            unsafe {
-                std::env::remove_var("UTMCTL_TEST_EMPTY_CANDIDATES");
-            }
-
-            unsafe {
-                std::env::set_var("UTMCTL_REAL_BIN", "1");
-            }
-            assert_eq!(utmctl_binary(), "utmctl");
-            unsafe {
-                std::env::remove_var("UTMCTL_REAL_BIN");
-            }
-            assert_eq!(utmctl_binary(), "echo");
-
-            let b_cancel = UtmIsoBuilder::new(UtmIsoConfig::default());
-            assert!(b_cancel.cancel().await.is_ok());
-
-            // parse_string_list with json and csv
-            assert_eq!(parse_string_list(r#"["x", "y"]"#), vec!["x", "y"]);
-            assert_eq!(parse_string_list("a,,b"), vec!["a", "b"]);
-
-            // generate_utm_plist
-            let config = UtmIsoConfig {
-                uefi_boot: false,
-                ..Default::default()
-            };
-            let plist = generate_utm_plist(&config, "plist-test");
-            assert!(plist.contains(
-                "<key>Name</key>
-		<string>plist-test</string>"
-            ));
-            assert!(plist.contains("<false/>"));
-
-            // StepShutdown without shutdown_command
-            let ui = Arc::new(Ui::new(
-                crate::engine::packer::FeatureState::Disabled,
-                crate::engine::packer::FeatureState::Disabled,
-                crate::engine::packer::FeatureState::Disabled,
-            ));
-            let mut step_shutdown = StepShutdown {
-                ui: ui.clone(),
-                name: "shutdown-test".to_string(),
-                config: UtmIsoConfig::default(),
-            };
-            let mut state = StateBag::new();
-            state.put("vm_name", "test-vm".to_string());
-            assert!(step_shutdown.run(&mut state).await.is_ok());
-            step_shutdown.cleanup(&state).await;
-
-            // StepCreateBundle cleanup
-            let mut step_create = StepCreateBundle {
-                ui: ui.clone(),
-                name: "create-test".to_string(),
-                config: UtmIsoConfig::default(),
-            };
-            state.put("utm_bundle", "/path/to/test.utm".to_string());
-            step_create.cleanup(&state).await;
-
-            // StepRunVM cleanup
-            let mut step_run = StepRunVM {
-                ui: ui.clone(),
-                name: "run-test".to_string(),
-                config: UtmIsoConfig::default(),
-            };
-            step_run.cleanup(&state).await;
-
-            // StepUploadAdditions
-            let mut step_upload = StepUploadAdditions {
-                ui: ui.clone(),
-                name: "upload-test".to_string(),
-                config: UtmIsoConfig {
-                    guest_additions_mode: UtmGuestAdditionsMode::Upload,
-                    ..Default::default()
-                },
-            };
-            let comm: Arc<dyn Communicator> =
-                Arc::new(crate::communicator::mock::MockCommunicator::new());
-            state.put("communicator", comm);
-            assert!(step_upload.run(&mut state).await.is_ok());
-            step_upload.cleanup(&state).await;
-
-            // StepExport cleanup and fallback run
-            let mut step_export = StepExport {
-                ui: ui.clone(),
-                name: "export-test".to_string(),
-                config: UtmIsoConfig::default(),
-            };
-            step_export.cleanup(&state).await;
-            let mut empty_state = StateBag::new();
-            assert!(step_export.run(&mut empty_state).await.is_ok());
-
-            // StepRunVM run with empty state
-            let mut step_run_empty = StepRunVM {
-                ui: ui.clone(),
-                name: "run-empty".to_string(),
-                config: UtmIsoConfig::default(),
-            };
-            assert!(step_run_empty.run(&mut empty_state).await.is_ok());
-
-            // StepCreateBundle cleanup with and without bundle
-            step_create.cleanup(&empty_state).await;
-
-            // StepProvision failure
-            let mut step_prov_fail = StepProvision {
-                ui,
-                name: "prov-fail".to_string(),
-                hook: Arc::new(DefaultProvisionHook {
-                    provisioners: Arc::new(vec![Box::new(FailingProvisioner)]),
-                    error_cleanup_provisioners: Arc::new(vec![]),
-                }),
-                config: UtmIsoConfig::default(),
-            };
-            assert!(step_prov_fail.run(&mut state).await.is_err());
-            step_prov_fail.cleanup(&state).await;
         }
+        {
+            let _env = crate::utils::ScopedEnvVar::set("UTMCTL_PATH", "/nonexistent/utmctl/path");
+            let _ = find_utmctl_binary();
+        }
+        let _ = find_utmctl_binary();
+        {
+            let _env = crate::utils::ScopedEnvVar::set("UTMCTL_TEST_EMPTY_CANDIDATES", "1");
+            assert_eq!(find_utmctl_binary(), PathBuf::from("utmctl"));
+        }
+        assert_eq!(utmctl_binary(), "echo");
+
+        let b_cancel = UtmIsoBuilder::new(UtmIsoConfig::default());
+        b_cancel.cancel().await?;
+
+        assert_eq!(parse_string_list(r#"["x", "y"]"#), vec!["x", "y"]);
+        assert_eq!(parse_string_list("a,,b"), vec!["a", "b"]);
+
+        let config = UtmIsoConfig {
+            uefi_boot: false,
+            ..Default::default()
+        };
+        let plist = generate_utm_plist(&config, "plist-test");
+        assert!(plist.contains("<key>Name</key>\n\t\t<string>plist-test</string>"));
+        assert!(plist.contains("<false/>"));
+
+        let ui = Arc::new(Ui::new(
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+            crate::engine::packer::FeatureState::Disabled,
+        ));
+        let mut step_shutdown = StepShutdown {
+            ui: ui.clone(),
+            name: "shutdown-test".to_string(),
+            config: UtmIsoConfig::default(),
+        };
+        let mut state = StateBag::new();
+        state.put("vm_name", "test-vm".to_string());
+        step_shutdown.run(&mut state).await?;
+        step_shutdown.cleanup(&state).await;
+
+        let mut step_create = StepCreateBundle {
+            ui: ui.clone(),
+            name: "create-test".to_string(),
+            config: UtmIsoConfig::default(),
+        };
+        state.put(
+            "utm_bundle",
+            td.path().join("test.utm").to_string_lossy().to_string(),
+        );
+        step_create.cleanup(&state).await;
+
+        let mut step_run = StepRunVM {
+            ui: ui.clone(),
+            name: "run-test".to_string(),
+            config: UtmIsoConfig::default(),
+        };
+        step_run.cleanup(&state).await;
+
+        let mut step_upload = StepUploadAdditions {
+            ui: ui.clone(),
+            name: "upload-test".to_string(),
+            config: UtmIsoConfig {
+                guest_additions_mode: UtmGuestAdditionsMode::Upload,
+                ..Default::default()
+            },
+        };
+        let comm: Arc<dyn Communicator> =
+            Arc::new(crate::communicator::mock::MockCommunicator::new());
+        state.put("communicator", comm);
+        step_upload.run(&mut state).await?;
+        step_upload.cleanup(&state).await;
+
+        let mut step_export = StepExport {
+            ui: ui.clone(),
+            name: "export-test".to_string(),
+            config: UtmIsoConfig {
+                output_directory: Some(td.path().to_string_lossy().to_string()),
+                ..Default::default()
+            },
+        };
+        step_export.cleanup(&state).await;
+        let mut empty_state = StateBag::new();
+        step_export.run(&mut empty_state).await?;
+
+        let mut step_run_empty = StepRunVM {
+            ui: ui.clone(),
+            name: "run-empty".to_string(),
+            config: UtmIsoConfig::default(),
+        };
+        step_run_empty.run(&mut empty_state).await?;
+
+        step_create.cleanup(&empty_state).await;
+
+        let mut step_prov_fail = StepProvision {
+            ui,
+            name: "prov-fail".to_string(),
+            hook: Arc::new(DefaultProvisionHook {
+                provisioners: Arc::new(vec![Box::new(FailingProvisioner)]),
+                error_cleanup_provisioners: Arc::new(vec![]),
+            }),
+            config: UtmIsoConfig::default(),
+        };
+        assert!(step_prov_fail.run(&mut state).await.is_err());
+        step_prov_fail.cleanup(&state).await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_utm_error_strategies_and_prepare() {
+    async fn test_utm_error_strategies_and_prepare() -> Result<(), StampError> {
+        let td = tempfile::tempdir()?;
         let config = UtmIsoConfig {
             name: "test-utm-err".to_string(),
+            output_directory: Some(td.path().to_string_lossy().to_string()),
             ..Default::default()
         };
         let builder = UtmIsoBuilder::new(config);
@@ -2020,8 +1177,8 @@ echo 'ip-address error'
                 .is_err()
         );
 
-        // Prepare validation
         let empty_b = UtmIsoBuilder::new(UtmIsoConfig::default());
         assert!(empty_b.prepare().await.is_err());
+        Ok(())
     }
 }

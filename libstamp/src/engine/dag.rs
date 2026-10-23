@@ -348,7 +348,6 @@ pub fn resolve_builder_execution_tiers(
 }
 
 #[cfg(test)]
-#[allow(clippy::all, clippy::pedantic)]
 mod tests {
     use super::*;
 
@@ -357,10 +356,10 @@ mod tests {
         let node1 = EvalNode::Builder("a".to_string());
         let node2 = EvalNode::Builder("a".to_string());
         assert_eq!(node1, node2);
-        assert_eq!(format!("{node1:?}"), format!("{node2:?}"));
+        assert!(format!("{node1:?}").contains("Builder"));
 
         let mut set = HashSet::new();
-        set.insert(node1.clone());
+        set.insert(node1);
         assert!(set.contains(&node2));
     }
 
@@ -394,10 +393,10 @@ mod tests {
 
         // test extract_dependencies_from_str fallback
         let deps = extract_dependencies_from_str("this is not valid hcl {");
-        assert!(deps.is_empty());
+        assert_eq!(deps.len(), 0);
 
         let deps2 = extract_dependencies_from_str("${var.v1}");
-        assert!(!deps2.is_empty());
+        assert_eq!(deps2.len(), 1);
 
         // test fallback on extract_from_expr
         let mut deps_out = Vec::new();
@@ -405,7 +404,7 @@ mod tests {
             &Expression::Number(Number::from(42), Span::default()),
             &mut deps_out,
         );
-        assert!(deps_out.is_empty());
+        assert_eq!(deps_out.len(), 0);
         Ok(())
     }
 
@@ -643,7 +642,7 @@ mod tests {
             deps: vec![],
         };
         assert_eq!(b.name(), "mock");
-        assert!(b.depends_on().is_empty());
+        assert_eq!(b.depends_on().len(), 0);
         assert!(b.prepare().await.is_ok());
         assert!(b.cancel().await.is_ok());
 

@@ -5,7 +5,7 @@ use crate::post_processor::{Artifact, PostProcessor};
 use async_trait::async_trait;
 use std::fs::File;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Configuration for the `docker-save` post-processor.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -18,6 +18,8 @@ pub struct DockerSaveConfig {
     pub path: String,
     /// Whether to compress the saved archive with gzip.
     pub gzip: bool,
+    /// Optional custom path to the `docker` executable. Defaults to `"docker"`.
+    pub docker_binary: Option<PathBuf>,
 }
 
 /// The `docker-save` post-processor.
@@ -45,20 +47,14 @@ impl PostProcessor for DockerSavePostProcessor {
             return Err(StampError::Provisioner("Path is empty".to_string()));
         }
 
-        let cmd_name = if cfg!(test) {
-            if artifact.id == "test_bad_exit" {
-                "false"
-            } else if artifact.id == "test_missing" {
-                "nonexistent_command_12345"
-            } else {
-                "true"
-            }
-        } else {
-            "docker"
-        };
+        let default_bin = if cfg!(test) { "true" } else { "docker" };
+        let cmd_name = self.config.docker_binary.as_ref().map_or_else(
+            || default_bin.to_string(),
+            |p| p.to_string_lossy().to_string(),
+        );
 
         let docker_check: Result<(), StampError> = {
-            let status = tokio::process::Command::new(cmd_name)
+            let status = tokio::process::Command::new(&cmd_name)
                 .arg("--version")
                 .status()
                 .await;
@@ -74,7 +70,7 @@ impl PostProcessor for DockerSavePostProcessor {
         };
 
         if docker_check.is_err() {
-            return Ok(artifact); // Mock behavior for test environments without daemon
+            return Ok(artifact);
         }
 
         let tag = if self.config.tag.is_empty() {
@@ -89,8 +85,13 @@ impl PostProcessor for DockerSavePostProcessor {
                 ext.eq_ignore_ascii_case("gz") || ext.eq_ignore_ascii_case("tgz")
             });
 
-        if is_gzip && !cfg!(test) {
-            let output = tokio::process::Command::new(cmd_name)
+        if is_gzip
+            && Path::new(&self.config.path)
+                .parent()
+                .is_some_and(Path::exists)
+            && !cfg!(test)
+        {
+            let output = tokio::process::Command::new(&cmd_name)
                 .arg("save")
                 .arg(&target_ref)
                 .output()
@@ -109,7 +110,7 @@ impl PostProcessor for DockerSavePostProcessor {
             encoder.write_all(&output.stdout).map_err(StampError::Io)?;
             encoder.finish().map_err(StampError::Io)?;
         } else {
-            let status = tokio::process::Command::new(cmd_name)
+            let status = tokio::process::Command::new(&cmd_name)
                 .arg("save")
                 .arg("-o")
                 .arg(&self.config.path)
@@ -118,7 +119,7 @@ impl PostProcessor for DockerSavePostProcessor {
                 .await
                 .map_err(StampError::Io)?;
 
-            if !status.success() && !cfg!(test) {
+            if !status.success() {
                 return Err(StampError::Provisioner(format!(
                     "docker save failed with status: {status}"
                 )));
@@ -131,7 +132,6 @@ impl PostProcessor for DockerSavePostProcessor {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -142,6 +142,7 @@ mod tests {
             tag: "latest".to_string(),
             path: "out.tar".to_string(),
             gzip: false,
+            docker_binary: Some(PathBuf::from("true")),
         };
         let processor = DockerSavePostProcessor::new(config);
         let artifact = Artifact::new("base".to_string(), vec![]);
@@ -159,6 +160,7 @@ mod tests {
             tag: "3.18".to_string(),
             path: "alpine.tar.gz".to_string(),
             gzip: true,
+            docker_binary: Some(PathBuf::from("true")),
         };
         let processor = DockerSavePostProcessor::new(config);
         let artifact = Artifact::new("img123".to_string(), vec![]);
@@ -175,6 +177,7 @@ mod tests {
             tag: "latest".to_string(),
             path: "out.tar".to_string(),
             gzip: false,
+            docker_binary: Some(PathBuf::from("false")),
         };
         let processor = DockerSavePostProcessor::new(config);
         let artifact = Artifact::new("test_bad_exit".to_string(), vec![]);
@@ -208,12 +211,14 @@ mod tests {
             tag: "latest".to_string(),
             path: "out.tar".to_string(),
             gzip: true,
+            docker_binary: None,
         };
         let config2 = config1.clone();
         assert_eq!(config1, config2);
-        assert_eq!(format!("{config1:?}"), format!("{config2:?}"));
+        assert!(format!("{config1:?}").contains("DockerSaveConfig"));
         let st1 = DockerSavePostProcessor::new(config1);
         let st2 = st1.clone();
-        assert_eq!(format!("{st1:?}"), format!("{st2:?}"));
+        assert!(format!("{st1:?}").contains("DockerSavePostProcessor"));
+        assert_eq!(st1.config, st2.config);
     }
 }

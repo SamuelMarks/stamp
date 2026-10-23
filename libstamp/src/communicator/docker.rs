@@ -726,17 +726,8 @@ impl DockerCommunicator {
 #[async_trait]
 impl Communicator for DockerCommunicator {
     async fn execute(&self, cmd: &Command) -> Result<CommandResult, StampError> {
-        if self.config.container_id.as_str() == "invalid_container" {
+        if self.config.container_id.as_str().trim().is_empty() {
             return Err(StampError::Execution("No such container".to_string()));
-        }
-        if self.config.container_id.as_str() == "test_container"
-            || std::env::var("STAMP_TEST_MODE").is_ok()
-        {
-            return Ok(CommandResult {
-                exit_code: 0,
-                stdout: String::new(),
-                stderr: String::new(),
-            });
         }
 
         match &self.config.transport {
@@ -747,13 +738,7 @@ impl Communicator for DockerCommunicator {
                     self.execute_cli(cmd).await
                 }
             }
-            DockerTransport::Tcp(addr) => {
-                if let Ok(res) = self.execute_api_tcp(addr, cmd).await {
-                    Ok(res)
-                } else {
-                    self.execute_cli(cmd).await
-                }
-            }
+            DockerTransport::Tcp(addr) => self.execute_api_tcp(addr, cmd).await,
             DockerTransport::Cli => self.execute_cli(cmd).await,
         }
     }
@@ -763,13 +748,8 @@ impl Communicator for DockerCommunicator {
         local_path: &FilePath,
         remote_path: &FilePath,
     ) -> Result<(), StampError> {
-        if self.config.container_id.as_str() == "invalid_container" {
+        if self.config.container_id.as_str().trim().is_empty() {
             return Err(StampError::Execution("No such container".to_string()));
-        }
-        if self.config.container_id.as_str() == "test_container"
-            || std::env::var("STAMP_TEST_MODE").is_ok()
-        {
-            return Ok(());
         }
 
         match &self.config.transport {
@@ -792,13 +772,8 @@ impl Communicator for DockerCommunicator {
         remote_path: &FilePath,
         local_path: &FilePath,
     ) -> Result<(), StampError> {
-        if self.config.container_id.as_str() == "invalid_container" {
+        if self.config.container_id.as_str().trim().is_empty() {
             return Err(StampError::Execution("No such container".to_string()));
-        }
-        if self.config.container_id.as_str() == "test_container"
-            || std::env::var("STAMP_TEST_MODE").is_ok()
-        {
-            return Ok(());
         }
 
         match &self.config.transport {
@@ -895,7 +870,7 @@ mod tests {
         std::fs::write(&source_file, "hello archive test")?;
 
         let tar_bytes = create_tar_archive(&source_file)?;
-        assert!(!tar_bytes.is_empty());
+        assert_ne!(tar_bytes.len(), 0);
 
         let extract_dir = temp_dir.path().join("extracted");
         std::fs::create_dir_all(&extract_dir)?;
@@ -922,19 +897,35 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_docker_communicator_execution() -> Result<(), StampError> {
-        let config = DockerConfig::new("test_container");
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp_dir = tempfile::tempdir()?;
+        let mock_bin = temp_dir.path().join("mock_docker_exec.sh");
+        std::fs::write(&mock_bin, "#!/bin/sh\nexit 0\n")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&mock_bin, std::fs::Permissions::from_mode(0o755))?;
+        }
+        let _env = crate::utils::ScopedEnvVar::set("DOCKER_EXECUTABLE", &mock_bin);
+
+        let mut config = DockerConfig::new("valid_container");
+        config.transport = DockerTransport::Cli;
         let comm = DockerCommunicator::new(config);
 
         let res = comm.execute(&Command::new("echo hi".to_string())).await?;
         assert_eq!(res.exit_code, 0);
 
-        let file_path = FilePath::new(PathBuf::from("/tmp/test"));
+        let file_path = FilePath::new(temp_dir.path().join("test"));
+        std::fs::write(file_path.get(), "test")?;
         comm.upload(&file_path, &file_path).await?;
         comm.download(&file_path, &file_path).await?;
 
-        // Test invalid container error
-        let invalid_config = DockerConfig::new("invalid_container");
+        // Test empty container ID error
+        let invalid_config = DockerConfig::new("");
         let invalid_comm = DockerCommunicator::new(invalid_config);
         let err_res = invalid_comm.execute(&Command::new("ls".to_string())).await;
         assert!(err_res.is_err());
@@ -1097,18 +1088,23 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_docker_real_unix_socket_errors() -> Result<(), StampError> {
-        let _guard = crate::utils::ENV_MUTEX.lock();
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _env = crate::utils::ScopedEnvVar::set("DOCKER_EXECUTABLE", "false");
         let temp_dir = tempfile::tempdir().map_err(StampError::Io)?;
 
-        // 1. Non-existent socket path
+        // 1. Non-existent socket path falls back to CLI (which runs `false` -> exit code 1 / upload err)
         let bad_sock = temp_dir.path().join("nonexistent.sock");
         let mut bad_cfg = DockerConfig::new("c_bad_sock");
         bad_cfg.transport = DockerTransport::UnixSocket(bad_sock);
         let bad_comm = DockerCommunicator::new(bad_cfg);
 
         let dummy = FilePath::new(PathBuf::from("/tmp/dummy"));
-        let _ = bad_comm.execute(&Command::new("true".to_string())).await;
+        let exec_res = bad_comm.execute(&Command::new("true".to_string())).await?;
+        assert_ne!(exec_res.exit_code, 0);
         assert!(bad_comm.upload(&dummy, &dummy).await.is_err());
         assert!(bad_comm.download(&dummy, &dummy).await.is_err());
 
@@ -1183,17 +1179,22 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_docker_cli_and_tcp_transport_branches() -> Result<(), StampError> {
-        let _guard = crate::utils::ENV_MUTEX.lock();
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _env = crate::utils::ScopedEnvVar::set("DOCKER_EXECUTABLE", "false");
         let dummy = FilePath::new(PathBuf::from("/tmp/nonexistent_test_12345"));
 
         // CLI transport
         let mut cli_cfg = DockerConfig::new("c_cli_test");
         cli_cfg.transport = DockerTransport::Cli;
         let cli_comm = DockerCommunicator::new(cli_cfg);
-        let _ = cli_comm
+        let cli_exec_res = cli_comm
             .execute(&Command::new("echo test".to_string()))
-            .await;
+            .await?;
+        assert_ne!(cli_exec_res.exit_code, 0);
         assert!(cli_comm.upload(&dummy, &dummy).await.is_err());
         assert!(cli_comm.download(&dummy, &dummy).await.is_err());
 
@@ -1246,13 +1247,16 @@ mod tests {
         assert_eq!(tcp_res.stderr, "tcp_err\n");
         let _ = tcp_server_task.await;
 
-        // TCP transport fallback when server is unreachable
+        // TCP transport error when server is unreachable
         let mut tcp_cfg = DockerConfig::new("c_tcp_test");
         tcp_cfg.transport = DockerTransport::Tcp("127.0.0.1:1".to_string());
         let tcp_comm = DockerCommunicator::new(tcp_cfg);
-        let _ = tcp_comm
-            .execute(&Command::new("echo test".to_string()))
-            .await;
+        assert!(
+            tcp_comm
+                .execute(&Command::new("echo test".to_string()))
+                .await
+                .is_err()
+        );
         assert!(tcp_comm.upload(&dummy, &dummy).await.is_err());
         assert!(tcp_comm.download(&dummy, &dummy).await.is_err());
 
@@ -1272,6 +1276,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_docker_mock_cli_executable() -> Result<(), StampError> {
         #[cfg(unix)]
         {
@@ -1282,10 +1287,10 @@ mod tests {
             std::fs::set_permissions(&mock_bin, std::fs::Permissions::from_mode(0o755))
                 .map_err(StampError::Io)?;
 
-            let _guard = crate::utils::ENV_MUTEX.lock();
-            unsafe {
-                std::env::set_var("DOCKER_EXECUTABLE", mock_bin.to_string_lossy().as_ref());
-            }
+            let _guard = crate::utils::ENV_MUTEX
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _env = crate::utils::ScopedEnvVar::set("DOCKER_EXECUTABLE", &mock_bin);
 
             let mut cli_cfg = DockerConfig::new("c_mock_cli");
             cli_cfg.transport = DockerTransport::Cli;
@@ -1300,10 +1305,6 @@ mod tests {
             std::fs::write(dummy.get(), "ok").map_err(StampError::Io)?;
             comm.upload(&dummy, &dummy).await?;
             comm.download(&dummy, &dummy).await?;
-
-            unsafe {
-                std::env::remove_var("DOCKER_EXECUTABLE");
-            }
         }
         Ok(())
     }

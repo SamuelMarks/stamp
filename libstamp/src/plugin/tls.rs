@@ -153,13 +153,12 @@ impl MtlsCertificates {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_ephemeral_mtls_generation_and_encoding() {
-        let certs = MtlsCertificates::generate().unwrap();
+    fn test_ephemeral_mtls_generation_and_encoding() -> Result<(), StampError> {
+        let certs = MtlsCertificates::generate()?;
         assert!(certs.ca_cert_pem.contains("BEGIN CERTIFICATE"));
         assert!(certs.server_cert_pem.contains("BEGIN CERTIFICATE"));
         assert!(certs.server_key_pem.contains("BEGIN PRIVATE KEY"));
@@ -167,15 +166,16 @@ mod tests {
         assert!(certs.client_key_pem.contains("BEGIN PRIVATE KEY"));
 
         let b64_server = certs.server_cert_base64();
-        assert!(!b64_server.is_empty());
+        assert_ne!(b64_server, "");
 
         let b64_client = certs.client_cert_base64();
-        assert!(!b64_client.is_empty());
+        assert_ne!(b64_client, "");
 
         let _server_tls = certs.server_tls_config();
         let _client_tls = certs.client_tls_config();
 
         let debug_str = format!("{certs:?}");
         assert!(debug_str.contains("REDACTED"));
+        Ok(())
     }
 }

@@ -256,15 +256,14 @@ impl Provisioner for ChefClientProvisioner {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
     use crate::communicator::mock::MockCommunicator;
 
     #[tokio::test]
     async fn test_chef_client_provision_success() -> Result<(), StampError> {
-        let tmp_secret =
-            std::env::temp_dir().join(format!("test_client_secret_{}", uuid::Uuid::new_v4()));
+        let tmp_dir = tempfile::tempdir()?;
+        let tmp_secret = tmp_dir.path().join("test_client_secret");
         fs::write(&tmp_secret, "mysecret123").map_err(StampError::Io)?;
 
         let config = ChefClientConfig {
@@ -272,7 +271,7 @@ mod tests {
             validation_client_name: "chef-validator".to_string(),
             validation_key_path: Some(FilePath::new(PathBuf::from("validator.pem"))),
             node_name: Some("test-node-1".to_string()),
-            encrypted_data_bag_secret_path: Some(FilePath::new(tmp_secret.clone())),
+            encrypted_data_bag_secret_path: Some(FilePath::new(tmp_secret)),
             cleanup: ChefCleanupOptions {
                 delete_node_on_error: true,
                 delete_client_on_error: true,
@@ -291,14 +290,13 @@ mod tests {
             )),
         )
         .await?;
-        let _ = fs::remove_file(tmp_secret);
         Ok(())
     }
 
     #[tokio::test]
     async fn test_chef_client_provision_with_json_and_env() -> Result<(), StampError> {
-        let tmp_json =
-            std::env::temp_dir().join(format!("test_client_attrs_{}.json", uuid::Uuid::new_v4()));
+        let tmp_dir = tempfile::tempdir()?;
+        let tmp_json = tmp_dir.path().join("test_client_attrs.json");
         fs::write(&tmp_json, r#"{"client_ver": "1.0"}"#).map_err(StampError::Io)?;
 
         let config = ChefClientConfig {
@@ -308,7 +306,7 @@ mod tests {
             node_name: Some("test-node".to_string()),
             chef_environment: Some("staging".to_string()),
             run_list: vec!["role[base]".to_string()],
-            json_path: Some(FilePath::new(tmp_json.clone())),
+            json_path: Some(FilePath::new(tmp_json)),
             json: Some(serde_json::json!({"enabled": true})),
             ..Default::default()
         };
@@ -323,7 +321,6 @@ mod tests {
             )),
         )
         .await?;
-        let _ = fs::remove_file(tmp_json);
         Ok(())
     }
 
@@ -408,9 +405,10 @@ mod tests {
         };
         let config2 = config1.clone();
         assert_eq!(config1, config2);
-        assert_eq!(format!("{config1:?}"), format!("{config2:?}"));
+        assert!(format!("{config1:?}").contains("ChefClientConfig"));
         let st1 = ChefClientProvisioner::new(config1);
         let st2 = st1.clone();
-        assert_eq!(format!("{st1:?}"), format!("{st2:?}"));
+        assert!(format!("{st1:?}").contains("ChefClientProvisioner"));
+        assert_eq!(st1.config, st2.config);
     }
 }

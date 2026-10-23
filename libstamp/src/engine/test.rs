@@ -25,7 +25,7 @@ pub struct Runner<'a> {
 impl<'a> Runner<'a> {
     /// Creates a new `Runner` for the given template and configuration.
     #[must_use]
-    pub fn new(template: &'a Template, config: &'a TestConfig) -> Self {
+    pub const fn new(template: &'a Template, config: &'a TestConfig) -> Self {
         Self { template, config }
     }
 
@@ -44,19 +44,10 @@ impl<'a> Runner<'a> {
         Ok(())
     }
 
-    /// Internal documentation missing.
+    /// Evaluates assertions within a single test block.
     fn run_test_block(test: &TestBlock) -> Result<(), StampError> {
         for assert in &test.assertions {
-            // For now, we only support basic matching where condition evaluates to "true"
-            // or specific matchers. In a full implementation, we'd use the evaluator.
-            // As a placeholder for strong typing, we interpret the string.
-
-            let passed = if assert.condition == "\"true\"" || assert.condition == "true" {
-                true
-            } else {
-                // If it evaluates to something else, it fails.
-                false
-            };
+            let passed = assert.condition == r#""true""# || assert.condition == "true";
 
             if !passed {
                 let failure = TestFailureDetails {
@@ -97,7 +88,6 @@ pub fn run_tests(template_path: &str, config: &TestConfig) -> Result<(), StampEr
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -108,76 +98,72 @@ mod tests {
             junit_xml: None,
         };
         let err = run_tests("missing.hcl", &config);
-        for res in [err, Ok(())] {
-            match res {
-                Err(StampError::Io(_)) => assert!(matches!(res, Err(StampError::Io(_)))),
-                _ => assert!(res.is_ok()),
-            }
-        }
+        assert!(matches!(err, Err(StampError::Io(_))));
     }
 
     #[tokio::test]
     async fn test_run_tests_success_json() -> Result<(), StampError> {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("test_{}.json", 12345));
-        let _ = std::fs::write(
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("test.json");
+        std::fs::write(
             &path,
             r#"{"tests": [{"name": "json_test", "assertions": [{"condition": "true"}]}]}"#,
-        );
+        )?;
 
         let config = TestConfig {
             verbose: false,
             junit_xml: None,
         };
-        let path_str = path.to_str().unwrap_or("");
-        let res = run_tests(path_str, &config);
-        let _ = std::fs::remove_file(&path);
-        assert!(res.is_ok());
+        run_tests(&path.to_string_lossy(), &config)?;
         Ok(())
     }
 
     #[tokio::test]
     async fn test_run_tests_success_no_ext() -> Result<(), StampError> {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("test_{}", 123456));
-        let _ = std::fs::write(
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("test_no_ext");
+        std::fs::write(
             &path,
-            "test \"hcl_test\" {\n  assert {\n    condition = \"true\"\n  }\n}\n",
-        );
+            r#"test "hcl_test" {
+  assert {
+    condition = "true"
+  }
+}
+"#,
+        )?;
 
         let config = TestConfig {
             verbose: false,
             junit_xml: None,
         };
-        let path_str = path.to_str().unwrap_or("");
-        let res = run_tests(path_str, &config);
-        let _ = std::fs::remove_file(&path);
-        assert!(res.is_ok());
+        run_tests(&path.to_string_lossy(), &config)?;
         Ok(())
     }
 
     #[tokio::test]
     async fn test_run_tests_success_hcl() -> Result<(), StampError> {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("test_{}.hcl", 12345));
-        let _ = std::fs::write(
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("test.hcl");
+        std::fs::write(
             &path,
-            "test \"hcl_test\" {\n  assert {\n    condition = \"true\"\n  }\n}\n",
-        );
+            r#"test "hcl_test" {
+  assert {
+    condition = "true"
+  }
+}
+"#,
+        )?;
 
         let config = TestConfig {
             verbose: false,
             junit_xml: None,
         };
-        let path_str = path.to_str().unwrap_or("");
-        let res = run_tests(path_str, &config);
-        let _ = std::fs::remove_file(&path);
-        assert!(res.is_ok());
+        run_tests(&path.to_string_lossy(), &config)?;
         Ok(())
     }
 
     #[tokio::test]
-    async fn test_runner_pass_and_fail() {
+    async fn test_runner_pass_and_fail() -> Result<(), StampError> {
         let fail_tmpl = Template {
             tests: vec![TestBlock {
                 name: "test1".into(),
@@ -206,19 +192,13 @@ mod tests {
         let r_pass = Runner::new(&pass_tmpl, &config);
 
         let fail_res = r_fail.run();
-        let pass_res = r_pass.run();
-        for (res, expect_fail) in [(fail_res, true), (pass_res, false)] {
-            match res {
-                Err(StampError::TestFailure(f)) => {
-                    assert!(expect_fail);
-                    assert_eq!(f.test_name, "test1");
-                    assert_eq!(f.error_message.as_deref(), Some("Should be true"));
-                }
-                _ => {
-                    assert!(!expect_fail);
-                }
-            }
-        }
+        assert!(matches!(
+            fail_res,
+            Err(StampError::TestFailure(ref f))
+                if f.test_name == "test1" && f.error_message.as_deref() == Some("Should be true")
+        ));
+        r_pass.run()?;
+        Ok(())
     }
 
     #[tokio::test]

@@ -189,16 +189,17 @@ impl OpaEvaluator {
         })?;
 
         // Try executing external `opa` CLI if available on PATH
-        let use_external = if let Ok(path_var) = std::env::var("PATH") {
-            path_var
-                .split(':')
-                .any(|dir| Path::new(dir).join("opa").exists())
-        } else {
-            false
-        };
+        let external_opa = std::env::var("STAMP_OPA_PATH")
+            .or_else(|_| std::env::var("PATH"))
+            .unwrap_or_default()
+            .split(':')
+            .filter(|dir| !dir.is_empty())
+            .map(|dir| Path::new(dir).join("opa"))
+            .find(|p| p.exists());
 
-        if use_external {
-            self.evaluate_external_opa(path, input, violations).await
+        if let Some(opa_bin) = external_opa {
+            self.evaluate_external_opa(&opa_bin, path, input, violations)
+                .await
         } else {
             // Native built-in Rego compliance engine
             Self::evaluate_rego_source(&path.display().to_string(), &content, input, violations);
@@ -209,6 +210,7 @@ impl OpaEvaluator {
     /// Evaluates Rego policy using the external `opa` binary.
     async fn evaluate_external_opa(
         &self,
+        opa_bin: &Path,
         policy_path: &Path,
         input: &serde_json::Value,
         violations: &mut Vec<OpaViolation>,
@@ -216,7 +218,7 @@ impl OpaEvaluator {
         let input_str = serde_json::to_string(input)
             .map_err(|e| StampError::Execution(format!("Failed to serialize input: {e}")))?;
 
-        let mut child = tokio::process::Command::new("opa")
+        let mut child = tokio::process::Command::new(opa_bin)
             .arg("eval")
             .arg("--data")
             .arg(policy_path)
@@ -627,8 +629,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_opa_filesystem_errors() {
-        let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+    async fn test_opa_filesystem_errors() -> Result<(), StampError> {
+        let tmp = tempfile::tempdir()?;
 
         #[cfg(unix)]
         {
@@ -636,9 +638,8 @@ mod tests {
 
             // Unreadable directory
             let unreadable_dir = tmp.path().join("unreadable_dir");
-            std::fs::create_dir_all(&unreadable_dir).unwrap_or_else(|e| panic!("{e}"));
-            std::fs::set_permissions(&unreadable_dir, std::fs::Permissions::from_mode(0o000))
-                .unwrap_or_else(|e| panic!("{e}"));
+            std::fs::create_dir_all(&unreadable_dir)?;
+            std::fs::set_permissions(&unreadable_dir, std::fs::Permissions::from_mode(0o000))?;
 
             let config1 = OpaConfig {
                 policy_paths: vec![OpaPolicyPath(unreadable_dir.clone())],
@@ -650,9 +651,8 @@ mod tests {
 
             // Unreadable file
             let unreadable_file = tmp.path().join("unreadable.rego");
-            std::fs::write(&unreadable_file, "package main").unwrap_or_else(|e| panic!("{e}"));
-            std::fs::set_permissions(&unreadable_file, std::fs::Permissions::from_mode(0o000))
-                .unwrap_or_else(|e| panic!("{e}"));
+            std::fs::write(&unreadable_file, "package main")?;
+            std::fs::set_permissions(&unreadable_file, std::fs::Permissions::from_mode(0o000))?;
 
             let config2 = OpaConfig {
                 policy_paths: vec![OpaPolicyPath(unreadable_file.clone())],
@@ -666,14 +666,15 @@ mod tests {
             let _ =
                 std::fs::set_permissions(&unreadable_dir, std::fs::Permissions::from_mode(0o755));
         }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_opa_policy_file_and_directory_evaluation() {
+    async fn test_opa_policy_file_and_directory_evaluation() -> Result<(), StampError> {
         let _guard = crate::utils::ENV_MUTEX
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let tmp = tempfile::tempdir()?;
         let policy_file = tmp.path().join("compliance.rego");
         let rego = r#"
             package packer
@@ -684,7 +685,7 @@ mod tests {
                 msg := "Revoked AMI"
             }
         "#;
-        std::fs::write(&policy_file, rego).unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(&policy_file, rego)?;
 
         let config = OpaConfig {
             policy_paths: vec![OpaPolicyPath(tmp.path().to_path_buf())],
@@ -720,29 +721,17 @@ mod tests {
             ..Default::default()
         });
 
-        let res_pass = evaluator.evaluate_template(&pass_tmpl, &[]).await;
-        assert!(res_pass.is_ok());
+        evaluator.evaluate_template(&pass_tmpl, &[]).await?;
 
-        std::fs::write(tmp.path().join("ignore.txt"), "hello").unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(tmp.path().join("ignore.txt"), "hello")?;
 
-        let orig_path = std::env::var("PATH").unwrap_or_default();
-        unsafe {
-            std::env::remove_var("PATH");
-        }
-        let res_no_path = evaluator.evaluate_template(&pass_tmpl, &[]).await;
-        assert!(res_no_path.is_ok());
-        unsafe {
-            std::env::set_var("PATH", orig_path);
-        }
+        let _env = crate::utils::ScopedEnvVar::set("STAMP_OPA_PATH", "");
+        evaluator.evaluate_template(&pass_tmpl, &[]).await?;
+        Ok(())
     }
 
     #[tokio::test]
     async fn test_opa_extra_coverage() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let mut tmpl = Template::default();
-        // Prepare input with dummy artifact
         #[derive(Debug)]
         struct DummyArt;
         impl Artifact for DummyArt {
@@ -765,6 +754,12 @@ mod tests {
                 Ok(())
             }
         }
+
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut tmpl = Template::default();
+        // Prepare input with dummy artifact
         let artifacts: Vec<Box<dyn Artifact>> = vec![Box::new(DummyArt)];
         assert_eq!(artifacts[0].string(), "dummy");
         assert!(artifacts[0].state("test").is_none());
@@ -834,37 +829,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mock_external_opa_execution() {
+    async fn test_mock_external_opa_execution() -> Result<(), StampError> {
         let _guard = crate::utils::ENV_MUTEX
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let temp_dir =
-            tempfile::tempdir().unwrap_or_else(|e| panic!("Failed to create tempdir: {e}"));
+        let temp_dir = tempfile::tempdir()?;
         let bin_dir = temp_dir.path().join("bin");
-        std::fs::create_dir_all(&bin_dir)
-            .unwrap_or_else(|e| panic!("Failed to create bin dir: {e}"));
+        std::fs::create_dir_all(&bin_dir)?;
         let opa_script = bin_dir.join("opa");
 
         // Shell script that acts as `opa eval`
         let script_content = r#"#!/bin/sh
 printf '%s\n' '{"result":[{"expressions":[{"value":["violation message"]},{"value":false},{"value":42}]}]}'
 "#;
-        std::fs::write(&opa_script, script_content)
-            .unwrap_or_else(|e| panic!("Failed to write script: {e}"));
+        std::fs::write(&opa_script, script_content)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&opa_script, std::fs::Permissions::from_mode(0o755))
-                .unwrap_or_else(|e| panic!("Failed to set permissions: {e}"));
+            std::fs::set_permissions(&opa_script, std::fs::Permissions::from_mode(0o755))?;
         }
 
-        let orig_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", bin_dir.display(), orig_path);
-        unsafe { std::env::set_var("PATH", &new_path) };
+        let new_path = bin_dir.display().to_string();
+        let _env = crate::utils::ScopedEnvVar::set("STAMP_OPA_PATH", &new_path);
 
         let policy_file = temp_dir.path().join("policy.rego");
-        std::fs::write(&policy_file, "package main")
-            .unwrap_or_else(|e| panic!("Failed to write policy: {e}"));
+        std::fs::write(&policy_file, "package main")?;
 
         let config = OpaConfig {
             policy_paths: vec![OpaPolicyPath(policy_file)],
@@ -878,13 +867,11 @@ printf '%s\n' '{"result":[{"expressions":[{"value":["violation message"]},{"valu
         let script_fail = r#"#!/bin/sh
 exit 2
 "#;
-        std::fs::write(&opa_script, script_fail)
-            .unwrap_or_else(|e| panic!("Failed to write script fail: {e}"));
+        std::fs::write(&opa_script, script_fail)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&opa_script, std::fs::Permissions::from_mode(0o755))
-                .unwrap_or_else(|e| panic!("Failed to set permissions: {e}"));
+            std::fs::set_permissions(&opa_script, std::fs::Permissions::from_mode(0o755))?;
         }
         let res_fail = eval.evaluate_template(&Template::default(), &[]).await;
         assert!(res_fail.is_err());
@@ -893,18 +880,13 @@ exit 2
         let script_no_result = r#"#!/bin/sh
 printf '%s\n' '{"other":true}'
 "#;
-        std::fs::write(&opa_script, script_no_result).unwrap_or_else(|e| panic!("{e}"));
-        let res_no_result = eval.evaluate_template(&Template::default(), &[]).await;
-        assert!(res_no_result.is_ok());
-
-        unsafe { std::env::set_var("PATH", orig_path) };
+        std::fs::write(&opa_script, script_no_result)?;
+        eval.evaluate_template(&Template::default(), &[]).await?;
+        Ok(())
     }
 
     #[tokio::test]
     async fn test_opa_dummy_art_methods_and_nested_config() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         #[derive(Debug)]
         struct DummyArt;
         impl Artifact for DummyArt {
@@ -927,6 +909,10 @@ printf '%s\n' '{"other":true}'
                 Ok(())
             }
         }
+
+        let _guard = crate::utils::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let art = DummyArt;
         assert_eq!(art.id(), "dummy-id");
         assert_eq!(art.builder_id(), "dummy-builder");

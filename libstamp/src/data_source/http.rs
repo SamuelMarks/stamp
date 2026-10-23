@@ -85,12 +85,11 @@ impl DataSource for HttpDataSource {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_http_success_text() {
+    async fn test_http_success_text() -> Result<(), StampError> {
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("GET", "/text")
@@ -106,13 +105,14 @@ mod tests {
             url: format!("{}/text", server.url()),
             headers,
         });
-        let val = ds.read().await.expect("read success");
+        let val = ds.read().await?;
         assert_eq!(val, Value::String("hello plain text".to_string()));
         mock.assert_async().await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_http_json_real_mock() {
+    async fn test_http_json_real_mock() -> Result<(), StampError> {
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("GET", "/")
@@ -127,9 +127,10 @@ mod tests {
             ..Default::default()
         });
 
-        let val = ds.read().await.expect("read json");
+        let val = ds.read().await?;
         assert_eq!(val, serde_json::json!({"hello": "world"}));
         mock.assert_async().await;
+        Ok(())
     }
 
     #[tokio::test]
@@ -143,17 +144,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_http_bad_body() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let addr = listener.local_addr().expect("local_addr");
+    async fn test_http_bad_body() -> Result<(), StampError> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
 
         tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("listener accept");
-            use tokio::io::AsyncWriteExt;
-            let response = "HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\nshort";
-            let _ = socket.write_all(response.as_bytes()).await;
+            if let Ok((mut socket, _)) = listener.accept().await {
+                use tokio::io::AsyncWriteExt;
+                let response = "HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\nshort";
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
         });
 
         let ds = HttpDataSource::new(HttpConfig {
@@ -163,6 +163,7 @@ mod tests {
 
         let res = ds.read().await;
         assert!(res.is_err());
+        Ok(())
     }
 
     #[tokio::test]
@@ -191,7 +192,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_http_json_content_type_invalid_body() {
+    async fn test_http_json_content_type_invalid_body() -> Result<(), StampError> {
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("GET", "/invalid-json")
@@ -211,9 +212,10 @@ mod tests {
             headers,
         });
 
-        let val = ds.read().await.expect("read");
+        let val = ds.read().await?;
         assert_eq!(val, Value::String("plain text not json".to_string()));
         mock.assert_async().await;
+        Ok(())
     }
 
     #[test]

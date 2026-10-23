@@ -57,6 +57,8 @@ pub struct Ui {
     pub scrubber: Option<Arc<Scrubber>>,
     /// Optional mock input queue for simulating user stdin in automated test environments.
     pub mock_inputs: Option<Arc<std::sync::Mutex<std::collections::VecDeque<String>>>>,
+    /// Optional log file path for teeing UI output.
+    pub log_path: Option<std::path::PathBuf>,
 }
 
 impl Ui {
@@ -97,6 +99,7 @@ impl Ui {
             timestamp_ui,
             scrubber,
             mock_inputs,
+            log_path: None,
         }
     }
 
@@ -110,6 +113,13 @@ impl Ui {
         self
     }
 
+    /// Attach an explicit log file path to this UI instance.
+    #[must_use]
+    pub fn with_log_path(mut self, log_path: std::path::PathBuf) -> Self {
+        self.log_path = Some(log_path);
+        self
+    }
+
     /// Redacts sensitive values using the attached scrubber if available.
     fn scrub(&self, input: &str) -> String {
         if let Some(s) = &self.scrubber {
@@ -119,9 +129,17 @@ impl Ui {
         }
     }
 
-    /// Tees output line to log file if `PACKER_LOG_PATH` or `PACKER_LOG=1` is configured.
-    fn tee_log(line: &str) {
-        if let Ok(log_path) = std::env::var("PACKER_LOG_PATH") {
+    /// Tees output line to log file if `log_path`, `PACKER_LOG_PATH`, or `PACKER_LOG=1` is configured.
+    fn tee_log(&self, line: &str) {
+        if let Some(ref log_path) = self.log_path {
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log_path)
+            {
+                let _ = writeln!(file, "{line}");
+            }
+        } else if let Ok(log_path) = std::env::var("PACKER_LOG_PATH") {
             if !log_path.is_empty()
                 && let Ok(mut file) = std::fs::OpenOptions::new()
                     .create(true)
@@ -143,7 +161,7 @@ impl Ui {
     /// Output a standard message.
     pub fn say(&self, target: &str, message: &str) {
         let scrubbed_message = self.scrub(message);
-        Self::tee_log(&format!("{target}: {scrubbed_message}"));
+        self.tee_log(&format!("{target}: {scrubbed_message}"));
         if self.machine_readable.is_enabled() {
             let ts = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -206,7 +224,7 @@ impl Ui {
     /// Output an error message.
     pub fn error(&self, target: &str, message: &str) {
         let scrubbed_message = self.scrub(message);
-        Self::tee_log(&format!("{target} [ERROR]: {scrubbed_message}"));
+        self.tee_log(&format!("{target} [ERROR]: {scrubbed_message}"));
         if self.machine_readable.is_enabled() {
             let ts = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -286,7 +304,7 @@ impl Ui {
         if self.machine_readable.is_enabled() {
             println!("{event}");
         }
-        Self::tee_log(&format!("{event}"));
+        self.tee_log(&format!("{event}"));
     }
 
     /// Emits a machine-readable progress indicator for long-running operations.
@@ -310,7 +328,6 @@ impl Ui {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
 
     use super::*;
@@ -359,7 +376,7 @@ mod tests {
 
         let scrubber = Scrubber::default();
         scrubber.add("secret123".to_string());
-        scrubber.add("".to_string()); // empty add test
+        scrubber.add(String::new()); // empty add test
 
         let ui = Ui::with_scrubber(
             FeatureState::Disabled,
@@ -417,15 +434,9 @@ mod tests {
         assert_eq!(res_no_target, "");
 
         // is_interactive without mock_inputs
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        unsafe {
-            std::env::set_var("CI", "true");
-        }
-        assert!(!ui_none.is_interactive());
-        unsafe {
-            std::env::remove_var("CI");
+        {
+            let _env = crate::utils::ScopedEnvVar::set("CI", "true");
+            assert!(!ui_none.is_interactive());
         }
         let _ = ui_none.is_interactive();
     }
@@ -454,53 +465,36 @@ mod tests {
     }
 
     #[test]
-    fn test_ui_tee_log() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        let temp_log = std::env::temp_dir().join("test_ui_packer.log");
-        unsafe {
-            std::env::set_var("PACKER_LOG_PATH", temp_log.to_string_lossy().to_string());
-            std::env::set_var("PACKER_LOG", "1");
-        }
+    fn test_ui_tee_log() -> Result<(), std::io::Error> {
+        let temp_dir = tempfile::tempdir()?;
+        let temp_log = temp_dir.path().join("test_ui_packer.log");
 
         let ui = Ui::new(
             FeatureState::Disabled,
             FeatureState::Disabled,
             FeatureState::Disabled,
-        );
+        )
+        .with_log_path(temp_log.clone());
         ui.say("builder-1", "hello from log test");
         ui.error("builder-1", "error from log test");
 
-        unsafe {
-            std::env::remove_var("PACKER_LOG_PATH");
-            std::env::remove_var("PACKER_LOG");
-        }
-
-        let content = std::fs::read_to_string(&temp_log).unwrap_or_default();
+        let content = std::fs::read_to_string(&temp_log)?;
         assert!(content.contains("builder-1: hello from log test"));
         assert!(content.contains("builder-1 [ERROR]: error from log test"));
-        let _ = std::fs::remove_file(&temp_log);
+        Ok(())
     }
 
     #[test]
     fn test_ui_tee_log_packer_log_only() {
-        let _guard = crate::utils::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        unsafe {
-            std::env::remove_var("PACKER_LOG_PATH");
-            std::env::set_var("PACKER_LOG", "1");
-        }
-        let ui = Ui::new(
-            FeatureState::Disabled,
-            FeatureState::Disabled,
-            FeatureState::Disabled,
-        );
-        ui.say("builder-only", "packer log only");
-        unsafe {
-            std::env::remove_var("PACKER_LOG");
+        {
+            let _env1 = crate::utils::ScopedEnvVar::remove("PACKER_LOG_PATH");
+            let _env2 = crate::utils::ScopedEnvVar::set("PACKER_LOG", "1");
+            let ui = Ui::new(
+                FeatureState::Disabled,
+                FeatureState::Disabled,
+                FeatureState::Disabled,
+            );
+            ui.say("builder-only", "packer log only");
         }
         let _ = std::fs::remove_file("packer.log");
     }

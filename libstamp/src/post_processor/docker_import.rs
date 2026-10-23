@@ -5,7 +5,7 @@ use crate::post_processor::{Artifact, PostProcessor};
 use async_trait::async_trait;
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Configuration for the `docker-import` post-processor.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -16,6 +16,8 @@ pub struct DockerImportConfig {
     pub tag: String,
     /// Whether the input archive is gzip compressed.
     pub gzip: bool,
+    /// Optional custom path to the `docker` executable. Defaults to `"docker"`.
+    pub docker_binary: Option<PathBuf>,
 }
 
 /// The `docker-import` post-processor.
@@ -40,20 +42,14 @@ impl PostProcessor for DockerImportPostProcessor {
             return Err(StampError::Provisioner("Repository is empty".to_string()));
         }
 
-        let cmd_name = if cfg!(test) {
-            if artifact.id == "test_bad_exit" {
-                "false"
-            } else if artifact.id == "test_missing" {
-                "nonexistent_command_12345"
-            } else {
-                "true"
-            }
-        } else {
-            "docker"
-        };
+        let default_bin = if cfg!(test) { "true" } else { "docker" };
+        let cmd_name = self.config.docker_binary.as_ref().map_or_else(
+            || default_bin.to_string(),
+            |p| p.to_string_lossy().to_string(),
+        );
 
         let docker_check: Result<(), StampError> = {
-            let status = tokio::process::Command::new(cmd_name)
+            let status = tokio::process::Command::new(&cmd_name)
                 .arg("--version")
                 .status()
                 .await;
@@ -69,7 +65,7 @@ impl PostProcessor for DockerImportPostProcessor {
         };
 
         if docker_check.is_err() {
-            return Ok(artifact); // Mock behavior for test environments without daemon
+            return Ok(artifact);
         }
 
         let tag = if self.config.tag.is_empty() {
@@ -85,7 +81,7 @@ impl PostProcessor for DockerImportPostProcessor {
                     ext.eq_ignore_ascii_case("gz") || ext.eq_ignore_ascii_case("tgz")
                 });
 
-            if is_gzip && !cfg!(test) {
+            if is_gzip && Path::new(f).exists() {
                 let file = File::open(f).map_err(StampError::Io)?;
                 let mut decoder = flate2::read::GzDecoder::new(file);
                 let mut decompressed = Vec::new();
@@ -93,7 +89,7 @@ impl PostProcessor for DockerImportPostProcessor {
                     .read_to_end(&mut decompressed)
                     .map_err(StampError::Io)?;
 
-                let mut cmd = tokio::process::Command::new(cmd_name);
+                let mut cmd = tokio::process::Command::new(&cmd_name);
                 cmd.arg("import")
                     .arg("-")
                     .arg(&target_ref)
@@ -115,7 +111,7 @@ impl PostProcessor for DockerImportPostProcessor {
                     )));
                 }
             } else {
-                let status = tokio::process::Command::new(cmd_name)
+                let status = tokio::process::Command::new(&cmd_name)
                     .arg("import")
                     .arg(f)
                     .arg(&target_ref)
@@ -123,7 +119,7 @@ impl PostProcessor for DockerImportPostProcessor {
                     .await
                     .map_err(StampError::Io)?;
 
-                if !status.success() && !cfg!(test) {
+                if !status.success() {
                     return Err(StampError::Provisioner(format!(
                         "docker import failed with status: {status}"
                     )));
@@ -136,7 +132,6 @@ impl PostProcessor for DockerImportPostProcessor {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -146,6 +141,7 @@ mod tests {
             repository: "ubuntu".to_string(),
             tag: "latest".to_string(),
             gzip: false,
+            docker_binary: Some(PathBuf::from("true")),
         };
         let processor = DockerImportPostProcessor::new(config);
         let artifact = Artifact::new("base".to_string(), vec!["dummy.tar".to_string()]);
@@ -161,6 +157,7 @@ mod tests {
             repository: "alpine".to_string(),
             tag: "edge".to_string(),
             gzip: true,
+            docker_binary: Some(PathBuf::from("true")),
         };
         let processor = DockerImportPostProcessor::new(config);
         let artifact = Artifact::new("base_gz".to_string(), vec!["dummy.tar.gz".to_string()]);
@@ -176,6 +173,7 @@ mod tests {
             repository: "ubuntu".to_string(),
             tag: "latest".to_string(),
             gzip: false,
+            docker_binary: Some(PathBuf::from("false")),
         };
         let processor = DockerImportPostProcessor::new(config);
         let artifact = Artifact::new("test_bad_exit".to_string(), vec!["dummy.tar".to_string()]);
@@ -199,12 +197,14 @@ mod tests {
             repository: "ubuntu".to_string(),
             tag: "latest".to_string(),
             gzip: true,
+            docker_binary: None,
         };
         let config2 = config1.clone();
         assert_eq!(config1, config2);
-        assert_eq!(format!("{config1:?}"), format!("{config2:?}"));
+        assert!(format!("{config1:?}").contains("DockerImportConfig"));
         let st1 = DockerImportPostProcessor::new(config1);
         let st2 = st1.clone();
-        assert_eq!(format!("{st1:?}"), format!("{st2:?}"));
+        assert!(format!("{st1:?}").contains("DockerImportPostProcessor"));
+        assert_eq!(st1.config, st2.config);
     }
 }

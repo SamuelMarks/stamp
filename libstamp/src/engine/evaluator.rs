@@ -640,7 +640,6 @@ pub async fn evaluate(template: &mut Template) -> Result<(), StampError> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -659,7 +658,7 @@ mod tests {
     }
 
     #[test]
-    fn test_inject_build_context() {
+    fn test_inject_build_context() -> Result<(), String> {
         let mut ctx = Context::new();
         let build_ctx = crate::engine::hook::BuildContext {
             build_id: "b-123".to_string(),
@@ -681,80 +680,70 @@ mod tests {
         };
         super::inject_build_context(&mut ctx, &build_ctx);
 
-        let evaled = super::evaluate_str("${build.ID}", &ctx).unwrap_or_else(|_| unreachable!());
+        let evaled = super::evaluate_str("${build.ID}", &ctx)?;
         assert_eq!(&*evaled.data, &ValueData::String("b-123".to_string()));
 
-        let evaled_pub =
-            super::evaluate_str("${build.SSHPublicKey}", &ctx).unwrap_or_else(|_| unreachable!());
+        let evaled_pub = super::evaluate_str("${build.SSHPublicKey}", &ctx)?;
         assert_eq!(
             &*evaled_pub.data,
             &ValueData::String("ssh-rsa AAAA".to_string())
         );
 
-        let evaled_priv =
-            super::evaluate_str("${build.SSHPrivateKey}", &ctx).unwrap_or_else(|_| unreachable!());
+        let evaled_priv = super::evaluate_str("${build.SSHPrivateKey}", &ctx)?;
         assert_eq!(
             &*evaled_priv.data,
             &ValueData::String("/tmp/id_rsa".to_string())
         );
 
-        let evaled_name =
-            super::evaluate_str("${build.name}", &ctx).unwrap_or_else(|_| unreachable!());
+        let evaled_name = super::evaluate_str("${build.name}", &ctx)?;
         assert_eq!(
             &*evaled_name.data,
             &ValueData::String("my-build".to_string())
         );
 
-        let evaled_builder_type =
-            super::evaluate_str("${build.BuilderType}", &ctx).unwrap_or_else(|_| unreachable!());
+        let evaled_builder_type = super::evaluate_str("${build.BuilderType}", &ctx)?;
         assert_eq!(
             &*evaled_builder_type.data,
             &ValueData::String("amazon-ebs".to_string())
         );
 
-        let evaled_source_name =
-            super::evaluate_str("${build.SourceName}", &ctx).unwrap_or_else(|_| unreachable!());
+        let evaled_source_name = super::evaluate_str("${build.SourceName}", &ctx)?;
         assert_eq!(
             &*evaled_source_name.data,
             &ValueData::String("my-source".to_string())
         );
 
-        let evaled_source_type =
-            super::evaluate_str("${build.SourceType}", &ctx).unwrap_or_else(|_| unreachable!());
+        let evaled_source_type = super::evaluate_str("${build.SourceType}", &ctx)?;
         assert_eq!(
             &*evaled_source_type.data,
             &ValueData::String("amazon-ebs".to_string())
         );
 
-        let evaled_type =
-            super::evaluate_str("${build.type}", &ctx).unwrap_or_else(|_| unreachable!());
+        let evaled_type = super::evaluate_str("${build.type}", &ctx)?;
         assert_eq!(
             &*evaled_type.data,
             &ValueData::String("amazon-ebs".to_string())
         );
 
-        let evaled_port =
-            super::evaluate_str("${build.Port}", &ctx).unwrap_or_else(|_| unreachable!());
+        let evaled_port = super::evaluate_str("${build.Port}", &ctx)?;
         assert_eq!(&*evaled_port.data, &ValueData::String("2222".to_string()));
 
-        let evaled_pass =
-            super::evaluate_str("${build.Password}", &ctx).unwrap_or_else(|_| unreachable!());
+        let evaled_pass = super::evaluate_str("${build.Password}", &ctx)?;
         assert_eq!(&*evaled_pass.data, &ValueData::String("secret".to_string()));
 
-        let evaled_conn =
-            super::evaluate_str("${build.ConnType}", &ctx).unwrap_or_else(|_| unreachable!());
+        let evaled_conn = super::evaluate_str("${build.ConnType}", &ctx)?;
         assert_eq!(&*evaled_conn.data, &ValueData::String("ssh".to_string()));
 
-        let evaled2 =
-            super::evaluate_str("${source.name}", &ctx).unwrap_or_else(|_| unreachable!());
+        let evaled2 = super::evaluate_str("${source.name}", &ctx)?;
         assert_eq!(&*evaled2.data, &ValueData::String("my-source".to_string()));
+        Ok(())
     }
 
     #[test]
     fn test_interpolate_legacy_template() {
         let mut vars = std::collections::HashMap::new();
         vars.insert("foo".to_string(), "bar".to_string());
-        unsafe { std::env::set_var("TEST_ENV_VAR", "my_env_val") };
+        let _env = crate::utils::ScopedEnvVar::set("TEST_ENV_VAR", "my_env_val");
 
         let input = "name={{ build_name }}, type={{ build_type }}, dir={{ template_dir }}, user={{ user `foo` }}, env={{ env `TEST_ENV_VAR` }}";
         let out = super::interpolate_legacy_template(input, &vars, "my-img", "qemu", "/tmp/tmpl");
@@ -766,91 +755,109 @@ mod tests {
     }
 
     #[test]
-    fn test_eval_string_funcs() {
+    fn test_eval_string_funcs() -> Result<(), StampError> {
         let mut ctx = Context::new();
         register_packer_funcs(&mut ctx);
 
-        let eval_hcl = |s: &str| -> Value {
+        let eval_hcl = |s: &str| -> Result<Value, StampError> {
             let mut hcl_parser = hashicorp_configuration_language_rs::parse::parser::Parser::new(s);
-            let expr = hcl_parser.parse_expression().unwrap();
+            let expr = hcl_parser
+                .parse_expression()
+                .ok_or_else(|| StampError::Parse(format!("failed to parse: {s}")))?;
             let eval = super::Evaluator::new(&ctx);
-            eval.evaluate(&expr).unwrap().0
+            Ok(eval
+                .evaluate(&expr)
+                .map_err(|e| StampError::Execution(format!("{e:?}")))?
+                .0)
         };
-        let eval_str = |s: &str| -> String {
-            let ValueData::String(res) = &*eval_hcl(s).data else {
-                return String::new();
+        let eval_str = |s: &str| -> Result<String, StampError> {
+            let val = eval_hcl(s)?;
+            let ValueData::String(res) = &*val.data else {
+                return Ok(String::new());
             };
-            res.clone()
+            Ok(res.clone())
         };
 
-        assert_eq!(eval_str("lower(\"HELLO\")"), "hello");
-        assert_eq!(eval_str("upper(\"hello\")"), "HELLO");
-        assert_eq!(eval_str("title(\"hello\")"), "Hello");
-        assert_eq!(eval_str("join(\",\", [\"a\", \"b\"])"), "a,b");
-        assert_eq!(eval_str("trim(\"xxhelloxx\", \"x\")"), "hello");
-        assert_eq!(eval_str("trimprefix(\"!hello\", \"!\")"), "hello");
-        assert_eq!(eval_str("trimsuffix(\"hello!\", \"!\")"), "hello");
+        assert_eq!(eval_str("lower(\"HELLO\")")?, "hello");
+        assert_eq!(eval_str("upper(\"hello\")")?, "HELLO");
+        assert_eq!(eval_str("title(\"hello\")")?, "Hello");
+        assert_eq!(eval_str("join(\",\", [\"a\", \"b\"])")?, "a,b");
+        assert_eq!(eval_str("trim(\"xxhelloxx\", \"x\")")?, "hello");
+        assert_eq!(eval_str("trimprefix(\"!hello\", \"!\")")?, "hello");
+        assert_eq!(eval_str("trimsuffix(\"hello!\", \"!\")")?, "hello");
 
-        let concat_val = eval_hcl("concat([\"hello\"], [\"world\"])");
+        let concat_val = eval_hcl("concat([\"hello\"], [\"world\"])")?;
         assert!(matches!(concat_val.data.as_ref(), ValueData::Array(arr) if arr.len() == 2));
 
         assert_eq!(
-            eval_str("replace(\"hello world\", \"world\", \"rust\")"),
+            eval_str("replace(\"hello world\", \"world\", \"rust\")")?,
             "hello rust"
         );
-        assert_eq!(eval_str("regex(\"[a-z]+\", \"123 abc 456\")"), "abc");
+        assert_eq!(eval_str("regex(\"[a-z]+\", \"123 abc 456\")")?, "abc");
         assert_eq!(
-            eval_str("cidrhost(\"10.0.0.0/16\", 1)"),
+            eval_str("cidrhost(\"10.0.0.0/16\", 1)")?,
             "host_stub_10.0.0.0/16_1"
         );
-        assert_eq!(eval_str("base64encode(\"hello\")"), "aGVsbG8=");
-        assert_eq!(eval_str("base64decode(\"aGVsbG8=\")"), "hello");
-        assert_eq!(eval_str("jsonencode(\"hello\")"), "\"hello\"");
+        assert_eq!(eval_str("base64encode(\"hello\")")?, "aGVsbG8=");
+        assert_eq!(eval_str("base64decode(\"aGVsbG8=\")")?, "hello");
+        assert_eq!(eval_str("jsonencode(\"hello\")")?, "\"hello\"");
         assert_eq!(
-            eval_str("formatdate(\"YYYY-MM-DD\", \"2018-01-02T23:12:01Z\")"),
+            eval_str("formatdate(\"YYYY-MM-DD\", \"2018-01-02T23:12:01Z\")")?,
             "2018-01-02"
         );
         assert_eq!(
-            eval_str("timeadd(\"2017-11-22T00:00:00Z\", \"1h\")"),
+            eval_str("timeadd(\"2017-11-22T00:00:00Z\", \"1h\")")?,
             "2017-11-22T01:00:00Z"
         );
-        assert_eq!(eval_str("dirname(\"/foo/bar/baz.txt\")"), "/foo/bar");
-        assert_eq!(eval_str("basename(\"/foo/bar/baz.txt\")"), "baz.txt");
+        assert_eq!(eval_str("dirname(\"/foo/bar/baz.txt\")")?, "/foo/bar");
+        assert_eq!(eval_str("basename(\"/foo/bar/baz.txt\")")?, "baz.txt");
         assert_eq!(
-            eval_str("md5(\"hello\")"),
+            eval_str("md5(\"hello\")")?,
             "5d41402abc4b2a76b9719d911017c592"
         );
         assert_eq!(
-            eval_str("sha1(\"hello\")"),
+            eval_str("sha1(\"hello\")")?,
             "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
         );
         assert_eq!(
-            eval_str("sha256(\"hello\")"),
+            eval_str("sha256(\"hello\")")?,
             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         );
         assert_eq!(
-            eval_str("sha512(\"hello\")"),
+            eval_str("sha512(\"hello\")")?,
             "9b71d224bd62f3785d96d46ad3ea3d73319bfbc2890caadae2dff72519673ca72323c3d99ba5c11d7c7acc6e14b8c5da0c4663475c2e5c3adef46f73bcdec043"
         );
-        assert!(eval_str("bcrypt(\"hello\", 4)").starts_with("$2b$04$"));
-        assert_eq!(eval_str("cidrnetmask(\"10.0.0.0/16\")"), "255.255.0.0");
+        assert!(eval_str("bcrypt(\"hello\", 4)")?.starts_with("$2b$04$"));
+        assert_eq!(eval_str("cidrnetmask(\"10.0.0.0/16\")")?, "255.255.0.0");
         assert_eq!(
-            eval_str("cidrsubnet(\"10.0.0.0/16\", 8, 2)"),
+            eval_str("cidrsubnet(\"10.0.0.0/16\", 8, 2)")?,
             "subnet_stub_10.0.0.0/16"
         );
+        {
+            let mut server = mockito::Server::new();
+            let mock = server
+                .mock("GET", "/v1/secret/foo")
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(r#"{"data": {"bar": "mock_vault_secret_bar"}}"#)
+                .create();
+            let _addr = crate::utils::ScopedEnvVar::set("VAULT_ADDR", server.url());
+            let _tok = crate::utils::ScopedEnvVar::set("VAULT_TOKEN", "tok");
+            assert_eq!(
+                eval_str("vault(\"secret/foo\", \"bar\")")?,
+                "mock_vault_secret_bar"
+            );
+            mock.assert();
+        }
         assert_eq!(
-            eval_str("vault(\"secret/foo\", \"bar\")"),
-            "mock_vault_secret_bar"
-        );
-        assert_eq!(
-            eval_str("clean_resource_name(\"my:custom/ami\")"),
+            eval_str("clean_resource_name(\"my:custom/ami\")")?,
             "my-custom-ami"
         );
 
-        let split_val = eval_hcl("split(\",\", \"a,b,c\")");
+        let split_val = eval_hcl("split(\",\", \"a,b,c\")")?;
         assert!(matches!(split_val.data.as_ref(), ValueData::Array(arr) if arr.len() == 3));
 
-        let len_val = eval_hcl("length(\"hello\")");
+        let len_val = eval_hcl("length(\"hello\")")?;
         assert_eq!(
             len_val.data.as_ref(),
             &ValueData::Number(hashicorp_configuration_language_rs::number::Number::from(
@@ -858,13 +865,14 @@ mod tests {
             ))
         );
 
-        let json_val = eval_hcl("jsondecode(\"[1, 2, 3]\")");
+        let json_val = eval_hcl("jsondecode(\"[1, 2, 3]\")")?;
         assert!(matches!(json_val.data.as_ref(), ValueData::Array(arr) if arr.len() == 3));
 
-        let yaml_val = eval_hcl("yamldecode(\"key: value\")");
+        let yaml_val = eval_hcl("yamldecode(\"key: value\")")?;
         assert!(
             matches!(yaml_val.data.as_ref(), ValueData::Object(obj) if obj.contains_key("key"))
         );
+        Ok(())
     }
 
     #[test]
@@ -872,9 +880,6 @@ mod tests {
         let mut ctx = Context::new();
         register_packer_funcs(&mut ctx);
 
-        // This simulates a type mismatch (passing an array but our macro handles String, Number, Bool)
-        // Wait, evaluator_str parses HCL so we need a valid HCL array expression: `["invalid"]` might not work in string interpolation natively without `join`.
-        // Instead, we test invalid argument counts.
         let res = super::evaluate_str("${lower()}", &ctx);
         assert!(res.is_err());
     }
@@ -959,7 +964,7 @@ mod tests {
             "null_val": null,
             "bool_val": true,
             "int_val": 42,
-            "float_val": 3.14,
+            "float_val": 3.25,
             "str_val": "hello",
             "arr_val": [1, 2, 3],
             "obj_val": { "inner": "yes" }
@@ -969,12 +974,14 @@ mod tests {
     }
 
     #[test]
-    fn test_inject_path_context() {
+    fn test_inject_path_context() -> Result<(), StampError> {
         let mut ctx = Context::new();
         let root = std::path::Path::new("/tmp/test_template");
         super::inject_path_context(&mut ctx, Some(root));
 
-        let path_val = ctx.get_variable("path").unwrap();
+        let path_val = ctx
+            .get_variable("path")
+            .ok_or_else(|| StampError::Validation("missing path".to_string()))?;
         let empty = std::collections::BTreeMap::new();
         let map = if let ValueData::Object(m) = &*path_val.data {
             m
@@ -987,10 +994,11 @@ mod tests {
             Some(&ValueData::String("/tmp/test_template".to_string()))
         );
         assert!(map.contains_key("cwd"));
+        Ok(())
     }
 
     #[test]
-    fn test_inject_build_context_with_ami() {
+    fn test_inject_build_context_with_ami() -> Result<(), StampError> {
         let mut ctx = Context::new();
         let build_ctx = crate::engine::hook::BuildContext {
             build_id: "bid-123".to_string(),
@@ -1012,7 +1020,9 @@ mod tests {
         };
 
         super::inject_build_context(&mut ctx, &build_ctx);
-        let build_val = ctx.get_variable("build").unwrap();
+        let build_val = ctx
+            .get_variable("build")
+            .ok_or_else(|| StampError::Validation("missing build".to_string()))?;
         let empty = std::collections::BTreeMap::new();
         let map = if let ValueData::Object(m) = &*build_val.data {
             m
@@ -1028,10 +1038,11 @@ mod tests {
             map.get("SourceAMIName").map(|v| v.data.as_ref()),
             Some(&ValueData::String("ubuntu-focal".to_string()))
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_variable_validation_pass_and_fail() {
+    async fn test_variable_validation_pass_and_fail() -> Result<(), StampError> {
         let mut tmpl = Template::default();
         let mut var = crate::template::VariableConfig {
             default: Some("test_name".to_string()),
@@ -1044,20 +1055,24 @@ mod tests {
         };
         tmpl.variables.insert("name".to_string(), var.clone());
 
-        assert!(super::evaluate(&mut tmpl).await.is_ok());
+        super::evaluate(&mut tmpl).await?;
 
         // Fail condition
         var.default = Some("ab".to_string());
         tmpl.variables.insert("name".to_string(), var);
-        let err = super::evaluate(&mut tmpl).await.unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("Name must be longer than 3 characters")
-        );
+        let res = super::evaluate(&mut tmpl).await;
+        assert!(res.is_err());
+        if let Err(err) = res {
+            assert!(
+                err.to_string()
+                    .contains("Name must be longer than 3 characters")
+            );
+        }
+        Ok(())
     }
 
     #[test]
-    fn test_inject_build_context_all_variables() {
+    fn test_inject_build_context_all_variables() -> Result<(), StampError> {
         let mut ctx = Context::new();
         let mut conn_info = std::collections::HashMap::new();
         conn_info.insert(
@@ -1085,7 +1100,9 @@ mod tests {
         };
 
         super::inject_build_context(&mut ctx, &build_ctx);
-        let build_val = ctx.get_variable("build").unwrap();
+        let build_val = ctx
+            .get_variable("build")
+            .ok_or_else(|| StampError::Validation("missing build".to_string()))?;
         let empty = std::collections::BTreeMap::new();
         let map = if let ValueData::Object(m) = &*build_val.data {
             m
@@ -1094,51 +1111,53 @@ mod tests {
         };
         assert!(!map.is_empty());
         assert_eq!(
-            map.get("ID").unwrap().data.as_ref(),
-            &ValueData::String("target-42".to_string())
+            map.get("ID").map(|v| v.data.as_ref()),
+            Some(&ValueData::String("target-42".to_string()))
         );
         assert_eq!(
-            map.get("name").unwrap().data.as_ref(),
-            &ValueData::String("prod-image".to_string())
+            map.get("name").map(|v| v.data.as_ref()),
+            Some(&ValueData::String("prod-image".to_string()))
         );
         assert_eq!(
-            map.get("type").unwrap().data.as_ref(),
-            &ValueData::String("amazon-ebs".to_string())
+            map.get("type").map(|v| v.data.as_ref()),
+            Some(&ValueData::String("amazon-ebs".to_string()))
         );
         assert_eq!(
-            map.get("BuilderType").unwrap().data.as_ref(),
-            &ValueData::String("amazon-ebs".to_string())
+            map.get("BuilderType").map(|v| v.data.as_ref()),
+            Some(&ValueData::String("amazon-ebs".to_string()))
         );
         assert_eq!(
-            map.get("Host").unwrap().data.as_ref(),
-            &ValueData::String("10.0.1.50".to_string())
+            map.get("Host").map(|v| v.data.as_ref()),
+            Some(&ValueData::String("10.0.1.50".to_string()))
         );
         assert_eq!(
-            map.get("User").unwrap().data.as_ref(),
-            &ValueData::String("admin".to_string())
+            map.get("User").map(|v| v.data.as_ref()),
+            Some(&ValueData::String("admin".to_string()))
         );
         assert_eq!(
-            map.get("Password").unwrap().data.as_ref(),
-            &ValueData::String("secret123".to_string())
+            map.get("Password").map(|v| v.data.as_ref()),
+            Some(&ValueData::String("secret123".to_string()))
         );
         assert_eq!(
-            map.get("SSHPublicKey").unwrap().data.as_ref(),
-            &ValueData::String("ssh-rsa pubkey".to_string())
+            map.get("SSHPublicKey").map(|v| v.data.as_ref()),
+            Some(&ValueData::String("ssh-rsa pubkey".to_string()))
         );
         assert_eq!(
-            map.get("SSHPrivateKey").unwrap().data.as_ref(),
-            &ValueData::String("/path/to/id_rsa".to_string())
+            map.get("SSHPrivateKey").map(|v| v.data.as_ref()),
+            Some(&ValueData::String("/path/to/id_rsa".to_string()))
         );
         assert_eq!(
-            map.get("PackerRunUUID").unwrap().data.as_ref(),
-            &ValueData::String("uuid-4242".to_string())
+            map.get("PackerRunUUID").map(|v| v.data.as_ref()),
+            Some(&ValueData::String("uuid-4242".to_string()))
         );
         assert_eq!(
-            map.get("SourceAMI").unwrap().data.as_ref(),
-            &ValueData::String("ami-99999".to_string())
+            map.get("SourceAMI").map(|v| v.data.as_ref()),
+            Some(&ValueData::String("ami-99999".to_string()))
         );
 
-        let conn_info_val = map.get("ConnInfo").unwrap();
+        let conn_info_val = map
+            .get("ConnInfo")
+            .ok_or_else(|| StampError::Validation("missing ConnInfo".to_string()))?;
         let empty = std::collections::BTreeMap::new();
         let ci_map = if let ValueData::Object(m) = &*conn_info_val.data {
             m
@@ -1147,25 +1166,26 @@ mod tests {
         };
         assert!(!ci_map.is_empty());
         assert_eq!(
-            ci_map.get("bastion_host").unwrap().data.as_ref(),
-            &ValueData::String("bastion.example.com".to_string())
+            ci_map.get("bastion_host").map(|v| v.data.as_ref()),
+            Some(&ValueData::String("bastion.example.com".to_string()))
         );
         assert_eq!(
-            ci_map.get("host").unwrap().data.as_ref(),
-            &ValueData::String("10.0.1.50".to_string())
+            ci_map.get("host").map(|v| v.data.as_ref()),
+            Some(&ValueData::String("10.0.1.50".to_string()))
         );
         assert_eq!(
-            ci_map.get("port").unwrap().data.as_ref(),
-            &ValueData::String("2222".to_string())
+            ci_map.get("port").map(|v| v.data.as_ref()),
+            Some(&ValueData::String("2222".to_string()))
         );
         assert_eq!(
-            ci_map.get("user").unwrap().data.as_ref(),
-            &ValueData::String("admin".to_string())
+            ci_map.get("user").map(|v| v.data.as_ref()),
+            Some(&ValueData::String("admin".to_string()))
         );
+        Ok(())
     }
 
     #[test]
-    fn test_inject_build_context_empty_fields_defaults() {
+    fn test_inject_build_context_empty_fields_defaults() -> Result<(), StampError> {
         let mut ctx = Context::new();
         let build_ctx = crate::engine::hook::BuildContext {
             build_name: String::new(),
@@ -1178,7 +1198,9 @@ mod tests {
         };
         super::inject_build_context(&mut ctx, &build_ctx);
 
-        let build_val = ctx.get_variable("build").unwrap();
+        let build_val = ctx
+            .get_variable("build")
+            .ok_or_else(|| StampError::Validation("missing build".to_string()))?;
         let empty = std::collections::BTreeMap::new();
         let map = if let ValueData::Object(m) = &*build_val.data {
             m
@@ -1187,53 +1209,64 @@ mod tests {
         };
         assert!(!map.is_empty());
         assert_eq!(
-            map.get("name").unwrap().data.as_ref(),
-            &ValueData::String("fallback_src".to_string())
+            map.get("name").map(|v| v.data.as_ref()),
+            Some(&ValueData::String("fallback_src".to_string()))
         );
         assert_eq!(
-            map.get("type").unwrap().data.as_ref(),
-            &ValueData::String("fallback_type".to_string())
+            map.get("type").map(|v| v.data.as_ref()),
+            Some(&ValueData::String("fallback_type".to_string()))
         );
         assert_eq!(
-            map.get("ConnType").unwrap().data.as_ref(),
-            &ValueData::String("ssh".to_string())
+            map.get("ConnType").map(|v| v.data.as_ref()),
+            Some(&ValueData::String("ssh".to_string()))
         );
-        assert_eq!(map.get("port").unwrap().ty(), &Type::Number);
+        assert_eq!(map.get("port").map(Value::ty), Some(&Type::Number));
+        Ok(())
     }
 
     #[tokio::test]
     async fn test_evaluate_template_variable_types_and_locals_and_builders() {
         let mut tmpl = Template::default();
         // Variable with number type and invalid number fallback
-        let mut var_num_valid = crate::template::VariableConfig::default();
-        var_num_valid.variable_type = Some("number".to_string());
-        var_num_valid.default = Some("42".to_string());
+        let var_num_valid = crate::template::VariableConfig {
+            variable_type: Some("number".to_string()),
+            default: Some("42".to_string()),
+            ..Default::default()
+        };
         tmpl.variables
             .insert("num_valid".to_string(), var_num_valid);
 
-        let mut var_num_invalid = crate::template::VariableConfig::default();
-        var_num_invalid.variable_type = Some("number".to_string());
-        var_num_invalid.default = Some("not_a_num".to_string());
+        let var_num_invalid = crate::template::VariableConfig {
+            variable_type: Some("number".to_string()),
+            default: Some("not_a_num".to_string()),
+            ..Default::default()
+        };
         tmpl.variables
             .insert("num_invalid".to_string(), var_num_invalid);
 
         // Variable with bool type and invalid bool fallback
-        let mut var_bool_valid = crate::template::VariableConfig::default();
-        var_bool_valid.variable_type = Some("bool".to_string());
-        var_bool_valid.default = Some("true".to_string());
+        let var_bool_valid = crate::template::VariableConfig {
+            variable_type: Some("bool".to_string()),
+            default: Some("true".to_string()),
+            ..Default::default()
+        };
         tmpl.variables
             .insert("bool_valid".to_string(), var_bool_valid);
 
-        let mut var_bool_invalid = crate::template::VariableConfig::default();
-        var_bool_invalid.variable_type = Some("bool".to_string());
-        var_bool_invalid.default = Some("not_a_bool".to_string());
+        let var_bool_invalid = crate::template::VariableConfig {
+            variable_type: Some("bool".to_string()),
+            default: Some("not_a_bool".to_string()),
+            ..Default::default()
+        };
         tmpl.variables
             .insert("bool_invalid".to_string(), var_bool_invalid);
 
         // Variable with other type (e.g. "list")
-        let mut var_other = crate::template::VariableConfig::default();
-        var_other.variable_type = Some("list".to_string());
-        var_other.default = Some("item".to_string());
+        let var_other = crate::template::VariableConfig {
+            variable_type: Some("list".to_string()),
+            default: Some("item".to_string()),
+            ..Default::default()
+        };
         tmpl.variables.insert("other_val".to_string(), var_other);
 
         // Locals
@@ -1272,13 +1305,14 @@ mod tests {
     #[tokio::test]
     async fn test_evaluate_with_mock_data_source() {
         let mut tmpl = Template::default();
-        let mut ds = crate::template::DataSourceConfig::default();
-        ds.source_type = "mock".to_string();
-        ds.name = "mock_source".to_string();
+        let ds = crate::template::DataSourceConfig {
+            source_type: "mock".to_string(),
+            name: "mock_source".to_string(),
+            ..Default::default()
+        };
         tmpl.data_sources.push(ds);
 
         let res = super::evaluate(&mut tmpl).await;
-        // mock source may or may not succeed, but it exercises the DataSource branch
         let _ = res;
     }
 
@@ -1294,72 +1328,73 @@ mod tests {
     }
 
     #[test]
-    fn test_env_and_stdlib_functions() {
+    fn test_env_and_stdlib_functions() -> Result<(), StampError> {
         let mut ctx = Context::new();
         super::register_stdlib(&mut ctx);
         super::register_packer_funcs(&mut ctx);
 
         // Test env() function
-        unsafe {
-            std::env::set_var("WINDOWS_PRODUCT_KEY", "VK7JG-NPHTM-C97JM-9MPGT-3V66T");
-            std::env::set_var("WIN11_MEDIA_RAW", "win11.iso");
-        }
-        let env_res = super::evaluate_str(r#"env("WINDOWS_PRODUCT_KEY")"#, &ctx).unwrap();
-        assert_eq!(
-            env_res.data.as_ref(),
-            &ValueData::String("VK7JG-NPHTM-C97JM-9MPGT-3V66T".to_string())
-        );
+        {
+            let _env1 = crate::utils::ScopedEnvVar::set(
+                "WINDOWS_PRODUCT_KEY",
+                "VK7JG-NPHTM-C97JM-9MPGT-3V66T",
+            );
+            let _env2 = crate::utils::ScopedEnvVar::set("WIN11_MEDIA_RAW", "win11.iso");
+            let env_res = super::evaluate_str(r#"env("WINDOWS_PRODUCT_KEY")"#, &ctx)
+                .map_err(StampError::Execution)?;
+            assert_eq!(
+                env_res.data.as_ref(),
+                &ValueData::String("VK7JG-NPHTM-C97JM-9MPGT-3V66T".to_string())
+            );
 
-        let media_res = super::evaluate_str(r#"env("WIN11_MEDIA_RAW")"#, &ctx).unwrap();
-        assert_eq!(
-            media_res.data.as_ref(),
-            &ValueData::String("win11.iso".to_string())
-        );
-        unsafe {
-            std::env::remove_var("WINDOWS_PRODUCT_KEY");
-            std::env::remove_var("WIN11_MEDIA_RAW");
-            std::env::remove_var("http_proxy");
-            std::env::remove_var("HTTP_PROXY");
+            let media_res = super::evaluate_str(r#"env("WIN11_MEDIA_RAW")"#, &ctx)
+                .map_err(StampError::Execution)?;
+            assert_eq!(
+                media_res.data.as_ref(),
+                &ValueData::String("win11.iso".to_string())
+            );
         }
 
         // Test sha256() function
-        let sha_res = super::evaluate_str(r#"sha256("stamp-test")"#, &ctx).unwrap();
+        let sha_res =
+            super::evaluate_str(r#"sha256("stamp-test")"#, &ctx).map_err(StampError::Execution)?;
         assert!(matches!(sha_res.data.as_ref(), ValueData::String(s) if !s.is_empty()));
 
         // Test concat() and length()
-        let concat_res = super::evaluate_str(r#"length(concat(["a"], ["b", "c"]))"#, &ctx).unwrap();
+        let concat_res = super::evaluate_str(r#"length(concat(["a"], ["b", "c"]))"#, &ctx)
+            .map_err(StampError::Execution)?;
         assert_eq!(
             concat_res.data.as_ref(),
             &ValueData::Number(hashicorp_configuration_language_rs::number::Number::from(3))
         );
 
         // Test dirname() and basename()
-        let base_res =
-            super::evaluate_str(r#"basename("/path/to/SetupComplete.cmd")"#, &ctx).unwrap();
+        let base_res = super::evaluate_str(r#"basename("/path/to/SetupComplete.cmd")"#, &ctx)
+            .map_err(StampError::Execution)?;
         assert_eq!(
             base_res.data.as_ref(),
             &ValueData::String("SetupComplete.cmd".to_string())
         );
-        let dir_res =
-            super::evaluate_str(r#"dirname("/path/to/SetupComplete.cmd")"#, &ctx).unwrap();
+        let dir_res = super::evaluate_str(r#"dirname("/path/to/SetupComplete.cmd")"#, &ctx)
+            .map_err(StampError::Execution)?;
         assert_eq!(
             dir_res.data.as_ref(),
             &ValueData::String("/path/to".to_string())
         );
+        Ok(())
     }
 
     #[test]
-    fn test_templatefile_autounattend() {
-        let temp_dir = tempfile::tempdir().unwrap();
+    fn test_templatefile_autounattend() -> Result<(), StampError> {
+        let temp_dir = tempfile::tempdir()?;
         let answer_dir = temp_dir.path().join("win_answer_files").join("w11");
-        std::fs::create_dir_all(&answer_dir).unwrap();
+        std::fs::create_dir_all(&answer_dir)?;
 
         let autounattend_path = answer_dir.join("Autounattend.xml");
         std::fs::write(
             &autounattend_path,
-            r#"<ProductKey>${windows_product_key}</ProductKey><ImageName>${image_name}</ImageName>"#,
-        )
-        .unwrap();
+            r"<ProductKey>${windows_product_key}</ProductKey><ImageName>${image_name}</ImageName>",
+        )?;
 
         let mut ctx = Context::new();
         super::register_stdlib(&mut ctx);
@@ -1370,45 +1405,48 @@ mod tests {
             autounattend_path.to_string_lossy()
         );
 
-        let res = super::evaluate_str(&expr_str, &ctx).unwrap();
+        let res = super::evaluate_str(&expr_str, &ctx).map_err(StampError::Execution)?;
         assert_eq!(
             res.data.as_ref(),
             &ValueData::String(
                 "<ProductKey>W269N-WFGWX-YVC9B-4J6C9-T83GX</ProductKey><ImageName>Windows 11 Pro</ImageName>".to_string()
             )
         );
+        Ok(())
     }
 
     #[test]
-    fn test_file_and_fileexists_helpers() {
-        let temp_dir = tempfile::tempdir().unwrap();
+    fn test_file_and_fileexists_helpers() -> Result<(), StampError> {
+        let temp_dir = tempfile::tempdir()?;
         let cmd_path = temp_dir.path().join("SetupComplete.cmd");
-        std::fs::write(&cmd_path, "@echo off\r\nnet user vagrant /active:yes\r\n").unwrap();
+        std::fs::write(&cmd_path, "@echo off\r\nnet user vagrant /active:yes\r\n")?;
 
         let mut ctx = Context::new();
         super::register_stdlib(&mut ctx);
         super::register_packer_funcs(&mut ctx);
 
         let file_expr = format!(r#"file("{}")"#, cmd_path.to_string_lossy());
-        let content_res = super::evaluate_str(&file_expr, &ctx).unwrap();
+        let content_res = super::evaluate_str(&file_expr, &ctx).map_err(StampError::Execution)?;
         assert_eq!(
             content_res.data.as_ref(),
             &ValueData::String("@echo off\r\nnet user vagrant /active:yes\r\n".to_string())
         );
 
         let exists_expr = format!(r#"fileexists("{}")"#, cmd_path.to_string_lossy());
-        let exists_res = super::evaluate_str(&exists_expr, &ctx).unwrap();
+        let exists_res = super::evaluate_str(&exists_expr, &ctx).map_err(StampError::Execution)?;
         assert_eq!(exists_res.data.as_ref(), &ValueData::Bool(true));
 
         let missing_path = temp_dir.path().join("Nonexistent.cmd");
         let not_exists_expr = format!(r#"fileexists("{}")"#, missing_path.to_string_lossy());
-        let not_exists_res = super::evaluate_str(&not_exists_expr, &ctx).unwrap();
+        let not_exists_res =
+            super::evaluate_str(&not_exists_expr, &ctx).map_err(StampError::Execution)?;
         assert_eq!(not_exists_res.data.as_ref(), &ValueData::Bool(false));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_scoped_resolution_and_expressions() {
-        let temp_dir = tempfile::tempdir().unwrap();
+    async fn test_scoped_resolution_and_expressions() -> Result<(), StampError> {
+        let temp_dir = tempfile::tempdir()?;
         let template_hcl = r#"
             variable "os_name" {
                 type = string
@@ -1445,12 +1483,12 @@ mod tests {
         "#;
 
         let hcl_file = temp_dir.path().join("template.pkr.hcl");
-        std::fs::write(&hcl_file, template_hcl).unwrap();
+        std::fs::write(&hcl_file, template_hcl)?;
 
         let vars = HashMap::new();
-        let mut tmpl = Template::from_files_or_dirs(&[temp_dir.path()], &vars).unwrap();
+        let mut tmpl = Template::from_files_or_dirs(&[temp_dir.path()], &vars)?;
 
-        super::evaluate(&mut tmpl).await.unwrap();
+        super::evaluate(&mut tmpl).await?;
 
         // Check builder evaluation with local.vm_name and local.disk_size_mb
         assert_eq!(
@@ -1467,10 +1505,11 @@ mod tests {
             tmpl.builds[0].provisioners[0].config.get("inline"),
             Some(&"[\"echo 'building ubuntu-22.04'\"]".to_string())
         );
+        Ok(())
     }
 
     #[test]
-    fn test_apply_provisioners_and_eval_fallbacks() {
+    fn test_apply_provisioners_and_eval_fallbacks() -> Result<(), StampError> {
         use crate::template::{BuildConfig, BuilderConfig, ProvisionerConfig, Template};
         use hashicorp_configuration_language_rs::eval::context::Context;
         use hashicorp_configuration_language_rs::parse::parser::Parser;
@@ -1494,7 +1533,9 @@ mod tests {
 
         builder.expressions.insert(
             "k1".to_string(),
-            Parser::new("unknown_func()").parse_expression().unwrap(),
+            Parser::new("unknown_func()")
+                .parse_expression()
+                .ok_or_else(|| StampError::Parse("failed".to_string()))?,
         );
         builder
             .config
@@ -1512,7 +1553,9 @@ mod tests {
             .insert("k1".to_string(), "fallback_v1".to_string());
         prov.expressions.insert(
             "k1".to_string(),
-            Parser::new("unknown_func()").parse_expression().unwrap(),
+            Parser::new("unknown_func()")
+                .parse_expression()
+                .ok_or_else(|| StampError::Parse("failed".to_string()))?,
         );
         prov.config
             .insert("k2".to_string(), "success_val".to_string());
@@ -1529,11 +1572,12 @@ mod tests {
             post_processors: vec![],
             expressions: std::collections::HashMap::new(),
         };
-        build.provisioners.push(prov.clone());
+        build.provisioners.push(prov);
         tmpl.builds.push(build);
 
         super::apply_builders(&ctx, &mut tmpl);
         super::apply_provisioners(&ctx, &mut tmpl);
+        Ok(())
     }
 
     #[test]
@@ -1547,33 +1591,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_evaluator_remaining_uncovered() {
+    async fn test_evaluator_remaining_uncovered() -> Result<(), StampError> {
         use crate::template::Template;
         use hashicorp_configuration_language_rs::eval::context::Context;
         use hashicorp_configuration_language_rs::types::{Value, ValueData};
 
         let ctx = Context::new();
-        let eval_hcl = |s: &str| -> Value {
+        let eval_hcl = |s: &str| -> Result<Value, StampError> {
             let expr = hashicorp_configuration_language_rs::parse::parser::Parser::new(s)
                 .parse_expression()
-                .unwrap();
+                .ok_or_else(|| StampError::Parse("failed".to_string()))?;
             let eval = super::Evaluator::new(&ctx);
-            eval.evaluate(&expr).unwrap().0
+            Ok(eval
+                .evaluate(&expr)
+                .map_err(|e| StampError::Execution(format!("{e:?}")))?
+                .0)
         };
-        let eval_str = |s: &str| -> String {
-            let ValueData::String(res) = &*eval_hcl(s).data else {
-                return String::new();
+        let eval_str = |s: &str| -> Result<String, StampError> {
+            let val = eval_hcl(s)?;
+            let ValueData::String(res) = &*val.data else {
+                return Ok(String::new());
             };
-            res.clone()
+            Ok(res.clone())
         };
-        assert_eq!(eval_str("123"), "");
+        assert_eq!(eval_str("123")?, "");
 
         let mut tmpl = Template::default();
         tmpl.locals
             .insert("my_local".to_string(), "123".to_string());
 
-        let mut var = crate::template::VariableConfig::default();
-        var.default = Some("test".to_string());
+        let mut var = crate::template::VariableConfig {
+            default: Some("test".to_string()),
+            ..Default::default()
+        };
         var.validations.push(crate::template::VariableValidation {
             condition: "true".to_string(),
             condition_expr: None,
@@ -1582,8 +1632,10 @@ mod tests {
         });
         tmpl.variables.insert("var1".to_string(), var);
 
-        let mut var2 = crate::template::VariableConfig::default();
-        var2.default = Some("test".to_string());
+        let mut var2 = crate::template::VariableConfig {
+            default: Some("test".to_string()),
+            ..Default::default()
+        };
         var2.validations.push(crate::template::VariableValidation {
             condition: "unknown_func()".to_string(),
             condition_expr: None,
@@ -1593,23 +1645,28 @@ mod tests {
         tmpl.variables.insert("var2".to_string(), var2);
 
         let _ = super::evaluate(&mut tmpl).await;
+        Ok(())
     }
 
     #[test]
-    fn test_evaluator_uncovered_paths() {
+    fn test_evaluator_uncovered_paths() -> Result<(), StampError> {
         use hashicorp_configuration_language_rs::eval::context::Context;
         use hashicorp_configuration_language_rs::parse::parser::Parser;
         use hashicorp_configuration_language_rs::types::{Type, Value, ValueData};
 
         let ctx = Context::new();
 
-        let expr = Parser::new("unknown_func()").parse_expression().unwrap();
-        let err = super::evaluate_expression(&expr, &ctx).unwrap_err();
-        assert!(!err.is_empty());
+        let expr = Parser::new("unknown_func()")
+            .parse_expression()
+            .ok_or_else(|| StampError::Parse("failed".to_string()))?;
+        let res = super::evaluate_expression(&expr, &ctx);
+        assert!(res.is_err());
 
-        let expr2 = Parser::new("unknown_var").parse_expression().unwrap();
-        let err = super::evaluate_expression(&expr2, &ctx).unwrap_err();
-        assert!(!err.is_empty());
+        let expr2 = Parser::new("unknown_var")
+            .parse_expression()
+            .ok_or_else(|| StampError::Parse("failed".to_string()))?;
+        let res2 = super::evaluate_expression(&expr2, &ctx);
+        assert!(res2.is_err());
 
         let arr = Value::new(
             Type::Tuple(vec![]),
@@ -1637,7 +1694,8 @@ mod tests {
         let unk = Value::new(Type::Dynamic, ValueData::Null);
         assert_eq!(super::value_to_string(&unk), "");
 
-        let val = super::evaluate_str("hello", &ctx).unwrap();
+        let val = super::evaluate_str("hello", &ctx).map_err(StampError::Execution)?;
         assert_eq!(super::value_to_string(&val), "hello");
+        Ok(())
     }
 }

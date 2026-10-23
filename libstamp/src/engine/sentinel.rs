@@ -52,6 +52,8 @@ pub struct SentinelConfig {
     pub enforcement_level: String,
     /// Strongly-typed level representation.
     pub level: EnforcementLevel,
+    /// Optional custom path to the `sentinel` executable.
+    pub sentinel_binary: Option<std::path::PathBuf>,
 }
 
 impl SentinelConfig {
@@ -62,6 +64,7 @@ impl SentinelConfig {
             enforcement_level: level.to_string(),
             level,
             policy_path,
+            sentinel_binary: None,
         }
     }
 }
@@ -125,7 +128,13 @@ impl SentinelEvaluator {
     /// Returns `StampError::Execution` if a hard-mandatory policy fails.
     pub async fn evaluate(&self, artifact: &dyn Artifact) -> Result<(), StampError> {
         if let Some(path) = &self.config.policy_path {
-            let sentinel_cmd = std::env::var("SENTINEL_CMD").unwrap_or_default();
+            let sentinel_cmd = self
+                .config
+                .sentinel_binary
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string())
+                .or_else(|| std::env::var("SENTINEL_CMD").ok())
+                .unwrap_or_default();
             let cmd_name = if sentinel_cmd.is_empty() {
                 "sentinel"
             } else {
@@ -189,7 +198,13 @@ impl SentinelEvaluator {
 
         let imports = export_sentinel_imports(template, build_plan, artifacts);
 
-        let sentinel_cmd = std::env::var("SENTINEL_CMD").unwrap_or_default();
+        let sentinel_cmd = self
+            .config
+            .sentinel_binary
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .or_else(|| std::env::var("SENTINEL_CMD").ok())
+            .unwrap_or_default();
         let cmd_name = if sentinel_cmd.is_empty() {
             "sentinel"
         } else {
@@ -242,16 +257,8 @@ impl SentinelEvaluator {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::pedantic,
-    clippy::all,
-    for_loops_over_fallibles
-)]
 mod tests {
     use super::*;
-
-    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[test]
     fn test_enforcement_level_display_and_parse() {
@@ -312,11 +319,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_sentinel_evaluate_coverage() {
-        let _lock = ENV_LOCK.lock().await;
         let config = SentinelConfig {
             policy_path: Some("a".to_string()),
             enforcement_level: "hard-mandatory".to_string(),
             level: EnforcementLevel::HardMandatory,
+            sentinel_binary: None,
         };
         let eval = SentinelEvaluator::new(config);
 
@@ -332,6 +339,7 @@ mod tests {
             policy_path: Some("a".to_string()),
             enforcement_level: "soft-mandatory".to_string(),
             level: EnforcementLevel::SoftMandatory,
+            sentinel_binary: None,
         });
         let _ = eval2.evaluate(&artifact).await;
 
@@ -339,6 +347,7 @@ mod tests {
             policy_path: Some("a".to_string()),
             enforcement_level: "advisory".to_string(),
             level: EnforcementLevel::Advisory,
+            sentinel_binary: None,
         });
         let _ = eval3.evaluate(&artifact).await;
     }
@@ -349,10 +358,11 @@ mod tests {
             policy_path: Some("a".to_string()),
             enforcement_level: "hard-mandatory".to_string(),
             level: EnforcementLevel::HardMandatory,
+            sentinel_binary: None,
         };
         let config2 = config.clone();
         assert_eq!(config, config2);
-        assert_eq!(format!("{config:?}"), format!("{config2:?}"));
+        assert!(format!("{config:?}").contains("SentinelConfig"));
 
         let new_cfg =
             SentinelConfig::new(Some("p.sentinel".to_string()), EnforcementLevel::Advisory);
@@ -387,11 +397,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_sentinel_evaluate_pass() {
-        let _lock = ENV_LOCK.lock().await;
         let evaluator = SentinelEvaluator::new(SentinelConfig {
             policy_path: Some("pass.sentinel".to_string()),
             enforcement_level: "hard-mandatory".to_string(),
             level: EnforcementLevel::HardMandatory,
+            sentinel_binary: None,
         });
         let artifact = MockArtifact {
             id: "art1".to_string(),
@@ -401,35 +411,35 @@ mod tests {
 
     #[tokio::test]
     async fn test_sentinel_evaluate_fail_hard() {
-        let _lock = ENV_LOCK.lock().await;
         let evaluator = SentinelEvaluator::new(SentinelConfig {
             policy_path: Some("fail.sentinel".to_string()),
             enforcement_level: "hard-mandatory".to_string(),
             level: EnforcementLevel::HardMandatory,
+            sentinel_binary: None,
         });
         let artifact = MockArtifact {
             id: "art1".to_string(),
         };
         assert_eq!(artifact.builder_id(), "mock");
-        assert!(artifact.files().is_empty());
+        assert_eq!(artifact.files().len(), 0);
         assert_eq!(artifact.string(), "art1");
         assert!(artifact.state("dummy").is_none());
         assert!(artifact.destroy().is_ok());
 
         let res = evaluator.evaluate(&artifact).await;
         assert!(res.is_err());
-        for err in res.err() {
+        if let Err(err) = res {
             assert!(err.to_string().contains("failed for artifact art1"));
         }
     }
 
     #[tokio::test]
     async fn test_sentinel_evaluate_fail_soft() {
-        let _lock = ENV_LOCK.lock().await;
         let evaluator = SentinelEvaluator::new(SentinelConfig {
             policy_path: Some("fail.sentinel".to_string()),
             enforcement_level: "soft-mandatory".to_string(),
             level: EnforcementLevel::SoftMandatory,
+            sentinel_binary: None,
         });
         let artifact = MockArtifact {
             id: "art1".to_string(),
@@ -438,74 +448,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sentinel_cli_mock_coverage() {
+    async fn test_sentinel_cli_mock_coverage() -> Result<(), StampError> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _lock = ENV_LOCK.lock().await;
 
-            let temp_dir_res = tempfile::tempdir();
-            assert!(temp_dir_res.is_ok());
-            for temp_dir in temp_dir_res {
-                // Success script
-                let ok_script = temp_dir.path().join("sentinel_ok.sh");
-                let _ = std::fs::write(&ok_script, "#!/bin/sh\nexit 0\n");
-                let _ =
-                    std::fs::set_permissions(&ok_script, std::fs::Permissions::from_mode(0o755));
+            let temp_dir = tempfile::tempdir()?;
+            // Success script
+            let ok_script = temp_dir.path().join("sentinel_ok.sh");
+            std::fs::write(&ok_script, "#!/bin/sh\nexit 0\n")?;
+            std::fs::set_permissions(&ok_script, std::fs::Permissions::from_mode(0o755))?;
 
-                unsafe {
-                    std::env::set_var("SENTINEL_CMD", ok_script.to_string_lossy().as_ref());
-                }
+            let artifact = MockArtifact {
+                id: "art1".to_string(),
+            };
+            let template = Template::default();
+            let plan = serde_json::json!({});
+            let artifacts: Vec<Box<dyn Artifact>> = vec![];
 
-                let eval_pass = SentinelEvaluator::new(SentinelConfig::new(
+            {
+                let mut cfg = SentinelConfig::new(
                     Some("pass.sentinel".to_string()),
                     EnforcementLevel::HardMandatory,
-                ));
-                let artifact = MockArtifact {
-                    id: "art1".to_string(),
-                };
+                );
+                cfg.sentinel_binary = Some(ok_script);
+                let eval_pass = SentinelEvaluator::new(cfg);
                 assert!(eval_pass.evaluate(&artifact).await.is_ok());
-
-                let template = Template::default();
-                let plan = serde_json::json!({});
-                let artifacts: Vec<Box<dyn Artifact>> = vec![];
                 assert!(
                     eval_pass
                         .evaluate_with_context(&template, &plan, &artifacts)
                         .await
                         .is_ok()
                 );
+            }
 
-                // Failure script
-                let fail_script = temp_dir.path().join("sentinel_fail.sh");
-                let _ = std::fs::write(&fail_script, "#!/bin/sh\nexit 1\n");
-                let _ =
-                    std::fs::set_permissions(&fail_script, std::fs::Permissions::from_mode(0o755));
+            // Failure script
+            let fail_script = temp_dir.path().join("sentinel_fail.sh");
+            std::fs::write(&fail_script, "#!/bin/sh\nexit 1\n")?;
+            std::fs::set_permissions(&fail_script, std::fs::Permissions::from_mode(0o755))?;
 
-                unsafe {
-                    std::env::set_var("SENTINEL_CMD", fail_script.to_string_lossy().as_ref());
-                }
-
-                // evaluate with failure script across levels
-                let eval_hard = SentinelEvaluator::new(SentinelConfig::new(
+            {
+                let mut cfg_hard = SentinelConfig::new(
                     Some("policy.sentinel".to_string()),
                     EnforcementLevel::HardMandatory,
-                ));
+                );
+                cfg_hard.sentinel_binary = Some(fail_script.clone());
+                let eval_hard = SentinelEvaluator::new(cfg_hard);
                 assert!(eval_hard.evaluate(&artifact).await.is_err());
 
-                let eval_soft = SentinelEvaluator::new(SentinelConfig::new(
+                let mut cfg_soft = SentinelConfig::new(
                     Some("policy.sentinel".to_string()),
                     EnforcementLevel::SoftMandatory,
-                ));
+                );
+                cfg_soft.sentinel_binary = Some(fail_script.clone());
+                let eval_soft = SentinelEvaluator::new(cfg_soft);
                 assert!(eval_soft.evaluate(&artifact).await.is_ok());
 
-                let eval_adv = SentinelEvaluator::new(SentinelConfig::new(
+                let mut cfg_adv = SentinelConfig::new(
                     Some("policy.sentinel".to_string()),
                     EnforcementLevel::Advisory,
-                ));
+                );
+                cfg_adv.sentinel_binary = Some(fail_script);
+                let eval_adv = SentinelEvaluator::new(cfg_adv);
                 assert!(eval_adv.evaluate(&artifact).await.is_ok());
 
-                // evaluate_with_context with failure script across levels
                 assert!(
                     eval_hard
                         .evaluate_with_context(&template, &plan, &artifacts)
@@ -524,11 +530,16 @@ mod tests {
                         .await
                         .is_ok()
                 );
+            }
 
-                // Nonexistent binary
-                unsafe {
-                    std::env::set_var("SENTINEL_CMD", "/nonexistent/sentinel/binary");
-                }
+            {
+                let mut cfg_hard = SentinelConfig::new(
+                    Some("policy.sentinel".to_string()),
+                    EnforcementLevel::HardMandatory,
+                );
+                cfg_hard.sentinel_binary =
+                    Some(std::path::PathBuf::from("/nonexistent/sentinel/binary"));
+                let eval_hard = SentinelEvaluator::new(cfg_hard);
                 assert!(eval_hard.evaluate(&artifact).await.is_err());
                 assert!(
                     eval_hard
@@ -536,17 +547,13 @@ mod tests {
                         .await
                         .is_ok()
                 );
-
-                unsafe {
-                    std::env::remove_var("SENTINEL_CMD");
-                }
             }
         }
+        Ok(())
     }
 
     #[tokio::test]
     async fn test_sentinel_evaluate_with_context_all_levels() {
-        let _lock = ENV_LOCK.lock().await;
         let template = Template::default();
         let plan = serde_json::json!({});
         let artifacts: Vec<Box<dyn Artifact>> = vec![];
@@ -559,16 +566,7 @@ mod tests {
         let res_hard = eval_hard
             .evaluate_with_context(&template, &plan, &artifacts)
             .await;
-        assert!(res_hard.is_err());
-        for err in res_hard.err() {
-            assert_eq!(
-                std::mem::discriminant(&err),
-                std::mem::discriminant(&StampError::PolicyViolation {
-                    policy: String::new(),
-                    details: String::new()
-                })
-            );
-        }
+        assert!(matches!(res_hard, Err(StampError::PolicyViolation { .. })));
 
         // Soft-mandatory fail
         let eval_soft = SentinelEvaluator::new(SentinelConfig::new(

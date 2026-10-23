@@ -128,7 +128,6 @@ pub async fn init_with_options(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -182,9 +181,7 @@ mod tests {
         std::fs::write(&tmpl_path, hcl).map_err(StampError::Io)?;
 
         // Test with PACKER_CONFIG_DIR env var to hit fallback and allow discover() to find it
-        unsafe {
-            std::env::set_var("PACKER_CONFIG_DIR", temp_dir.path());
-        }
+        let _env = crate::utils::ScopedEnvVar::set("PACKER_CONFIG_DIR", temp_dir.path());
 
         let opts = InitOptions {
             upgrade: false,
@@ -210,10 +207,6 @@ mod tests {
             target_dir: None,
         };
         init_with_options(tmpl_path.to_str().unwrap_or_default(), &opts3).await?;
-
-        unsafe {
-            std::env::remove_var("PACKER_CONFIG_DIR");
-        }
 
         Ok(())
     }

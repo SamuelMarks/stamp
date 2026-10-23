@@ -373,14 +373,13 @@ impl super::DataSource for HcpPackerImageDataSource {
 }
 
 #[cfg(test)]
-#[allow(clippy::all, clippy::pedantic)]
 mod tests {
     use super::*;
     use crate::data_source::DataSource;
 
     #[test]
     fn test_secret_string_methods_and_debug() {
-        let secret = SecretString::new("my-super-secret".into());
+        let secret = SecretString::new("my-super-secret");
         assert!(!secret.is_empty());
         assert_eq!(format!("{secret:?}"), "***REDACTED***");
         assert_eq!(secret.expose_secret(), "my-super-secret");
@@ -430,7 +429,7 @@ mod tests {
 
         let res_401 = hcp_client(
             Some("id"),
-            Some(&SecretString::new("secret".into())),
+            Some(&SecretString::new("secret")),
             Some(&auth_url),
         )
         .await;
@@ -447,7 +446,7 @@ mod tests {
 
         let res_inv = hcp_client(
             Some("id"),
-            Some(&SecretString::new("secret".into())),
+            Some(&SecretString::new("secret")),
             Some(&auth_url),
         )
         .await;
@@ -464,7 +463,7 @@ mod tests {
 
         let res_no_tok = hcp_client(
             Some("id"),
-            Some(&SecretString::new("secret".into())),
+            Some(&SecretString::new("secret")),
             Some(&auth_url),
         )
         .await;
@@ -481,7 +480,7 @@ mod tests {
 
         let res_bad_char = hcp_client(
             Some("id"),
-            Some(&SecretString::new("secret".into())),
+            Some(&SecretString::new("secret")),
             Some(&auth_url),
         )
         .await;
@@ -491,7 +490,7 @@ mod tests {
         // 5. Auth network connection failure
         let res_net = hcp_client(
             Some("id"),
-            Some(&SecretString::new("secret".into())),
+            Some(&SecretString::new("secret")),
             Some("http://127.0.0.1:1"),
         )
         .await;
@@ -507,7 +506,7 @@ mod tests {
 
         let client = hcp_client(
             Some("id"),
-            Some(&SecretString::new("secret".into())),
+            Some(&SecretString::new("secret")),
             Some(&auth_url),
         )
         .await?;
@@ -633,7 +632,7 @@ mod tests {
             api_url: Some(api_url.clone()),
             auth_url: Some(auth_url.clone()),
             client_id: Some("id".to_string()),
-            client_secret: Some(SecretString::new("sec".into())),
+            client_secret: Some(SecretString::new("sec")),
         });
         assert!(matches!(ds_404.read().await, Err(StampError::HcpApi(_))));
         iter_404.assert_async().await;
@@ -689,7 +688,7 @@ mod tests {
             api_url: Some(api_url.clone()),
             auth_url: Some(auth_url.clone()),
             client_id: Some("id".to_string()),
-            client_secret: Some(SecretString::new("sec".into())),
+            client_secret: Some(SecretString::new("sec")),
         });
         assert!(matches!(
             ds_revoked_disallowed.read().await,
@@ -719,7 +718,7 @@ mod tests {
             api_url: Some(api_url.clone()),
             auth_url: Some(auth_url.clone()),
             client_id: Some("id".to_string()),
-            client_secret: Some(SecretString::new("sec".into())),
+            client_secret: Some(SecretString::new("sec")),
         });
         let res_allowed = ds_revoked_allowed.read().await?;
         assert_eq!(res_allowed["id"], "iter_revoked");
@@ -749,7 +748,7 @@ mod tests {
             api_url: Some("http://127.0.0.1:1".to_string()),
             auth_url: Some(auth_url.clone()),
             client_id: Some("id".to_string()),
-            client_secret: Some(SecretString::new("sec".into())),
+            client_secret: Some(SecretString::new("sec")),
             ..Default::default()
         });
         assert!(matches!(
@@ -798,7 +797,7 @@ mod tests {
             api_url: Some(api_url.clone()),
             auth_url: Some(auth_url.clone()),
             client_id: Some("id".to_string()),
-            client_secret: Some(SecretString::new("sec".into())),
+            client_secret: Some(SecretString::new("sec")),
         });
         assert!(matches!(ds_500.read().await, Err(StampError::HcpApi(_))));
         img_500.assert_async().await;
@@ -854,7 +853,7 @@ mod tests {
             api_url: Some(api_url.clone()),
             auth_url: Some(auth_url.clone()),
             client_id: Some("id".to_string()),
-            client_secret: Some(SecretString::new("sec".into())),
+            client_secret: Some(SecretString::new("sec")),
         });
         assert!(matches!(
             ds_revoked_disallowed.read().await,
@@ -885,7 +884,7 @@ mod tests {
             api_url: Some(api_url.clone()),
             auth_url: Some(auth_url.clone()),
             client_id: Some("id".to_string()),
-            client_secret: Some(SecretString::new("sec".into())),
+            client_secret: Some(SecretString::new("sec")),
         });
         let res_allowed = ds_revoked_allowed.read().await?;
         assert_eq!(res_allowed["cloud_image_id"], "ami-revoked-99");
@@ -916,7 +915,7 @@ mod tests {
             api_url: Some("http://127.0.0.1:1".to_string()),
             auth_url: Some(auth_url.clone()),
             client_id: Some("id".to_string()),
-            client_secret: Some(SecretString::new("sec".into())),
+            client_secret: Some(SecretString::new("sec")),
             ..Default::default()
         });
         assert!(matches!(

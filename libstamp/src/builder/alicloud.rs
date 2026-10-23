@@ -1,16 +1,15 @@
 //! Implementation of the `alicloud-ecs` builder using the Alibaba Cloud ECS API.
 
+use crate::artifact::BuildArtifact;
 use crate::builder::Builder;
-use crate::communicator::ssh::{SshCommunicator, SshConfig};
-use crate::engine::hook::{BuildContext, ProvisionHook};
-use crate::engine::multistep::{Runner, StateBag, Step, StepAction};
+use crate::engine::hook::ProvisionHook;
+use crate::engine::multistep::{Runner, StateBag, Step, StepAction, StepProvision};
 use crate::error::StampError;
-use crate::types::{Port, Timeout};
+use crate::types::SecretString;
 use hmac::{Hmac, KeyInit, Mac};
 use sha1::Sha1;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 /// Configuration for the Alicloud ECS builder.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -18,9 +17,9 @@ pub struct AlicloudEcsConfig {
     /// Name of the builder instance.
     pub name: String,
     /// The access key ID for Alibaba Cloud authentication.
-    pub access_key: String,
+    pub access_key: SecretString,
     /// The access key secret for Alibaba Cloud authentication.
-    pub secret_key: String,
+    pub secret_key: SecretString,
     /// The Alibaba Cloud region to build in (e.g. `cn-hangzhou`, `us-west-1`).
     pub region: String,
     /// The ID of the base image.
@@ -30,7 +29,7 @@ pub struct AlicloudEcsConfig {
     /// SSH username to connect with. Defaults to `root`.
     pub ssh_username: Option<String>,
     /// SSH password to connect with.
-    pub ssh_password: Option<String>,
+    pub ssh_password: Option<SecretString>,
     /// Resulting custom image name.
     pub image_name: Option<String>,
     /// Resulting custom image description.
@@ -41,6 +40,18 @@ pub struct AlicloudEcsConfig {
     pub vswitch_id: Option<String>,
     /// Existing security group ID. If empty, a temporary security group is created.
     pub security_group_id: Option<String>,
+    /// Custom API endpoint for Alibaba Cloud ECS.
+    pub endpoint: Option<String>,
+}
+
+impl AlicloudEcsConfig {
+    /// Resolve the Alibaba Cloud ECS API endpoint URL.
+    #[must_use]
+    pub fn resolve_endpoint(&self) -> String {
+        self.endpoint
+            .clone()
+            .unwrap_or_else(|| "https://ecs.aliyuncs.com".to_string())
+    }
 }
 
 /// Compute canonical POP API signature for Alibaba Cloud requests.
@@ -203,12 +214,8 @@ impl Step for StepCreateEcsInstance {
             &format!("Creating Alicloud ECS instance {instance_id}..."),
         );
 
-        state.put("instance_id", instance_id.clone());
+        state.put("instance_id", instance_id);
         state.put("instance_ip", "127.0.0.1".to_string());
-
-        if cfg!(test) {
-            return Ok(StepAction::Continue);
-        }
 
         let mut params = BTreeMap::new();
         params.insert("Action".to_string(), "CreateInstance".to_string());
@@ -226,7 +233,10 @@ impl Step for StepCreateEcsInstance {
         }
         params.insert("Format".to_string(), "JSON".to_string());
         params.insert("Version".to_string(), "2014-05-26".to_string());
-        params.insert("AccessKeyId".to_string(), self.config.access_key.clone());
+        params.insert(
+            "AccessKeyId".to_string(),
+            self.config.access_key.expose().to_string(),
+        );
         params.insert("SignatureMethod".to_string(), "HMAC-SHA1".to_string());
         params.insert("SignatureVersion".to_string(), "1.0".to_string());
         params.insert("Timestamp".to_string(), "2026-09-05T00:00:00Z".to_string());
@@ -235,20 +245,27 @@ impl Step for StepCreateEcsInstance {
             uuid::Uuid::new_v4().to_string(),
         );
 
-        let signature = alicloud_sign(&params, "POST", &self.config.secret_key);
+        let signature = alicloud_sign(&params, "POST", self.config.secret_key.expose());
         params.insert("Signature".to_string(), signature);
 
         let form_body: String = url::form_urlencoded::Serializer::new(String::new())
             .extend_pairs(params)
             .finish();
         let client = reqwest::Client::new();
-        let endpoint = format!("https://ecs.{}.aliyuncs.com", self.config.region);
-        let _ = client
-            .post(&endpoint)
+        let resp = client
+            .post(self.config.resolve_endpoint())
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(form_body)
             .send()
-            .await;
+            .await
+            .map_err(|e| StampError::Execution(format!("Alicloud CreateInstance failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            return Err(StampError::Execution(format!(
+                "Alicloud CreateInstance returned HTTP {}",
+                resp.status()
+            )));
+        }
 
         Ok(StepAction::Continue)
     }
@@ -263,74 +280,6 @@ impl Step for StepCreateEcsInstance {
     }
 }
 
-/// Step to provision the ECS instance over SSH.
-#[derive(Clone)]
-struct StepProvision {
-    /// UI logger.
-    ui: Arc<crate::engine::ui::Ui>,
-    /// Builder name.
-    name: String,
-    /// Configuration.
-    config: AlicloudEcsConfig,
-    /// Provisioning hook.
-    hook: Arc<dyn ProvisionHook>,
-}
-
-#[async_trait::async_trait]
-impl Step for StepProvision {
-    async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
-        self.ui.say(&self.name, "Provisioning ECS instance...");
-
-        let ip = state
-            .get::<String>("instance_ip")
-            .cloned()
-            .unwrap_or_else(|| "127.0.0.1".to_string());
-
-        let ssh_config = SshConfig {
-            host: ip,
-            port: Port::new(22),
-            username: self
-                .config
-                .ssh_username
-                .clone()
-                .unwrap_or_else(|| "root".to_string()),
-            password: self.config.ssh_password.clone(),
-            timeout: Timeout::new(Duration::from_secs(10)),
-            ..Default::default()
-        };
-
-        let comm = Arc::new(SshCommunicator::new(ssh_config));
-
-        let build_ctx = BuildContext {
-            build_id: self.name.clone(),
-            host: "alicloud".to_string(),
-            user: "root".to_string(),
-            packer_run_uuid: "mocked-uuid".to_string(),
-            source_name: self.name.clone(),
-            source_type: "alicloud-ecs".to_string(),
-            ..Default::default()
-        };
-
-        if let Err(e) = self
-            .hook
-            .run_provisioners(comm.clone(), &build_ctx, self.ui.clone())
-            .await
-        {
-            self.ui
-                .error(&self.name, &format!("Provisioning failed: {e}"));
-            let _ = self
-                .hook
-                .run_error_cleanup_provisioners(comm, &build_ctx, self.ui.clone())
-                .await;
-            return Err(e);
-        }
-
-        Ok(StepAction::Continue)
-    }
-
-    async fn cleanup(&mut self, _state: &StateBag) {}
-}
-
 /// Step to stop the ECS instance before image capture.
 #[derive(Debug, Clone)]
 struct StepStopInstance {
@@ -338,9 +287,6 @@ struct StepStopInstance {
     ui: Arc<crate::engine::ui::Ui>,
     /// Builder name.
     name: String,
-    /// Configuration.
-    #[allow(dead_code)]
-    config: AlicloudEcsConfig,
 }
 
 #[async_trait::async_trait]
@@ -422,13 +368,16 @@ impl Builder for AlicloudEcsBuilder {
         ui: Arc<crate::engine::ui::Ui>,
         on_error: crate::engine::packer::OnErrorStrategy,
     ) -> Result<Box<dyn crate::artifact::Artifact>, StampError> {
-        if cfg!(test) {
-            if self.config.name == "test_bad_exit" {
-                return Err(StampError::Execution("Bad exit".to_string()));
-            } else if self.config.name == "test_missing" {
-                return Err(StampError::Io(std::io::Error::other("Missing")));
-            }
-        }
+        let ssh_user = self
+            .config
+            .ssh_username
+            .clone()
+            .unwrap_or_else(|| "root".to_string());
+        let ssh_pass = self
+            .config
+            .ssh_password
+            .as_ref()
+            .map(|s| s.expose().to_string());
 
         let mut runner = Runner::new(vec![
             Box::new(StepCreateNetwork {
@@ -441,16 +390,14 @@ impl Builder for AlicloudEcsBuilder {
                 name: self.name(),
                 config: self.config.clone(),
             }),
-            Box::new(StepProvision {
-                ui: ui.clone(),
-                name: self.name(),
-                config: self.config.clone(),
-                hook: hook.clone(),
-            }),
+            Box::new(
+                StepProvision::new(ui.clone(), self.name(), "alicloud-ecs", hook)
+                    .with_ssh_credentials(ssh_user, ssh_pass)
+                    .with_message("Provisioning ECS instance..."),
+            ),
             Box::new(StepStopInstance {
                 ui: ui.clone(),
                 name: self.name(),
-                config: self.config.clone(),
             }),
             Box::new(StepCreateImage {
                 ui: ui.clone(),
@@ -460,45 +407,20 @@ impl Builder for AlicloudEcsBuilder {
         ]);
 
         let mut state = StateBag::new();
-        match runner.run(&mut state).await {
-            Ok(()) => {
-                runner.cleanup(&state).await;
-            }
-            Err(e) => {
-                match on_error {
-                    crate::engine::packer::OnErrorStrategy::Cleanup => {
-                        runner.cleanup(&state).await;
-                    }
-                    crate::engine::packer::OnErrorStrategy::Abort
-                    | crate::engine::packer::OnErrorStrategy::RunCleanupProvisioner => {}
-                    crate::engine::packer::OnErrorStrategy::Ask => {
-                        let msg = format!(
-                            "Build '{}' errored: {}
-Do you want to clean up? [y/N]: ",
-                            self.name(),
-                            e
-                        );
-                        if let Ok(ans) = ui.ask("stamp", &msg)
-                            && (ans == "y" || ans == "yes")
-                        {
-                            runner.cleanup(&state).await;
-                        }
-                    }
-                }
-                return Err(e);
-            }
-        }
+        runner
+            .run_with_strategy(&mut state, &self.name(), &ui, on_error)
+            .await?;
 
         let artifact_id = state
             .get::<String>("artifact_id")
             .cloned()
             .unwrap_or_default();
 
-        Ok(Box::new(crate::artifact::MockArtifact {
-            builder_id: self.name(),
-            id: artifact_id,
-            files: vec![],
-        }))
+        Ok(Box::new(BuildArtifact::with_builder(
+            self.name(),
+            artifact_id,
+            vec![],
+        )))
     }
 
     async fn cancel(&self) -> Result<(), StampError> {
@@ -507,12 +429,6 @@ Do you want to clean up? [y/N]: ",
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::pedantic,
-    clippy::all,
-    for_loops_over_fallibles
-)]
 mod tests {
     use super::*;
 
@@ -520,8 +436,8 @@ mod tests {
     fn test_alicloud_ecs_name() {
         let b = AlicloudEcsBuilder::new(AlicloudEcsConfig {
             name: "test".to_string(),
-            access_key: "ak".to_string(),
-            secret_key: "sk".to_string(),
+            access_key: SecretString::new("ak"),
+            secret_key: SecretString::new("sk"),
             region: "cn-hangzhou".to_string(),
             image_id: "img-123".to_string(),
             instance_type: "ecs.t1.small".to_string(),
@@ -531,50 +447,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_alicloud_ecs_prepare_success() {
+    async fn test_alicloud_ecs_prepare() -> Result<(), StampError> {
         let b = AlicloudEcsBuilder::new(AlicloudEcsConfig {
             name: "test".to_string(),
-            access_key: "ak".to_string(),
-            secret_key: "sk".to_string(),
+            access_key: SecretString::new("ak"),
+            secret_key: SecretString::new("sk"),
             region: "cn-hangzhou".to_string(),
             image_id: "img-123".to_string(),
             instance_type: "ecs.t1.small".to_string(),
             ..Default::default()
         });
-        assert!(b.prepare().await.is_ok());
-    }
+        b.prepare().await?;
 
-    #[tokio::test]
-    async fn test_alicloud_ecs_prepare_failure() {
-        let b = AlicloudEcsBuilder::new(AlicloudEcsConfig {
+        let b_no_ak = AlicloudEcsBuilder::new(AlicloudEcsConfig {
             name: "test".to_string(),
-            access_key: "".to_string(),
-            secret_key: "sk".to_string(),
+            access_key: SecretString::new(""),
+            secret_key: SecretString::new("sk"),
             region: "cn-hangzhou".to_string(),
             image_id: "img-123".to_string(),
             instance_type: "ecs.t1.small".to_string(),
             ..Default::default()
         });
-        assert!(b.prepare().await.is_err());
+        assert!(b_no_ak.prepare().await.is_err());
 
-        let b2 = AlicloudEcsBuilder::new(AlicloudEcsConfig {
+        let b_missing_secret = AlicloudEcsBuilder::new(AlicloudEcsConfig {
             name: "test2".to_string(),
-            access_key: "ak".to_string(),
-            secret_key: "".to_string(),
+            access_key: SecretString::new("ak"),
+            secret_key: SecretString::new(""),
             region: "cn-hangzhou".to_string(),
             image_id: "img-123".to_string(),
             instance_type: "ecs.t1.small".to_string(),
             ..Default::default()
         });
-        assert!(b2.prepare().await.is_err());
+        assert!(b_missing_secret.prepare().await.is_err());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_alicloud_ecs_run() {
+    async fn test_alicloud_ecs_run() -> Result<(), StampError> {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_body(r#"{"InstanceId":"i-mock"}"#)
+            .create_async()
+            .await;
+
         let b = AlicloudEcsBuilder::new(AlicloudEcsConfig {
             name: "test".to_string(),
-            access_key: "ak".to_string(),
-            secret_key: "sk".to_string(),
+            access_key: SecretString::new("ak"),
+            secret_key: SecretString::new("sk"),
             region: "cn-hangzhou".to_string(),
             image_id: "img-123".to_string(),
             instance_type: "ecs.t1.small".to_string(),
@@ -582,26 +504,25 @@ mod tests {
             vpc_id: Some("vpc-custom".to_string()),
             vswitch_id: Some("vsw-custom".to_string()),
             security_group_id: Some("sg-custom".to_string()),
+            ssh_password: Some(SecretString::new("pass")),
+            endpoint: Some(server.url()),
             ..Default::default()
         });
-        let hook: std::sync::Arc<dyn crate::engine::hook::ProvisionHook> =
-            std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
-                provisioners: std::sync::Arc::new(vec![]),
-                error_cleanup_provisioners: std::sync::Arc::new(vec![]),
-            });
-        let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
+        let hook: Arc<dyn ProvisionHook> = Arc::new(crate::engine::hook::DefaultProvisionHook {
+            provisioners: Arc::new(vec![]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let ui = Arc::new(crate::engine::ui::Ui::new(
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
         ));
-        let res = b
+        let art = b
             .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
-            .await;
-        assert!(res.is_ok());
-        for art in res {
-            assert!(art.id().starts_with("alicloud:m-"));
-        }
-        assert!(b.cancel().await.is_ok());
+            .await?;
+        assert!(art.id().starts_with("alicloud:m-"));
+        assert_eq!(art.builder_id(), "test");
+        b.cancel().await
     }
 
     #[test]
@@ -611,14 +532,12 @@ mod tests {
         params.insert("Format".to_string(), "JSON".to_string());
         params.insert("RegionId".to_string(), "cn-hangzhou".to_string());
 
-        // Test normal short secret
         let signature = alicloud_sign(&params, "GET", "testsecret");
-        assert!(!signature.is_empty());
+        assert_ne!(signature, "");
 
-        // Test long secret > 64 bytes to cover SHA1 digest of long key branch
         let long_secret = "a".repeat(100);
         let signature_long = alicloud_sign(&params, "POST", &long_secret);
-        assert!(!signature_long.is_empty());
+        assert_ne!(signature_long, "");
     }
 
     struct FailingProvisioner;
@@ -634,28 +553,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_alicloud_ecs_run_failure() {
+    async fn test_alicloud_ecs_run_failure_and_cleanups() -> Result<(), StampError> {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_body(r#"{"InstanceId":"i-mock"}"#)
+            .create_async()
+            .await;
+
         let b = AlicloudEcsBuilder::new(AlicloudEcsConfig {
-            name: "test_fail".to_string(),
-            access_key: "ak".to_string(),
-            secret_key: "sk".to_string(),
+            name: "test-fail".to_string(),
+            access_key: SecretString::new("ak"),
+            secret_key: SecretString::new("sk"),
             region: "cn-hangzhou".to_string(),
             image_id: "img-123".to_string(),
             instance_type: "ecs.t1.small".to_string(),
+            endpoint: Some(server.url()),
             ..Default::default()
         });
-        let hook: std::sync::Arc<dyn crate::engine::hook::ProvisionHook> =
-            std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
-                provisioners: std::sync::Arc::new(vec![Box::new(FailingProvisioner)]),
-                error_cleanup_provisioners: std::sync::Arc::new(vec![]),
-            });
-        let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
+        assert_eq!(
+            AlicloudEcsConfig::default().resolve_endpoint(),
+            "https://ecs.aliyuncs.com"
+        );
+        let hook: Arc<dyn ProvisionHook> = Arc::new(crate::engine::hook::DefaultProvisionHook {
+            provisioners: Arc::new(vec![Box::new(FailingProvisioner)]),
+            error_cleanup_provisioners: Arc::new(vec![]),
+        });
+        let ui = Arc::new(crate::engine::ui::Ui::new(
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
         ));
 
-        // Test with Cleanup strategy
         let res_cleanup = b
             .run(
                 hook.clone(),
@@ -665,22 +595,16 @@ mod tests {
             .await;
         assert!(res_cleanup.is_err());
 
-        // Test with Abort strategy
         let res_abort = b
-            .run(hook, ui, crate::engine::packer::OnErrorStrategy::Abort)
+            .run(
+                hook,
+                ui.clone(),
+                crate::engine::packer::OnErrorStrategy::Abort,
+            )
             .await;
         assert!(res_abort.is_err());
-    }
 
-    #[tokio::test]
-    async fn test_alicloud_cleanups() {
-        let ui = Arc::new(crate::engine::ui::Ui::new(
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-        ));
         let config = AlicloudEcsConfig::default();
-
         let mut step_net = StepCreateNetwork {
             ui: ui.clone(),
             name: "test".to_string(),
@@ -695,124 +619,43 @@ mod tests {
         state.put("vpc_id", "vpc-1".to_string());
         step_net.cleanup(&state).await;
 
-        // Cleanup with partial state (true but missing ids)
-        let mut partial_state = StateBag::new();
-        partial_state.put("is_temp_sg", true);
-        partial_state.put("is_temp_vswitch", true);
-        partial_state.put("is_temp_vpc", true);
-        step_net.cleanup(&partial_state).await;
-
-        // Cleanup with empty state (false branches)
         let empty_state = StateBag::new();
         step_net.cleanup(&empty_state).await;
+
+        let mut err_server = mockito::Server::new_async().await;
+        let _m_err = err_server
+            .mock("POST", "/")
+            .with_status(500)
+            .create_async()
+            .await;
 
         let mut step_ecs = StepCreateEcsInstance {
             ui: ui.clone(),
             name: "test".to_string(),
-            config: config.clone(),
+            config: AlicloudEcsConfig {
+                endpoint: Some(err_server.url()),
+                ..Default::default()
+            },
         };
+        assert!(step_ecs.run(&mut state).await.is_err());
         state.put("instance_id", "i-1".to_string());
         step_ecs.cleanup(&state).await;
         step_ecs.cleanup(&empty_state).await;
 
-        // StepProvision run without instance_ip in state
-        let hook: Arc<dyn ProvisionHook> = Arc::new(crate::engine::hook::DefaultProvisionHook {
-            provisioners: Arc::new(vec![]),
-            error_cleanup_provisioners: Arc::new(vec![]),
-        });
-        let mut step_prov = StepProvision {
+        let mut step_stop = StepStopInstance {
             ui: ui.clone(),
             name: "test".to_string(),
-            config: config.clone(),
-            hook: hook.clone(),
         };
-        let mut prov_state = StateBag::new();
-        let prov_action = step_prov.run(&mut prov_state).await;
-        assert!(prov_action.is_ok());
+        step_stop.cleanup(&empty_state).await;
 
-        // StepProvision run with instance_ip and custom ssh_username
-        let mut custom_config = config.clone();
-        custom_config.ssh_username = Some("custom_user".to_string());
-        let mut step_prov_custom = StepProvision {
-            ui: ui.clone(),
-            name: "test".to_string(),
-            config: custom_config,
-            hook: hook.clone(),
-        };
-        prov_state.put("instance_ip", "1.2.3.4".to_string());
-        let _ = step_prov_custom.run(&mut prov_state).await;
-
-        // StepCreateImage run without image_name (fallback branch)
         let mut step_img = StepCreateImage {
             ui,
             name: "test".to_string(),
             config,
         };
         let mut img_state = StateBag::new();
-        let img_action = step_img.run(&mut img_state).await;
-        assert!(img_action.is_ok());
-    }
-
-    #[test]
-    fn test_derived_traits() {
-        let config = AlicloudEcsConfig {
-            name: "test".to_string(),
-            ..Default::default()
-        };
-        assert_eq!(config.clone(), config);
-        assert_eq!(format!("{config:?}"), format!("{config:?}"));
-
-        let builder = AlicloudEcsBuilder::new(config.clone());
-        assert_eq!(format!("{builder:?}"), format!("{builder:?}"));
-        let _builder_cloned = builder.clone();
-
-        let ui = Arc::new(crate::engine::ui::Ui::new(
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-        ));
-        let step1 = StepCreateNetwork {
-            ui: ui.clone(),
-            name: "n".into(),
-            config: config.clone(),
-        };
-        let _ = step1.clone();
-        let _ = format!("{step1:?}");
-
-        let step2 = StepCreateEcsInstance {
-            ui: ui.clone(),
-            name: "n".into(),
-            config: config.clone(),
-        };
-        let _ = step2.clone();
-        let _ = format!("{step2:?}");
-
-        let hook: Arc<dyn ProvisionHook> = Arc::new(crate::engine::hook::DefaultProvisionHook {
-            provisioners: Arc::new(vec![]),
-            error_cleanup_provisioners: Arc::new(vec![]),
-        });
-        let step3 = StepProvision {
-            ui: ui.clone(),
-            name: "n".into(),
-            config: config.clone(),
-            hook: hook.clone(),
-        };
-        let _ = step3.clone();
-
-        let step4 = StepStopInstance {
-            ui: ui.clone(),
-            name: "n".into(),
-            config: config.clone(),
-        };
-        let _ = step4.clone();
-        let _ = format!("{step4:?}");
-
-        let step5 = StepCreateImage {
-            ui: ui.clone(),
-            name: "n".into(),
-            config: config.clone(),
-        };
-        let _ = step5.clone();
-        let _ = format!("{step5:?}");
+        step_img.run(&mut img_state).await?;
+        step_img.cleanup(&img_state).await;
+        Ok(())
     }
 }

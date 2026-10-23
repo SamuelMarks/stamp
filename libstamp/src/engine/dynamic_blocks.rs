@@ -79,7 +79,7 @@ mod tests {
     }
 
     #[test]
-    fn test_expand_dynamic_blocks_missing_for_each() -> Result<(), StampError> {
+    fn test_expand_dynamic_blocks_missing_for_each() {
         let input = r#"
             dynamic "test" {
                 content {}
@@ -88,11 +88,10 @@ mod tests {
         let mut parser = Parser::new(input);
         let _body = parser.parse_body();
         assert!(format!("{:?}", parser.errors()).contains("Missing required argument"));
-        Ok(())
     }
 
     #[test]
-    fn test_expand_dynamic_blocks_missing_content() -> Result<(), StampError> {
+    fn test_expand_dynamic_blocks_missing_content() {
         let input = r#"
             dynamic "test" {
                 for_each = []
@@ -101,11 +100,10 @@ mod tests {
         let mut parser = Parser::new(input);
         let _body = parser.parse_body();
         assert!(format!("{:?}", parser.errors()).contains("Missing required block"));
-        Ok(())
     }
 
     #[test]
-    fn test_expand_dynamic_blocks_invalid_labels() -> Result<(), StampError> {
+    fn test_expand_dynamic_blocks_invalid_labels() {
         let input = r#"
             dynamic "test" "extra" {
                 for_each = []
@@ -115,7 +113,6 @@ mod tests {
         let mut parser = Parser::new(input);
         let _body = parser.parse_body();
         assert!(format!("{:?}", parser.errors()).contains("Block opening brace expected"));
-        Ok(())
     }
 
     #[test]
@@ -156,7 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn test_expand_dynamic_blocks_invalid_labels_type() -> Result<(), StampError> {
+    fn test_expand_dynamic_blocks_invalid_labels_type() {
         let input = r#"
             dynamic "test" {
                 for_each = []
@@ -167,6 +164,5 @@ mod tests {
         let mut parser = Parser::new(input);
         let _body = parser.parse_body();
         assert!(format!("{:?}", parser.errors()).contains("Invalid labels argument"));
-        Ok(())
     }
 }

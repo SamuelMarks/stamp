@@ -3,24 +3,25 @@
 //! Provides a full REST client for Yandex Compute Cloud, managing service account IAM tokens,
 //! folder and subnet allocations, temporary VM instances, disk snapshots, and custom image registrations.
 
+use crate::artifact::BuildArtifact;
 use crate::builder::Builder;
-use crate::communicator::ssh::{SshCommunicator, SshConfig};
-use crate::engine::hook::{BuildContext, ProvisionHook};
-use crate::engine::multistep::{Runner, StateBag, Step, StepAction};
+use crate::engine::hook::ProvisionHook;
+use crate::engine::multistep::{Runner, StateBag, Step, StepAction, StepProvision};
 use crate::error::StampError;
-use crate::types::{Port, Timeout};
+use crate::types::SecretString;
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::sync::Arc;
-use std::time::Duration;
 
 /// Configuration for the `yandex` builder.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct YandexConfig {
     /// Name of the builder instance.
     pub name: String,
+    /// Optional custom Yandex Cloud API endpoint URL override.
+    pub endpoint: Option<String>,
     /// OAuth token or static IAM token for Yandex Cloud API.
-    pub token: Option<String>,
+    pub token: Option<SecretString>,
     /// Service account key JSON file path or raw JSON content.
     pub service_account_key_file: Option<String>,
     /// Folder ID where the temporary instance and custom image will be created.
@@ -54,25 +55,47 @@ pub struct YandexConfig {
     /// SSH username for provisioner connection.
     pub ssh_username: Option<String>,
     /// SSH password for provisioner connection.
-    pub ssh_password: Option<String>,
+    pub ssh_password: Option<SecretString>,
 }
 
 /// Yandex Compute Cloud REST client.
 #[derive(Debug, Clone)]
 pub struct YandexClient {
     /// Static or OAuth token.
-    pub token: Option<String>,
+    pub token: Option<SecretString>,
     /// Service account key file or content.
     pub service_account_key_file: Option<String>,
+    /// Base URL for IAM API.
+    pub iam_endpoint: String,
+    /// Base URL for Compute API.
+    pub compute_endpoint: String,
 }
 
 impl YandexClient {
     /// Create a new `YandexClient`.
     #[must_use]
-    pub const fn new(token: Option<String>, service_account_key_file: Option<String>) -> Self {
+    pub fn new(token: Option<SecretString>, service_account_key_file: Option<String>) -> Self {
         Self {
             token,
             service_account_key_file,
+            iam_endpoint: "https://iam.api.cloud.yandex.net".to_string(),
+            compute_endpoint: "https://compute.api.cloud.yandex.net".to_string(),
+        }
+    }
+
+    /// Create a new `YandexClient` with custom API endpoints.
+    #[must_use]
+    pub fn with_endpoints(
+        token: Option<SecretString>,
+        service_account_key_file: Option<String>,
+        iam_endpoint: impl Into<String>,
+        compute_endpoint: impl Into<String>,
+    ) -> Self {
+        Self {
+            token,
+            service_account_key_file,
+            iam_endpoint: iam_endpoint.into(),
+            compute_endpoint: compute_endpoint.into(),
         }
     }
 
@@ -82,28 +105,26 @@ impl YandexClient {
     ///
     /// Returns `StampError::Execution` if token exchange fails.
     pub async fn get_iam_token(&self) -> Result<String, StampError> {
-        if cfg!(test) {
-            return Ok("mock-yandex-iam-token-12345".to_string());
-        }
-
         if let Some(ref t) = self.token {
-            if !t.starts_with("y0_") {
-                return Ok(t.clone());
-            }
-
-            let client = reqwest::Client::new();
-            let resp = client
-                .post("https://iam.api.cloud.yandex.net/iam/v1/tokens")
-                .json(&serde_json::json!({ "yandexPassportOauthToken": t }))
-                .send()
-                .await
-                .map_err(|e| StampError::Execution(format!("IAM token exchange failed: {e}")))?;
-
             #[derive(Deserialize)]
             struct TokenResponse {
                 #[serde(rename = "iamToken")]
                 iam_token: String,
             }
+
+            let raw = t.expose();
+            if !raw.starts_with("y0_") {
+                return Ok(raw.to_string());
+            }
+
+            let client = reqwest::Client::new();
+            let url = format!("{}/iam/v1/tokens", self.iam_endpoint.trim_end_matches('/'));
+            let resp = client
+                .post(&url)
+                .json(&serde_json::json!({ "yandexPassportOauthToken": raw }))
+                .send()
+                .await
+                .map_err(|e| StampError::Execution(format!("IAM token exchange failed: {e}")))?;
 
             let data: TokenResponse = resp
                 .json()
@@ -125,11 +146,15 @@ impl YandexClient {
         iam_token: &str,
         config: &YandexConfig,
     ) -> Result<(String, String), StampError> {
-        if cfg!(test) {
-            return Ok((
-                format!("epd{}", uuid::Uuid::new_v4().simple()),
-                format!("disk-{}", uuid::Uuid::new_v4().simple()),
-            ));
+        #[derive(Deserialize)]
+        struct OperationResponse {
+            #[serde(default)]
+            metadata: Option<InstanceMetadata>,
+        }
+        #[derive(Deserialize)]
+        struct InstanceMetadata {
+            #[serde(rename = "instanceId")]
+            instance_id: Option<String>,
         }
 
         let client = reqwest::Client::new();
@@ -180,8 +205,12 @@ impl YandexClient {
             "networkInterfaceSpecs": [net_spec]
         });
 
+        let url = format!(
+            "{}/compute/v1/instances",
+            self.compute_endpoint.trim_end_matches('/')
+        );
         let resp = client
-            .post("https://compute.api.cloud.yandex.net/compute/v1/instances")
+            .post(&url)
             .bearer_auth(iam_token)
             .json(&payload)
             .send()
@@ -193,17 +222,6 @@ impl YandexClient {
             return Err(StampError::Execution(format!(
                 "Instance launch failed: {body}"
             )));
-        }
-
-        #[derive(Deserialize)]
-        struct OperationResponse {
-            #[serde(default)]
-            metadata: Option<InstanceMetadata>,
-        }
-        #[derive(Deserialize)]
-        struct InstanceMetadata {
-            #[serde(rename = "instanceId")]
-            instance_id: Option<String>,
         }
 
         let op: OperationResponse = resp
@@ -227,20 +245,6 @@ impl YandexClient {
         iam_token: &str,
         instance_id: &str,
     ) -> Result<String, StampError> {
-        if cfg!(test) {
-            return Ok("127.0.0.1".to_string());
-        }
-
-        let client = reqwest::Client::new();
-        let url =
-            format!("https://compute.api.cloud.yandex.net/compute/v1/instances/{instance_id}");
-        let resp = client
-            .get(&url)
-            .bearer_auth(iam_token)
-            .send()
-            .await
-            .map_err(|e| StampError::Execution(format!("Get instance failed: {e}")))?;
-
         #[derive(Deserialize)]
         struct InstanceView {
             #[serde(rename = "networkInterfaces")]
@@ -260,6 +264,18 @@ impl YandexClient {
         struct NatAddress {
             address: Option<String>,
         }
+
+        let client = reqwest::Client::new();
+        let url = format!(
+            "{}/compute/v1/instances/{instance_id}",
+            self.compute_endpoint.trim_end_matches('/')
+        );
+        let resp = client
+            .get(&url)
+            .bearer_auth(iam_token)
+            .send()
+            .await
+            .map_err(|e| StampError::Execution(format!("Get instance failed: {e}")))?;
 
         if let Ok(inst) = resp.json::<InstanceView>().await
             && let Some(nics) = inst.network_interfaces
@@ -286,25 +302,6 @@ impl YandexClient {
         disk_id: &str,
         name: &str,
     ) -> Result<String, StampError> {
-        if cfg!(test) {
-            return Ok(format!("snap-{}", uuid::Uuid::new_v4().simple()));
-        }
-
-        let client = reqwest::Client::new();
-        let payload = serde_json::json!({
-            "folderId": folder_id,
-            "diskId": disk_id,
-            "name": name,
-        });
-
-        let resp = client
-            .post("https://compute.api.cloud.yandex.net/compute/v1/snapshots")
-            .bearer_auth(iam_token)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| StampError::Execution(format!("Create snapshot failed: {e}")))?;
-
         #[derive(Deserialize)]
         struct Op {
             #[serde(default)]
@@ -315,6 +312,25 @@ impl YandexClient {
             #[serde(rename = "snapshotId")]
             snapshot_id: Option<String>,
         }
+
+        let client = reqwest::Client::new();
+        let payload = serde_json::json!({
+            "folderId": folder_id,
+            "diskId": disk_id,
+            "name": name,
+        });
+
+        let url = format!(
+            "{}/compute/v1/snapshots",
+            self.compute_endpoint.trim_end_matches('/')
+        );
+        let resp = client
+            .post(&url)
+            .bearer_auth(iam_token)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| StampError::Execution(format!("Create snapshot failed: {e}")))?;
 
         let op: Op = resp
             .json()
@@ -338,8 +354,15 @@ impl YandexClient {
         source_disk_id: Option<&str>,
         source_snapshot_id: Option<&str>,
     ) -> Result<String, StampError> {
-        if cfg!(test) {
-            return Ok(format!("fd8{}", uuid::Uuid::new_v4().simple()));
+        #[derive(Deserialize)]
+        struct Op {
+            #[serde(default)]
+            metadata: Option<ImageMeta>,
+        }
+        #[derive(Deserialize)]
+        struct ImageMeta {
+            #[serde(rename = "imageId")]
+            image_id: Option<String>,
         }
 
         let folder_id = config.folder_id.as_deref().unwrap_or("b1gmockfolder");
@@ -365,24 +388,17 @@ impl YandexClient {
             payload["sourceDiskId"] = serde_json::json!(disk);
         }
 
+        let url = format!(
+            "{}/compute/v1/images",
+            self.compute_endpoint.trim_end_matches('/')
+        );
         let resp = client
-            .post("https://compute.api.cloud.yandex.net/compute/v1/images")
+            .post(&url)
             .bearer_auth(iam_token)
             .json(&payload)
             .send()
             .await
             .map_err(|e| StampError::Execution(format!("Create image failed: {e}")))?;
-
-        #[derive(Deserialize)]
-        struct Op {
-            #[serde(default)]
-            metadata: Option<ImageMeta>,
-        }
-        #[derive(Deserialize)]
-        struct ImageMeta {
-            #[serde(rename = "imageId")]
-            image_id: Option<String>,
-        }
 
         let op: Op = resp
             .json()
@@ -404,13 +420,11 @@ impl YandexClient {
         iam_token: &str,
         instance_id: &str,
     ) -> Result<(), StampError> {
-        if cfg!(test) {
-            return Ok(());
-        }
-
         let client = reqwest::Client::new();
-        let url =
-            format!("https://compute.api.cloud.yandex.net/compute/v1/instances/{instance_id}");
+        let url = format!(
+            "{}/compute/v1/instances/{instance_id}",
+            self.compute_endpoint.trim_end_matches('/')
+        );
         let _ = client.delete(&url).bearer_auth(iam_token).send().await;
         Ok(())
     }
@@ -505,73 +519,6 @@ impl Step for StepLaunchInstance {
     }
 }
 
-/// Step to execute provisioners on the Yandex compute instance.
-#[derive(Clone)]
-struct StepProvisionYandex {
-    /// UI reference.
-    ui: Arc<crate::engine::ui::Ui>,
-    /// Builder name.
-    name: String,
-    /// Hook.
-    hook: Arc<dyn ProvisionHook>,
-    /// SSH username.
-    ssh_username: Option<String>,
-    /// SSH password.
-    ssh_password: Option<String>,
-}
-
-#[async_trait]
-impl Step for StepProvisionYandex {
-    async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
-        self.ui.say(&self.name, "Provisioning Yandex instance...");
-        let ip = state
-            .get::<String>("instance_ip")
-            .cloned()
-            .unwrap_or_else(|| "127.0.0.1".to_string());
-
-        let ssh_config = SshConfig {
-            host: ip,
-            port: Port::new(22),
-            username: self
-                .ssh_username
-                .clone()
-                .unwrap_or_else(|| "ubuntu".to_string()),
-            password: self.ssh_password.clone(),
-            timeout: Timeout::new(Duration::from_secs(10)),
-            ..Default::default()
-        };
-
-        let comm = Arc::new(SshCommunicator::new(ssh_config));
-        let build_ctx = BuildContext {
-            build_id: self.name.clone(),
-            host: "yandex".to_string(),
-            user: "ubuntu".to_string(),
-            packer_run_uuid: "mocked-uuid".to_string(),
-            source_name: self.name.clone(),
-            source_type: "yandex".to_string(),
-            ..Default::default()
-        };
-
-        if let Err(e) = self
-            .hook
-            .run_provisioners(comm.clone(), &build_ctx, self.ui.clone())
-            .await
-        {
-            self.ui
-                .error(&self.name, &format!("Provisioning failed: {e}"));
-            let _ = self
-                .hook
-                .run_error_cleanup_provisioners(comm, &build_ctx, self.ui.clone())
-                .await;
-            return Err(e);
-        }
-
-        Ok(StepAction::Continue)
-    }
-
-    async fn cleanup(&mut self, _state: &StateBag) {}
-}
-
 /// Step to capture disk snapshot and create custom Yandex image.
 #[derive(Debug, Clone)]
 struct StepCaptureYandexImage {
@@ -658,10 +605,29 @@ impl Builder for YandexBuilder {
         ui: Arc<crate::engine::ui::Ui>,
         on_error: crate::engine::packer::OnErrorStrategy,
     ) -> Result<Box<dyn crate::artifact::Artifact>, StampError> {
-        let client = YandexClient::new(
-            self.config.token.clone(),
-            self.config.service_account_key_file.clone(),
-        );
+        let client = if let Some(ref ep) = self.config.endpoint {
+            YandexClient::with_endpoints(
+                self.config.token.clone(),
+                self.config.service_account_key_file.clone(),
+                ep,
+                ep,
+            )
+        } else {
+            YandexClient::new(
+                self.config.token.clone(),
+                self.config.service_account_key_file.clone(),
+            )
+        };
+        let ssh_user = self
+            .config
+            .ssh_username
+            .clone()
+            .unwrap_or_else(|| "ubuntu".to_string());
+        let ssh_pass = self
+            .config
+            .ssh_password
+            .as_ref()
+            .map(|s| s.expose().to_string());
 
         let steps: Vec<Box<dyn Step>> = vec![
             Box::new(StepGetIamToken {
@@ -675,13 +641,11 @@ impl Builder for YandexBuilder {
                 client: client.clone(),
                 config: self.config.clone(),
             }),
-            Box::new(StepProvisionYandex {
-                ui: ui.clone(),
-                name: self.name(),
-                hook,
-                ssh_username: self.config.ssh_username.clone(),
-                ssh_password: self.config.ssh_password.clone(),
-            }),
+            Box::new(
+                StepProvision::new(ui.clone(), self.name(), "yandex", hook)
+                    .with_ssh_credentials(ssh_user, ssh_pass)
+                    .with_message("Provisioning Yandex instance..."),
+            ),
             Box::new(StepCaptureYandexImage {
                 ui: ui.clone(),
                 name: self.name(),
@@ -693,28 +657,20 @@ impl Builder for YandexBuilder {
         let mut runner = Runner::new(steps);
         let mut state = StateBag::new();
 
-        match runner.run(&mut state).await {
-            Ok(()) => {
-                runner.cleanup(&state).await;
-            }
-            Err(e) => {
-                if on_error == crate::engine::packer::OnErrorStrategy::Cleanup {
-                    runner.cleanup(&state).await;
-                }
-                return Err(e);
-            }
-        }
+        runner
+            .run_with_strategy(&mut state, &self.name(), &ui, on_error)
+            .await?;
 
         let artifact_id = state
             .get::<String>("artifact_id")
             .cloned()
             .unwrap_or_else(|| format!("yandex:{}", self.name()));
 
-        Ok(Box::new(crate::artifact::MockArtifact {
-            builder_id: self.name(),
-            id: artifact_id,
-            files: vec![],
-        }))
+        Ok(Box::new(BuildArtifact::with_builder(
+            self.name(),
+            artifact_id,
+            vec![],
+        )))
     }
 
     async fn cancel(&self) -> Result<(), StampError> {
@@ -723,7 +679,6 @@ impl Builder for YandexBuilder {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -737,26 +692,79 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_yandex_prepare() {
+    async fn test_yandex_prepare() -> Result<(), StampError> {
         let mut c = YandexConfig::default();
         let b_bad = YandexBuilder::new(c.clone());
         assert!(b_bad.prepare().await.is_err());
 
         c.name = "test".to_string();
         let b_ok = YandexBuilder::new(c);
-        assert!(b_ok.prepare().await.is_ok());
+        b_ok.prepare().await
     }
 
     #[tokio::test]
-    async fn test_yandex_client_mocked() -> Result<(), StampError> {
-        let client = YandexClient::new(Some("oauth-token-123".to_string()), None);
+    async fn test_yandex_client_http_and_defaults() -> Result<(), StampError> {
+        let mut server = mockito::Server::new_async().await;
+        let url = server.url();
+
+        let _m_iam = server
+            .mock("POST", "/iam/v1/tokens")
+            .with_status(200)
+            .with_body(r#"{"iamToken":"exchanged-iam-token"}"#)
+            .create_async()
+            .await;
+
+        let _m_inst = server
+            .mock("POST", "/compute/v1/instances")
+            .with_status(200)
+            .with_body(r#"{"metadata":{"instanceId":"epd-mock-1"}}"#)
+            .create_async()
+            .await;
+
+        let _m_get = server
+            .mock("GET", "/compute/v1/instances/epd-mock-1")
+            .with_status(200)
+            .with_body(
+                r#"{"networkInterfaces":[{"primaryV4Address":{"oneToOneNat":{"address":"203.0.113.10"}}}]}"#,
+            )
+            .create_async()
+            .await;
+
+        let _m_snap = server
+            .mock("POST", "/compute/v1/snapshots")
+            .with_status(200)
+            .with_body(r#"{"metadata":{"snapshotId":"snap-mock-1"}}"#)
+            .create_async()
+            .await;
+
+        let _m_img = server
+            .mock("POST", "/compute/v1/images")
+            .with_status(200)
+            .with_body(r#"{"metadata":{"imageId":"fd8-mock-1"}}"#)
+            .create_async()
+            .await;
+
+        let _m_del = server
+            .mock("DELETE", "/compute/v1/instances/epd-mock-1")
+            .with_status(200)
+            .create_async()
+            .await;
+
+        let client = YandexClient::with_endpoints(
+            Some(SecretString::new("y0_oauth_token")),
+            None,
+            &url,
+            &url,
+        );
         let token = client.get_iam_token().await?;
-        assert!(!token.is_empty());
+        assert_eq!(token, "exchanged-iam-token");
 
         let config = YandexConfig {
             name: "test-builder".to_string(),
+            token: Some(SecretString::new("y0_oauth_token")),
             folder_id: Some("folder-1".to_string()),
             zone: Some("ru-central1-b".to_string()),
+            subnet_id: Some("subnet-1".to_string()),
             source_image_family: Some("ubuntu-2204-lts".to_string()),
             image_name: Some("my-image".to_string()),
             image_family: Some("ubuntu-custom".to_string()),
@@ -769,20 +777,26 @@ mod tests {
         };
 
         let (inst_id, disk_id) = client.create_instance(&token, &config).await?;
-        assert!(inst_id.starts_with("epd"));
+        assert_eq!(inst_id, "epd-mock-1");
 
         let ip = client.get_instance_ip(&token, &inst_id).await?;
-        assert_eq!(ip, "127.0.0.1");
+        assert_eq!(ip, "203.0.113.10");
 
         let snap_id = client
             .create_snapshot(&token, "folder-1", &disk_id, "test-snap")
             .await?;
-        assert!(snap_id.starts_with("snap-"));
+        assert_eq!(snap_id, "snap-mock-1");
 
         let img_id = client
             .create_image(&token, &config, None, Some(&snap_id))
             .await?;
-        assert!(img_id.starts_with("fd8"));
+        assert_eq!(img_id, "fd8-mock-1");
+
+        // Test disk source branch on create_image
+        let img_disk_id = client
+            .create_image(&token, &config, Some(&disk_id), None)
+            .await?;
+        assert_eq!(img_disk_id, "fd8-mock-1");
 
         client.delete_instance(&token, &inst_id).await?;
         Ok(())
@@ -790,14 +804,50 @@ mod tests {
 
     #[tokio::test]
     async fn test_yandex_builder_run() -> Result<(), StampError> {
+        let mut server = mockito::Server::new_async().await;
+        let _m_inst = server
+            .mock("POST", "/compute/v1/instances")
+            .with_status(200)
+            .with_body(r#"{"metadata":{"instanceId":"epd-run-1"}}"#)
+            .create_async()
+            .await;
+        let _m_get = server
+            .mock("GET", "/compute/v1/instances/epd-run-1")
+            .with_status(200)
+            .with_body(r"{}")
+            .create_async()
+            .await;
+        let _m_snap = server
+            .mock("POST", "/compute/v1/snapshots")
+            .with_status(200)
+            .with_body(r#"{"metadata":{"snapshotId":"snap-run-1"}}"#)
+            .create_async()
+            .await;
+        let _m_img = server
+            .mock("POST", "/compute/v1/images")
+            .with_status(200)
+            .with_body(r#"{"metadata":{"imageId":"fd8-run-1"}}"#)
+            .create_async()
+            .await;
+        let _m_del = server
+            .mock("DELETE", "/compute/v1/instances/epd-run-1")
+            .with_status(200)
+            .create_async()
+            .await;
+
+        assert_eq!(
+            YandexClient::new(None, None).compute_endpoint,
+            "https://compute.api.cloud.yandex.net"
+        );
         let config = YandexConfig {
             name: "yandex-test".to_string(),
-            token: Some("secret-token".to_string()),
+            endpoint: Some(server.url()),
             folder_id: Some("folder-xyz".to_string()),
             zone: Some("ru-central1-a".to_string()),
             source_image_id: Some("fd8src".to_string()),
             image_name: Some("my-image".to_string()),
             use_snapshot: true,
+            ssh_password: Some(SecretString::new("pass")),
             ..Default::default()
         };
         let builder = YandexBuilder::new(config);
@@ -818,18 +868,5 @@ mod tests {
         assert!(artifact.id().starts_with("yandex:fd8"));
         builder.cancel().await?;
         Ok(())
-    }
-
-    #[test]
-    fn test_derived_traits() {
-        let config = YandexConfig {
-            name: "test".to_string(),
-            ..Default::default()
-        };
-        assert_eq!(config.clone(), config);
-        assert_eq!(format!("{config:?}"), format!("{config:?}"));
-
-        let client = YandexClient::new(None, None);
-        assert_eq!(format!("{client:?}"), format!("{client:?}"));
     }
 }

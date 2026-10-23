@@ -278,6 +278,103 @@ pub struct DataSourceConfig {
     >,
 }
 
+/// Trait providing strongly-typed domain accessors over raw template configuration maps.
+pub trait TypedConfigAccess {
+    /// Returns the underlying key-value configuration map.
+    fn raw_config(&self) -> &std::collections::HashMap<String, String>;
+
+    /// Retrieves a trimmed [`NonEmptyString`](crate::types::NonEmptyString) for `key`.
+    fn get_non_empty(&self, key: &str) -> Option<crate::types::NonEmptyString> {
+        self.raw_config()
+            .get(key)
+            .and_then(|v| crate::types::NonEmptyString::try_from(v.clone()).ok())
+    }
+
+    /// Retrieves a [`SecretString`](crate::types::SecretString) for `key` if present and non-empty.
+    fn get_secret(&self, key: &str) -> Option<crate::types::SecretString> {
+        self.raw_config()
+            .get(key)
+            .filter(|v| !v.is_empty())
+            .cloned()
+            .map(crate::types::SecretString::new)
+    }
+
+    /// Retrieves a [`FilePath`](crate::types::FilePath) for `key` if present and non-empty.
+    fn get_file_path(&self, key: &str) -> Option<crate::types::FilePath> {
+        self.raw_config()
+            .get(key)
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| crate::types::FilePath::new(std::path::PathBuf::from(v)))
+    }
+
+    /// Retrieves a [`Port`](crate::types::Port) for `key` if present and valid `u16`.
+    fn get_port(&self, key: &str) -> Option<crate::types::Port> {
+        self.raw_config()
+            .get(key)
+            .and_then(|v| v.parse::<u16>().ok())
+            .map(crate::types::Port::new)
+    }
+
+    /// Retrieves a [`MemoryMb`](crate::types::MemoryMb) for `key` if present and valid `u64`.
+    fn get_memory_mb(&self, key: &str) -> Option<crate::types::MemoryMb> {
+        self.raw_config()
+            .get(key)
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(crate::types::MemoryMb::new)
+    }
+
+    /// Retrieves a [`DiskSizeMb`](crate::types::DiskSizeMb) for `key` if present and valid `u64`.
+    fn get_disk_size_mb(&self, key: &str) -> Option<crate::types::DiskSizeMb> {
+        self.raw_config()
+            .get(key)
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(crate::types::DiskSizeMb::new)
+    }
+
+    /// Retrieves a [`CpuCount`](crate::types::CpuCount) for `key` if present and valid non-zero `u32`.
+    fn get_cpu_count(&self, key: &str) -> Option<crate::types::CpuCount> {
+        self.raw_config()
+            .get(key)
+            .and_then(|v| v.parse::<u32>().ok())
+            .and_then(|n| crate::types::CpuCount::new(n).ok())
+    }
+
+    /// Retrieves a boolean flag for `key` (`"true"` or `"1"` -> `true`, `"false"` or `"0"` -> `false`).
+    fn get_bool(&self, key: &str) -> Option<bool> {
+        self.raw_config()
+            .get(key)
+            .and_then(|v| match v.trim().to_ascii_lowercase().as_str() {
+                "true" | "1" | "yes" | "on" => Some(true),
+                "false" | "0" | "no" | "off" => Some(false),
+                _ => None,
+            })
+    }
+}
+
+impl TypedConfigAccess for BuilderConfig {
+    fn raw_config(&self) -> &std::collections::HashMap<String, String> {
+        &self.config
+    }
+}
+
+impl TypedConfigAccess for ProvisionerConfig {
+    fn raw_config(&self) -> &std::collections::HashMap<String, String> {
+        &self.config
+    }
+}
+
+impl TypedConfigAccess for PostProcessorConfig {
+    fn raw_config(&self) -> &std::collections::HashMap<String, String> {
+        &self.config
+    }
+}
+
+impl TypedConfigAccess for DataSourceConfig {
+    fn raw_config(&self) -> &std::collections::HashMap<String, String> {
+        &self.config
+    }
+}
+
 impl Template {
     /// Merges another template into this one, combining all components.
     pub fn merge(&mut self, other: Self) {
@@ -449,86 +546,81 @@ pub fn load_templates<P: AsRef<std::path::Path>, S: std::hash::BuildHasher>(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
+    use crate::error::StampError;
 
     #[test]
-    fn test_derived_traits() {
-        let tmpl = Template::default();
-        assert_eq!(tmpl.clone(), tmpl);
-        assert_eq!(format!("{:?}", tmpl), format!("{:?}", tmpl));
+    fn test_derived_traits() -> Result<(), StampError> {
+        let tmpl = Template {
+            description: Some("sample".to_string()),
+            ..Default::default()
+        };
+        let cloned = tmpl.clone();
+        assert_eq!(cloned.description.as_deref(), Some("sample"));
+        assert!(format!("{tmpl:?}").contains("sample"));
 
         let test_block = TestBlock {
             name: "n".into(),
-            assertions: vec![],
+            assertions: vec![TestAssertBlock {
+                condition: "c".into(),
+                error_message: Some("err".into()),
+            }],
         };
-        assert_eq!(test_block.clone(), test_block);
-        assert_eq!(format!("{:?}", test_block), format!("{:?}", test_block));
-
-        let assert_block = TestAssertBlock {
-            condition: "c".into(),
-            error_message: None,
-        };
-        assert_eq!(assert_block.clone(), assert_block);
-        assert_eq!(format!("{:?}", assert_block), format!("{:?}", assert_block));
+        let test_block_json = serde_json::to_string(&test_block)?;
+        let decoded_test_block: TestBlock = serde_json::from_str(&test_block_json)?;
+        assert_eq!(decoded_test_block, test_block);
 
         let failure = TestFailureDetails {
             test_name: "t".into(),
             failed_condition: "c".into(),
             error_message: None,
         };
-        assert_eq!(failure.clone(), failure);
-        assert_eq!(format!("{:?}", failure), format!("{:?}", failure));
+        let failure_json = serde_json::to_string(&failure)?;
+        let decoded_failure: TestFailureDetails = serde_json::from_str(&failure_json)?;
+        assert_eq!(decoded_failure, failure);
 
         let packer = PackerConfig::default();
-        assert_eq!(packer.clone(), packer);
-        assert_eq!(format!("{:?}", packer), format!("{:?}", packer));
+        assert!(packer.required_version.is_none());
 
         let bucket = BucketName("b".into());
-        assert_eq!(bucket.clone(), bucket);
-        assert_eq!(format!("{:?}", bucket), format!("{:?}", bucket));
+        assert_eq!(bucket.0, "b");
 
         let hcp = HcpPackerRegistryConfig::default();
-        assert_eq!(hcp.clone(), hcp);
-        assert_eq!(format!("{:?}", hcp), format!("{:?}", hcp));
+        assert_eq!(hcp.channels.len(), 0);
 
         let plugin = PluginConfig::default();
-        assert_eq!(plugin.clone(), plugin);
-        assert_eq!(format!("{:?}", plugin), format!("{:?}", plugin));
+        assert_eq!(plugin.version, "");
 
         let builder = BuilderConfig::default();
-        assert_eq!(builder.clone(), builder);
-        assert_eq!(format!("{:?}", builder), format!("{:?}", builder));
+        assert_eq!(builder.name, "");
 
         let prov = ProvisionerConfig::default();
-        assert_eq!(prov.clone(), prov);
-        assert_eq!(format!("{:?}", prov), format!("{:?}", prov));
+        assert_eq!(prov.provisioner_type, "");
 
         let post = PostProcessorConfig::default();
-        assert_eq!(post.clone(), post);
-        assert_eq!(format!("{:?}", post), format!("{:?}", post));
+        assert!(!post.keep_input_artifact);
 
         let var = VariableConfig::default();
-        assert_eq!(var.clone(), var);
-        assert_eq!(format!("{:?}", var), format!("{:?}", var));
+        assert!(var.default.is_none());
 
         let ds = DataSourceConfig::default();
-        assert_eq!(ds.clone(), ds);
-        assert_eq!(format!("{:?}", ds), format!("{:?}", ds));
+        assert_eq!(ds.source_type, "");
 
-        let s = serde_json::to_string(&tmpl).unwrap_or_default();
-        let _d: Template = serde_json::from_str(&s).unwrap_or_default();
+        let s = serde_json::to_string(&tmpl)?;
+        let decoded: Template = serde_json::from_str(&s)?;
+        assert_eq!(decoded, tmpl);
+        Ok(())
     }
 
     #[test]
     fn test_template_default() {
         let tmpl = Template::default();
         assert_eq!(tmpl.description, None);
-        assert!(tmpl.builders.is_empty());
-        assert!(tmpl.provisioners.is_empty());
-        assert!(tmpl.error_cleanup_provisioners.is_empty());
-        assert!(tmpl.post_processors.is_empty());
+        assert_eq!(tmpl.builders.len(), 0);
+        assert_eq!(tmpl.provisioners.len(), 0);
+        assert_eq!(tmpl.error_cleanup_provisioners.len(), 0);
+        assert_eq!(tmpl.post_processors.len(), 0);
         assert!(tmpl.locals.is_empty());
     }
 
@@ -581,13 +673,79 @@ mod tests {
 
     #[test]
     fn test_builder_config() {
+        let mut cfg = std::collections::HashMap::new();
+        cfg.insert("vm_name".to_string(), "ubuntu".to_string());
+        cfg.insert("api_token".to_string(), "tok123".to_string());
+        cfg.insert("iso_path".to_string(), "/tmp/ubuntu.iso".to_string());
+        cfg.insert("ssh_port".to_string(), "2222".to_string());
+        cfg.insert("memory".to_string(), "2048".to_string());
+        cfg.insert("disk_size".to_string(), "40960".to_string());
+        cfg.insert("cpus".to_string(), "4".to_string());
+        cfg.insert("headless".to_string(), "true".to_string());
+        cfg.insert("disabled".to_string(), "false".to_string());
+        cfg.insert("invalid_bool".to_string(), "maybe".to_string());
+
         let builder = BuilderConfig {
             builder_type: "null".to_string(),
             name: "my-builder".to_string(),
+            config: cfg.clone(),
             ..Default::default()
         };
         assert_eq!(builder.builder_type, "null");
         assert_eq!(builder.name, "my-builder");
+        assert_eq!(
+            builder
+                .get_non_empty("vm_name")
+                .as_ref()
+                .map(crate::types::NonEmptyString::as_str),
+            Some("ubuntu")
+        );
+        assert_eq!(
+            builder
+                .get_secret("api_token")
+                .as_ref()
+                .map(crate::types::SecretString::expose_secret),
+            Some("tok123")
+        );
+        assert_eq!(
+            builder
+                .get_file_path("iso_path")
+                .as_ref()
+                .and_then(|p| p.as_path().to_str()),
+            Some("/tmp/ubuntu.iso")
+        );
+        assert_eq!(builder.get_port("ssh_port").map(|p| p.get()), Some(2222));
+        assert_eq!(builder.get_memory_mb("memory").map(|m| m.get()), Some(2048));
+        assert_eq!(
+            builder.get_disk_size_mb("disk_size").map(|d| d.get()),
+            Some(40960)
+        );
+        assert_eq!(builder.get_cpu_count("cpus").map(|c| c.get()), Some(4));
+        assert_eq!(builder.get_bool("headless"), Some(true));
+        assert_eq!(builder.get_bool("disabled"), Some(false));
+        assert_eq!(builder.get_bool("invalid_bool"), None);
+
+        let prov = ProvisionerConfig {
+            provisioner_type: "shell".to_string(),
+            config: cfg.clone(),
+            ..Default::default()
+        };
+        assert_eq!(prov.get_bool("headless"), Some(true));
+
+        let pp = PostProcessorConfig {
+            post_processor_type: "manifest".to_string(),
+            config: cfg.clone(),
+            ..Default::default()
+        };
+        assert_eq!(pp.get_bool("headless"), Some(true));
+
+        let ds = DataSourceConfig {
+            source_type: "http".to_string(),
+            name: "test".to_string(),
+            config: cfg,
+            ..Default::default()
+        };
+        assert_eq!(ds.get_bool("headless"), Some(true));
     }
 
     #[test]
@@ -647,43 +805,41 @@ mod tests {
     }
 
     #[test]
-    fn test_load_templates_directory_and_files() {
-        let temp_dir = tempfile::tempdir().unwrap();
+    fn test_load_templates_directory_and_files() -> Result<(), StampError> {
+        let temp_dir = tempfile::tempdir()?;
         let f1 = temp_dir.path().join("base.pkr.json");
-        std::fs::write(&f1, r#"{"builders": [{"type": "null"}]}"#).unwrap();
+        std::fs::write(&f1, r#"{"builders": [{"type": "null"}]}"#)?;
 
         let f2 = temp_dir.path().join("extra.pkr.hcl");
-        std::fs::write(&f2, "locals {\n  env = \"dev\"\n}\n").unwrap();
+        std::fs::write(&f2, "locals {\n  env = \"dev\"\n}\n")?;
 
         let vars = std::collections::HashMap::new();
 
         // 1. Directory scanning
-        if let Ok(tmpl) = load_templates(&[temp_dir.path()], &vars) {
-            assert_eq!(tmpl.builders.len(), 1);
-            assert_eq!(tmpl.locals.get("env").map(|s| s.as_str()), Some("dev"));
-        }
+        let tmpl = load_templates(&[temp_dir.path()], &vars)?;
+        assert_eq!(tmpl.builders.len(), 1);
+        assert_eq!(tmpl.locals.get("env").map(String::as_str), Some("dev"));
 
         // 2. Multi-file loading
-        if let Ok(tmpl_files) = load_templates(&[&f1, &f2], &vars) {
-            assert_eq!(tmpl_files.builders.len(), 1);
-            assert_eq!(
-                tmpl_files.locals.get("env").map(|s| s.as_str()),
-                Some("dev")
-            );
-        }
+        let tmpl_files = load_templates(&[&f1, &f2], &vars)?;
+        assert_eq!(tmpl_files.builders.len(), 1);
+        assert_eq!(
+            tmpl_files.locals.get("env").map(String::as_str),
+            Some("dev")
+        );
 
         // 3. Error cases
         assert!(load_templates::<std::path::PathBuf, _>(&[], &vars).is_err());
         assert!(load_templates(&[temp_dir.path().join("nonexistent")], &vars).is_err());
 
-        if let Ok(empty_dir) = tempfile::tempdir() {
-            assert!(load_templates(&[empty_dir.path()], &vars).is_err());
-        }
+        let empty_dir = tempfile::tempdir()?;
+        assert!(load_templates(&[empty_dir.path()], &vars).is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_bento_multi_file_pre_merge() {
-        let temp_dir = tempfile::tempdir().unwrap();
+    fn test_bento_multi_file_pre_merge() -> Result<(), StampError> {
+        let temp_dir = tempfile::tempdir()?;
         let dir = temp_dir.path();
 
         let pkr_vars = dir.join("pkr-variables.pkr.hcl");
@@ -699,8 +855,7 @@ mod tests {
                 default = "x86_64"
             }
             "#,
-        )
-        .unwrap();
+        )?;
 
         let pkr_sources = dir.join("pkr-sources.pkr.hcl");
         std::fs::write(
@@ -715,8 +870,7 @@ mod tests {
                 memory = 2048
             }
             "#,
-        )
-        .unwrap();
+        )?;
 
         let pkr_plugins = dir.join("pkr-plugins.pkr.hcl");
         std::fs::write(
@@ -732,8 +886,7 @@ mod tests {
                 }
             }
             "#,
-        )
-        .unwrap();
+        )?;
 
         let pkr_builder = dir.join("pkr-builder.pkr.hcl");
         std::fs::write(
@@ -746,11 +899,10 @@ mod tests {
                 }
             }
             "#,
-        )
-        .unwrap();
+        )?;
 
         let vars = std::collections::HashMap::new();
-        let tmpl = Template::from_files_or_dirs(&[dir], &vars).unwrap();
+        let tmpl = Template::from_files_or_dirs(&[dir], &vars)?;
 
         assert_eq!(tmpl.variables.len(), 2);
         assert!(tmpl.variables.contains_key("os_name"));
@@ -764,22 +916,24 @@ mod tests {
         assert_eq!(tmpl.builds[0].sources, vec!["source.qemu.vm"]);
         assert_eq!(tmpl.builds[0].provisioners.len(), 1);
         assert_eq!(tmpl.builds[0].provisioners[0].provisioner_type, "shell");
-        assert!(tmpl.packer.is_some());
         assert_eq!(
-            tmpl.packer.as_ref().unwrap().required_version.as_deref(),
+            tmpl.packer
+                .as_ref()
+                .and_then(|p| p.required_version.as_deref()),
             Some(">= 1.7.0")
         );
         assert_eq!(tmpl.required_plugins.len(), 1);
         assert_eq!(
-            tmpl.required_plugins.get("qemu").unwrap().source,
-            "github.com/hashicorp/qemu"
+            tmpl.required_plugins.get("qemu").map(|q| q.source.as_str()),
+            Some("github.com/hashicorp/qemu")
         );
         assert_eq!(tmpl.root_path.as_deref(), Some(dir));
+        Ok(())
     }
 
     #[test]
-    fn test_duplicate_definition_diagnostics_forwarding() {
-        let temp_dir = tempfile::tempdir().unwrap();
+    fn test_duplicate_definition_diagnostics_forwarding() -> Result<(), StampError> {
+        let temp_dir = tempfile::tempdir()?;
         let dir = temp_dir.path();
 
         let f1 = dir.join("file1.pkr.hcl");
@@ -790,8 +944,7 @@ mod tests {
                 default = "first"
             }
             "#,
-        )
-        .unwrap();
+        )?;
 
         let f2 = dir.join("file2.pkr.hcl");
         std::fs::write(
@@ -801,16 +954,14 @@ mod tests {
                 default = "second"
             }
             "#,
-        )
-        .unwrap();
+        )?;
 
         let vars = std::collections::HashMap::new();
         let res = Template::from_files_or_dirs(&[dir], &vars);
-        assert!(res.is_err());
-        let err = res.unwrap_err();
         assert!(
-            matches!(err, crate::error::StampError::Parse(ref msg) if msg.contains("Variable 'dup_var' defined multiple times")),
-            "Expected duplicate variable error, got {err:?}"
+            matches!(res, Err(StampError::Parse(ref msg)) if msg.contains("Variable 'dup_var' defined multiple times")),
+            "Expected duplicate variable error, got {res:?}"
         );
+        Ok(())
     }
 }

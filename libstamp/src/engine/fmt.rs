@@ -1,13 +1,23 @@
 //! Canonical HCL2 formatter delegating to `hashicorp_configuration_language_rs`.
 
+use crate::error::StampError;
 use std::fmt::Write as _;
+
+/// Formats HCL2 source code canonically using `hashicorp_configuration_language_rs`.
+///
+/// # Errors
+/// Returns `StampError::Parse` if formatting fails due to syntax errors.
+pub fn try_format_hcl(input: &str) -> Result<String, StampError> {
+    hashicorp_configuration_language_rs::cst::format::format_str(input)
+        .map_err(|e| StampError::Parse(format!("HCL format error: {e}")))
+}
 
 /// Formats HCL2 source code canonically using `hashicorp_configuration_language_rs`.
 ///
 /// If formatting fails due to syntax errors, the original unformatted input is returned.
 #[must_use]
 pub fn format_hcl_canonical(input: &str) -> String {
-    hashicorp_configuration_language_rs::cst::format::format_str(input).unwrap_or_else(|_| {
+    try_format_hcl(input).unwrap_or_else(|_| {
         let mut fallback = input.to_string();
         if !fallback.is_empty() && !fallback.ends_with('\n') {
             fallback.push('\n');
@@ -23,11 +33,7 @@ pub fn generate_diff(old: &str, new: &str) -> String {
     if old == new {
         return out;
     }
-    out.push_str(
-        "--- old
-+++ new
-",
-    );
+    out.push_str("--- old\n+++ new\n");
     for line in old.lines() {
         let _ = writeln!(out, "-{line}");
     }
@@ -38,12 +44,11 @@ pub fn generate_diff(old: &str, new: &str) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_format_hcl_canonical_basic() {
+    fn test_format_hcl_canonical_basic() -> Result<(), StampError> {
         let input = r#"
 source "amazon-ebs" "basic" {
 ami_name = "my-ami"
@@ -57,9 +62,14 @@ sources = [
 }
 "#;
         let formatted = format_hcl_canonical(input);
-        assert!(formatted.contains("source \"amazon-ebs\" \"basic\""));
+        assert!(formatted.contains(r#"source "amazon-ebs" "basic""#));
         assert!(formatted.contains("ami_name"));
         assert!(formatted.contains("instance_type"));
+
+        let checked = try_format_hcl(input)?;
+        assert_eq!(checked, formatted);
+        assert!(try_format_hcl("invalid hcl {{{").is_err());
+        Ok(())
     }
 
     #[test]
@@ -74,7 +84,7 @@ sources = [
         assert_eq!(formatted_newline, "invalid hcl {{{\n");
 
         let empty = format_hcl_canonical("");
-        assert!(empty.is_empty());
+        assert_eq!(empty, "");
     }
 
     #[test]
@@ -88,6 +98,6 @@ sources = [
         assert!(diff.contains("+b"));
 
         let no_diff = generate_diff("same", "same");
-        assert!(no_diff.is_empty());
+        assert_eq!(no_diff, "");
     }
 }

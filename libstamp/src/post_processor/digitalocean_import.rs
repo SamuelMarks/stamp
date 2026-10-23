@@ -2,6 +2,7 @@
 
 use crate::error::StampError;
 use crate::post_processor::{Artifact, PostProcessor};
+use crate::types::SecretString;
 use async_trait::async_trait;
 
 /// Configuration for the `digitalocean-import` post-processor.
@@ -14,7 +15,7 @@ pub struct DigitaloceanImportConfig {
     /// Public URL from which `DigitalOcean` will download the custom image.
     pub image_url: Option<String>,
     /// `DigitalOcean` API personal access token.
-    pub api_token: Option<String>,
+    pub api_token: Option<SecretString>,
     /// Optional custom `DigitalOcean` API base URL override (e.g. for mock servers).
     pub api_url: Option<String>,
     /// Target regions where the image will be available. Defaults to `["nyc3"]`.
@@ -81,7 +82,8 @@ impl PostProcessor for DigitaloceanImportPostProcessor {
             let token = self
                 .config
                 .api_token
-                .clone()
+                .as_ref()
+                .map(|s| s.expose_secret().to_string())
                 .or_else(|| std::env::var("DIGITALOCEAN_TOKEN").ok())
                 .unwrap_or_default();
 
@@ -158,7 +160,7 @@ mod tests {
             description: Some("Imported test image".to_string()),
             tags: vec!["packer".to_string()],
             keep_input_artifact: true,
-            api_token: Some("dummy_token".to_string()),
+            api_token: Some(SecretString::from("dummy_token")),
             api_url: None,
         };
         let processor = DigitaloceanImportPostProcessor::new(config);
@@ -180,7 +182,7 @@ mod tests {
             identifier: "live".to_string(),
             image_name: "live-img".to_string(),
             image_url: Some("https://example.com/disk.qcow2".to_string()),
-            api_token: Some("tok".to_string()),
+            api_token: Some(SecretString::from("tok")),
             api_url: Some(server.url()),
             ..Default::default()
         });
@@ -191,7 +193,7 @@ mod tests {
         let no_tok_proc = DigitaloceanImportPostProcessor::new(DigitaloceanImportConfig {
             identifier: "live".to_string(),
             image_url: Some("https://example.com/disk.qcow2".to_string()),
-            api_token: Some(String::new()),
+            api_token: Some(SecretString::from("")),
             api_url: Some(server.url()),
             ..Default::default()
         });

@@ -2,6 +2,7 @@
 
 use crate::error::StampError;
 use crate::post_processor::{Artifact, PostProcessor};
+use crate::types::SecretString;
 use async_trait::async_trait;
 
 /// Configuration for the `vsphere-template` post-processor.
@@ -14,7 +15,7 @@ pub struct VsphereTemplateConfig {
     /// Username for authentication.
     pub username: Option<String>,
     /// Password for authentication.
-    pub password: Option<String>,
+    pub password: Option<SecretString>,
     /// Whether to allow insecure TLS connections.
     pub insecure_connection: bool,
     /// Name of the target datacenter.
@@ -103,7 +104,7 @@ impl PostProcessor for VsphereTemplatePostProcessor {
             cmd.env("GOVC_USERNAME", u);
         }
         if let Some(p) = &self.config.password {
-            cmd.env("GOVC_PASSWORD", p);
+            cmd.env("GOVC_PASSWORD", p.expose_secret());
         }
 
         let status = cmd
@@ -136,7 +137,7 @@ mod tests {
             identifier: "templated".to_string(),
             vcenter_server: Some("vcenter.example.com".to_string()),
             username: Some("admin".to_string()),
-            password: Some("secret".to_string()),
+            password: Some(SecretString::from("secret")),
             insecure_connection: true,
             datacenter: Some("DC1".to_string()),
             template_name: Some("golden-image".to_string()),

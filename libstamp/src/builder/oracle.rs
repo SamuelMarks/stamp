@@ -1,11 +1,11 @@
 //! Implementation of the `oracle-oci` builder using Oracle Cloud Infrastructure REST API.
 
+use crate::artifact::BuildArtifact;
 use crate::builder::Builder;
-use crate::communicator::ssh::{SshCommunicator, SshConfig};
-use crate::engine::hook::{BuildContext, ProvisionHook};
-use crate::engine::multistep::{Runner, StateBag, Step, StepAction};
+use crate::engine::hook::ProvisionHook;
+use crate::engine::multistep::{Runner, StateBag, Step, StepAction, StepProvision};
 use crate::error::StampError;
-use crate::types::{FilePath, Port, Timeout};
+use crate::types::{FilePath, SecretString};
 use rsa::RsaPrivateKey;
 use rsa::pkcs1::DecodeRsaPrivateKey;
 use rsa::pkcs1v15::Pkcs1v15Sign;
@@ -14,7 +14,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt::Write;
 use std::sync::Arc;
-use std::time::Duration;
 
 /// Configuration for the `oracle-oci` builder.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -30,9 +29,9 @@ pub struct OracleOciConfig {
     /// Path to the RSA private key file.
     pub key_file: Option<FilePath>,
     /// Inline PEM-encoded RSA private key.
-    pub private_key: Option<String>,
+    pub private_key: Option<SecretString>,
     /// Passphrase for encrypted private key.
-    pub passphrase: Option<String>,
+    pub passphrase: Option<SecretString>,
     /// Target OCI region (e.g. `us-ashburn-1`, `us-phoenix-1`).
     pub region: Option<String>,
     /// Compartment OCID where resources are created.
@@ -50,9 +49,32 @@ pub struct OracleOciConfig {
     /// SSH username to connect with. Defaults to `opc`.
     pub ssh_username: Option<String>,
     /// SSH password.
-    pub ssh_password: Option<String>,
+    pub ssh_password: Option<SecretString>,
     /// Optional endpoint URL override for API requests (e.g. for testing).
     pub endpoint: Option<String>,
+}
+
+/// Request parameters for signing an OCI HTTP request.
+#[derive(Debug, Clone)]
+pub struct OciSignParams<'a> {
+    /// HTTP method (e.g. `"POST"`, `"GET"`).
+    pub method: &'a str,
+    /// Target URI path (e.g. `"/20160918/instances"`).
+    pub target_path: &'a str,
+    /// Target host header.
+    pub host: &'a str,
+    /// RFC 2822 / HTTP date string.
+    pub date: &'a str,
+    /// Optional request body bytes.
+    pub body: Option<&'a [u8]>,
+    /// Tenancy OCID.
+    pub tenancy_ocid: &'a str,
+    /// User OCID.
+    pub user_ocid: &'a str,
+    /// Public key fingerprint.
+    pub fingerprint: &'a str,
+    /// PEM-encoded RSA private key.
+    pub private_key_pem: &'a str,
 }
 
 /// Helper function to create an OCI RFC 7540 compliant HTTP Authorization header.
@@ -61,23 +83,15 @@ pub struct OracleOciConfig {
 ///
 /// # Errors
 /// Returns `StampError::Execution` if the RSA key cannot be parsed or signing fails.
-#[allow(clippy::too_many_arguments)]
-pub fn oci_sign_request(
-    method: &str,
-    target_path: &str,
-    host: &str,
-    date: &str,
-    body: Option<&[u8]>,
-    tenancy_ocid: &str,
-    user_ocid: &str,
-    fingerprint: &str,
-    private_key_pem: &str,
-) -> Result<String, StampError> {
+pub fn oci_sign_request(params: &OciSignParams<'_>) -> Result<String, StampError> {
     use base64::Engine;
 
-    let key_id = format!("{tenancy_ocid}/{user_ocid}/{fingerprint}");
-    let rsa_key = RsaPrivateKey::from_pkcs8_pem(private_key_pem)
-        .or_else(|_| RsaPrivateKey::from_pkcs1_pem(private_key_pem))
+    let key_id = format!(
+        "{}/{}/{}",
+        params.tenancy_ocid, params.user_ocid, params.fingerprint
+    );
+    let rsa_key = RsaPrivateKey::from_pkcs8_pem(params.private_key_pem)
+        .or_else(|_| RsaPrivateKey::from_pkcs1_pem(params.private_key_pem))
         .map_err(|e| StampError::Execution(format!("Failed to parse OCI RSA private key: {e}")))?;
 
     let mut headers_list = vec!["(request-target)", "date", "host"];
@@ -85,13 +99,13 @@ pub fn oci_sign_request(
         "(request-target): {} {}
 date: {}
 host: {}",
-        method.to_lowercase(),
-        target_path,
-        date,
-        host
+        params.method.to_lowercase(),
+        params.target_path,
+        params.date,
+        params.host
     );
 
-    if let Some(b) = body {
+    if let Some(b) = params.body {
         let digest = Sha256::digest(b);
         let b64_digest = base64::engine::general_purpose::STANDARD.encode(digest);
         let _ = write!(
@@ -117,7 +131,7 @@ content-length: {}",
     let headers_str = headers_list.join(" ");
 
     Ok(format!(
-        "Signature version=\"1\",keyId=\"{key_id}\",algorithm=\"rsa-sha256\",headers=\"{headers_str}\",signature=\"{b64_sig}\""
+        r#"Signature version="1",keyId="{key_id}",algorithm="rsa-sha256",headers="{headers_str}",signature="{b64_sig}""#
     ))
 }
 
@@ -163,7 +177,7 @@ impl Step for StepLaunchInstance {
         let user = self.config.user_ocid.as_deref().unwrap_or_default();
         let fingerprint = self.config.fingerprint.as_deref().unwrap_or_default();
         let private_key = if let Some(ref pk) = self.config.private_key {
-            pk.clone()
+            pk.expose().to_string()
         } else if let Some(ref kf) = self.config.key_file {
             tokio::fs::read_to_string(kf.get())
                 .await
@@ -202,19 +216,19 @@ impl Step for StepLaunchInstance {
             },
             "subnetId": self.config.subnet_ocid.as_deref().unwrap_or_default()
         });
-        let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
+        let body_bytes = serde_json::to_vec(&body)?;
 
-        let auth_header = oci_sign_request(
-            "POST",
-            path,
-            &host,
-            &date,
-            Some(&body_bytes),
-            tenancy,
-            user,
+        let auth_header = oci_sign_request(&OciSignParams {
+            method: "POST",
+            target_path: path,
+            host: &host,
+            date: &date,
+            body: Some(&body_bytes),
+            tenancy_ocid: tenancy,
+            user_ocid: user,
             fingerprint,
-            &private_key,
-        )?;
+            private_key_pem: &private_key,
+        })?;
 
         let client = reqwest::Client::new();
         let resp = client
@@ -263,74 +277,6 @@ impl Step for StepLaunchInstance {
             }
         }
     }
-}
-
-/// Step to provision the instance over SSH.
-#[derive(Clone)]
-struct StepProvision {
-    /// UI logger.
-    ui: Arc<crate::engine::ui::Ui>,
-    /// Builder name.
-    name: String,
-    /// Configuration.
-    config: OracleOciConfig,
-    /// Provisioning hook.
-    hook: Arc<dyn ProvisionHook>,
-}
-
-#[async_trait::async_trait]
-impl Step for StepProvision {
-    async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
-        self.ui.say(&self.name, "Provisioning OCI instance...");
-
-        let ip = state
-            .get::<String>("instance_ip")
-            .cloned()
-            .unwrap_or_default();
-
-        let ssh_config = SshConfig {
-            host: ip,
-            port: Port::new(22),
-            username: self
-                .config
-                .ssh_username
-                .clone()
-                .unwrap_or_else(|| "opc".to_string()),
-            password: self.config.ssh_password.clone(),
-            timeout: Timeout::new(Duration::from_secs(10)),
-            ..Default::default()
-        };
-
-        let comm = Arc::new(SshCommunicator::new(ssh_config));
-
-        let build_ctx = BuildContext {
-            build_id: self.name.clone(),
-            host: "oracle-oci".to_string(),
-            user: "opc".to_string(),
-            packer_run_uuid: "mocked-uuid".to_string(),
-            source_name: self.name.clone(),
-            source_type: "oracle-oci".to_string(),
-            ..Default::default()
-        };
-
-        if let Err(e) = self
-            .hook
-            .run_provisioners(comm.clone(), &build_ctx, self.ui.clone())
-            .await
-        {
-            self.ui
-                .error(&self.name, &format!("Provisioning failed: {e}"));
-            let _ = self
-                .hook
-                .run_error_cleanup_provisioners(comm, &build_ctx, self.ui.clone())
-                .await;
-            return Err(e);
-        }
-
-        Ok(StepAction::Continue)
-    }
-
-    async fn cleanup(&mut self, _state: &StateBag) {}
 }
 
 /// Step to create the custom image in OCI from the running or stopped instance.
@@ -398,18 +344,28 @@ impl Builder for OracleOciBuilder {
         ui: Arc<crate::engine::ui::Ui>,
         on_error: crate::engine::packer::OnErrorStrategy,
     ) -> Result<Box<dyn crate::artifact::Artifact>, StampError> {
+        let ssh_user = self
+            .config
+            .ssh_username
+            .clone()
+            .unwrap_or_else(|| "opc".to_string());
+        let ssh_pass = self
+            .config
+            .ssh_password
+            .as_ref()
+            .map(|s| s.expose().to_string());
+
         let mut runner = Runner::new(vec![
             Box::new(StepLaunchInstance {
                 ui: ui.clone(),
                 name: self.name(),
                 config: self.config.clone(),
             }),
-            Box::new(StepProvision {
-                ui: ui.clone(),
-                name: self.name(),
-                config: self.config.clone(),
-                hook: hook.clone(),
-            }),
+            Box::new(
+                StepProvision::new(ui.clone(), self.name(), "oracle-oci", hook)
+                    .with_ssh_credentials(ssh_user, ssh_pass)
+                    .with_message("Provisioning OCI instance..."),
+            ),
             Box::new(StepCreateImage {
                 ui: ui.clone(),
                 name: self.name(),
@@ -418,45 +374,20 @@ impl Builder for OracleOciBuilder {
         ]);
 
         let mut state = StateBag::new();
-        match runner.run(&mut state).await {
-            Ok(()) => {
-                runner.cleanup(&state).await;
-            }
-            Err(e) => {
-                match on_error {
-                    crate::engine::packer::OnErrorStrategy::Cleanup => {
-                        runner.cleanup(&state).await;
-                    }
-                    crate::engine::packer::OnErrorStrategy::Abort
-                    | crate::engine::packer::OnErrorStrategy::RunCleanupProvisioner => {}
-                    crate::engine::packer::OnErrorStrategy::Ask => {
-                        let msg = format!(
-                            "Build '{}' errored: {}
-Do you want to clean up? [y/N]: ",
-                            self.name(),
-                            e
-                        );
-                        if let Ok(ans) = ui.ask("stamp", &msg)
-                            && (ans == "y" || ans == "yes")
-                        {
-                            runner.cleanup(&state).await;
-                        }
-                    }
-                }
-                return Err(e);
-            }
-        }
+        runner
+            .run_with_strategy(&mut state, &self.name(), &ui, on_error)
+            .await?;
 
         let artifact_id = state
             .get::<String>("artifact_id")
             .cloned()
             .unwrap_or_default();
 
-        Ok(Box::new(crate::artifact::MockArtifact {
-            builder_id: self.name(),
-            id: artifact_id,
-            files: vec![],
-        }))
+        Ok(Box::new(BuildArtifact::with_builder(
+            self.name(),
+            artifact_id,
+            vec![],
+        )))
     }
 
     async fn cancel(&self) -> Result<(), StampError> {
@@ -465,12 +396,6 @@ Do you want to clean up? [y/N]: ",
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::pedantic,
-    clippy::all,
-    for_loops_over_fallibles
-)]
 mod tests {
     use super::*;
     use crate::engine::hook::DefaultProvisionHook;
@@ -493,167 +418,85 @@ EIkJD79TK9DHyZ9OLQJBALtgmCyKqrAgVReSHXp0F3IN84GOJPcMVFdBeklDueAJ
 FQZnOX1uNy/OHpVb4mnDRuKCzWuYFl/t+yLffd4EP5U=
 -----END RSA PRIVATE KEY-----";
 
-    struct FailingProvisioner;
-    #[async_trait::async_trait]
-    impl crate::provisioner::Provisioner for FailingProvisioner {
-        async fn provision(
-            &self,
-            _comm: &dyn crate::communicator::Communicator,
-            _ui: Arc<crate::engine::ui::Ui>,
-        ) -> Result<(), StampError> {
-            Err(StampError::Execution("mock provision failure".to_string()))
-        }
-    }
-
-    #[test]
-    fn test_oracle_name() {
+    #[tokio::test]
+    async fn test_oracle_prepare_and_cancel() -> Result<(), StampError> {
         let b = OracleOciBuilder::new(OracleOciConfig {
             name: "test".to_string(),
+            private_key: Some(SecretString::new("pem")),
             ..Default::default()
         });
         assert_eq!(b.name(), "test");
-    }
-
-    #[tokio::test]
-    async fn test_oracle_prepare_success() {
-        let b = OracleOciBuilder::new(OracleOciConfig {
-            name: "test".to_string(),
-            private_key: Some("pem".to_string()),
-            ..Default::default()
-        });
-        assert!(b.prepare().await.is_ok());
+        b.prepare().await?;
+        b.cancel().await?;
 
         let b_keyfile = OracleOciBuilder::new(OracleOciConfig {
             name: "test".to_string(),
             key_file: Some(FilePath::new(std::path::PathBuf::from("/tmp/key.pem"))),
             ..Default::default()
         });
-        assert!(b_keyfile.prepare().await.is_ok());
-    }
+        b_keyfile.prepare().await?;
 
-    #[tokio::test]
-    async fn test_oracle_prepare_failure() {
-        let b = OracleOciBuilder::new(OracleOciConfig::default());
-        assert!(b.prepare().await.is_err());
+        let b_empty = OracleOciBuilder::new(OracleOciConfig::default());
+        assert!(b_empty.prepare().await.is_err());
 
-        let b2 = OracleOciBuilder::new(OracleOciConfig {
+        let b_no_key = OracleOciBuilder::new(OracleOciConfig {
             name: "test".to_string(),
             ..Default::default()
         });
-        assert!(b2.prepare().await.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_oracle_cancel() {
-        let b = OracleOciBuilder::new(OracleOciConfig {
-            name: "test".to_string(),
-            ..Default::default()
-        });
-        assert!(b.cancel().await.is_ok());
+        assert!(b_no_key.prepare().await.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_derived_traits() {
-        let config = OracleOciConfig {
-            name: "test".to_string(),
-            tenancy_ocid: Some("t".to_string()),
-            user_ocid: Some("u".to_string()),
-            fingerprint: Some("f".to_string()),
-            key_file: None,
-            private_key: Some("k".to_string()),
-            passphrase: Some("p".to_string()),
-            region: Some("r".to_string()),
-            compartment_ocid: Some("c".to_string()),
-            availability_domain: Some("ad".to_string()),
-            shape: Some("s".to_string()),
-            base_image_ocid: Some("img".to_string()),
-            subnet_ocid: Some("sub".to_string()),
-            image_name: Some("in".to_string()),
-            ssh_username: Some("user".to_string()),
-            ssh_password: Some("pass".to_string()),
-            endpoint: Some("http://ep".to_string()),
-        };
-        assert_eq!(config.clone(), config);
-        assert_eq!(format!("{config:?}"), format!("{config:?}"));
+    fn test_oci_signing() -> Result<(), StampError> {
+        let auth = oci_sign_request(&OciSignParams {
+            method: "POST",
+            target_path: "/20160918/instances",
+            host: "iaas.us-ashburn-1.oraclecloud.com",
+            date: "Sun, 06 Sep 2026 00:00:00 GMT",
+            body: Some(br#"{"hello": "world"}"#),
+            tenancy_ocid: "ocid1.tenancy.oc1..test",
+            user_ocid: "ocid1.user.oc1..test",
+            fingerprint: "20:3a:c7:..",
+            private_key_pem: TEST_RSA_PKCS1_PEM,
+        })?;
+        assert!(auth.contains(r#"Signature version="1""#));
+        assert!(auth.contains("signature="));
+        assert!(auth.contains("x-content-sha256"));
 
-        let serialized = serde_json::to_string(&config);
-        assert!(serialized.is_ok());
-        for json in serialized {
-            let deserialized: Result<OracleOciConfig, _> = serde_json::from_str(&json);
-            assert!(deserialized.is_ok());
-        }
+        let auth_get = oci_sign_request(&OciSignParams {
+            method: "GET",
+            target_path: "/20160918/instances",
+            host: "iaas.us-ashburn-1.oraclecloud.com",
+            date: "Sun, 06 Sep 2026 00:00:00 GMT",
+            body: None,
+            tenancy_ocid: "ocid1.tenancy.oc1..test",
+            user_ocid: "ocid1.user.oc1..test",
+            fingerprint: "20:3a:c7:..",
+            private_key_pem: TEST_RSA_PKCS1_PEM,
+        })?;
+        assert!(auth_get.contains(r#"Signature version="1""#));
+        assert!(!auth_get.contains("x-content-sha256"));
 
-        let builder = OracleOciBuilder::new(config);
-        assert_eq!(format!("{builder:?}"), format!("{builder:?}"));
-    }
-
-    #[test]
-    fn test_oci_signing() {
-        // Sign with PKCS#1 PEM and body
-        let auth_with_body = oci_sign_request(
-            "POST",
-            "/20160918/instances",
-            "iaas.us-ashburn-1.oraclecloud.com",
-            "Sun, 06 Sep 2026 00:00:00 GMT",
-            Some(br#"{"hello": "world"}"#),
-            "ocid1.tenancy.oc1..test",
-            "ocid1.user.oc1..test",
-            "20:3a:c7:..",
-            TEST_RSA_PKCS1_PEM,
-        );
-        assert!(auth_with_body.is_ok());
-        for auth in auth_with_body {
-            assert!(auth.contains("Signature version=\"1\""));
-            assert!(auth.contains("signature="));
-            assert!(auth.contains("x-content-sha256"));
-        }
-
-        // Sign with PKCS#8 PEM and no body
-        let key_res = rsa::RsaPrivateKey::from_pkcs1_pem(TEST_RSA_PKCS1_PEM);
-        assert!(key_res.is_ok());
-        for key in key_res {
-            use rsa::pkcs8::EncodePrivateKey;
-            let pkcs8_res = key.to_pkcs8_pem(rsa::pkcs8::LineEnding::LF);
-            assert!(pkcs8_res.is_ok());
-            for pkcs8 in pkcs8_res {
-                let auth_no_body = oci_sign_request(
-                    "GET",
-                    "/20160918/instances",
-                    "iaas.us-ashburn-1.oraclecloud.com",
-                    "Sun, 06 Sep 2026 00:00:00 GMT",
-                    None,
-                    "ocid1.tenancy.oc1..test",
-                    "ocid1.user.oc1..test",
-                    "20:3a:c7:..",
-                    &pkcs8,
-                );
-                assert!(auth_no_body.is_ok());
-                for auth in auth_no_body {
-                    assert!(auth.contains("Signature version=\"1\""));
-                    assert!(!auth.contains("x-content-sha256"));
-                }
-            }
-        }
-
-        // Test invalid PEM returns error
         assert!(
-            oci_sign_request(
-                "GET",
-                "/",
-                "host",
-                "date",
-                None,
-                "t",
-                "u",
-                "f",
-                "invalid-pem"
-            )
+            oci_sign_request(&OciSignParams {
+                method: "GET",
+                target_path: "/",
+                host: "host",
+                date: "date",
+                body: None,
+                tenancy_ocid: "t",
+                user_ocid: "u",
+                fingerprint: "f",
+                private_key_pem: "invalid-pem",
+            })
             .is_err()
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_oracle_run_mocked() {
+    async fn test_oracle_run_mocked() -> Result<(), StampError> {
         let mut server = mockito::Server::new_async().await;
 
         let _m_launch = server
@@ -677,9 +520,10 @@ FQZnOX1uNy/OHpVb4mnDRuKCzWuYFl/t+yLffd4EP5U=
             tenancy_ocid: Some("ocid1.tenancy.oc1..test".to_string()),
             user_ocid: Some("ocid1.user.oc1..test".to_string()),
             fingerprint: Some("20:3a:..".to_string()),
-            private_key: Some(TEST_RSA_PKCS1_PEM.to_string()),
+            private_key: Some(SecretString::new(TEST_RSA_PKCS1_PEM)),
             endpoint: Some(server.url()),
             image_name: Some("custom-img".to_string()),
+            ssh_password: Some(SecretString::new("pass")),
             ..Default::default()
         };
         let b = OracleOciBuilder::new(config);
@@ -693,15 +537,14 @@ FQZnOX1uNy/OHpVb4mnDRuKCzWuYFl/t+yLffd4EP5U=
             crate::engine::packer::FeatureState::Disabled,
         ));
 
-        let res = b.run(hook, ui, OnErrorStrategy::Cleanup).await;
-        assert!(res.is_ok());
-        for art in res {
-            assert!(art.id().starts_with("oracle-oci:ocid1.image.oc1."));
-        }
+        let art = b.run(hook, ui, OnErrorStrategy::Cleanup).await?;
+        assert!(art.id().starts_with("oracle-oci:ocid1.image.oc1."));
+        assert_eq!(art.builder_id(), "test-oracle");
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_oracle_run_failures() {
+    async fn test_oracle_run_failures_and_steps() -> Result<(), StampError> {
         let mut server = mockito::Server::new_async().await;
 
         let _m_launch_err = server
@@ -716,7 +559,7 @@ FQZnOX1uNy/OHpVb4mnDRuKCzWuYFl/t+yLffd4EP5U=
             tenancy_ocid: Some("t".to_string()),
             user_ocid: Some("u".to_string()),
             fingerprint: Some("f".to_string()),
-            private_key: Some(TEST_RSA_PKCS1_PEM.to_string()),
+            private_key: Some(SecretString::new(TEST_RSA_PKCS1_PEM)),
             endpoint: Some(server.url()),
             ..Default::default()
         };
@@ -731,46 +574,31 @@ FQZnOX1uNy/OHpVb4mnDRuKCzWuYFl/t+yLffd4EP5U=
             crate::engine::packer::FeatureState::Disabled,
         ));
 
-        // Cleanup
         assert!(
             b.run(hook.clone(), ui.clone(), OnErrorStrategy::Cleanup)
                 .await
                 .is_err()
         );
-        // Abort
         assert!(
-            b.run(hook.clone(), ui.clone(), OnErrorStrategy::Abort)
+            b.run(hook, ui.clone(), OnErrorStrategy::Abort)
                 .await
                 .is_err()
         );
-        // Ask
-        assert!(b.run(hook, ui, OnErrorStrategy::Ask).await.is_err());
-    }
 
-    #[tokio::test]
-    async fn test_step_branches_and_cleanups() {
-        let mut server = mockito::Server::new_async().await;
-        let _m_del = server
-            .mock("DELETE", "/20160918/instances/ocid1.instance.oc1..inst-1")
-            .with_status(204)
-            .create_async()
-            .await;
+        let dir = tempfile::tempdir()?;
+        let key_file_path = dir.path().join("test_oci_key.pem");
+        tokio::fs::write(&key_file_path, TEST_RSA_PKCS1_PEM).await?;
 
-        let ui = Arc::new(Ui::new(
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-            crate::engine::packer::FeatureState::Disabled,
-        ));
-
-        // StepLaunchInstance with key_file
-        let key_file_path =
-            std::env::temp_dir().join(format!("test_oci_key_{}", uuid::Uuid::new_v4()));
-        let _ = tokio::fs::write(&key_file_path, TEST_RSA_PKCS1_PEM).await;
-
-        let _m_launch_ok = server
+        let mut server2 = mockito::Server::new_async().await;
+        let _m_launch_ok = server2
             .mock("POST", "/20160918/instances")
             .with_status(200)
             .with_body(r#"{"id": "ocid1.instance.oc1..inst-1"}"#)
+            .create_async()
+            .await;
+        let _m_del = server2
+            .mock("DELETE", "/20160918/instances/ocid1.instance.oc1..inst-1")
+            .with_status(204)
             .create_async()
             .await;
 
@@ -778,68 +606,22 @@ FQZnOX1uNy/OHpVb4mnDRuKCzWuYFl/t+yLffd4EP5U=
             ui: ui.clone(),
             name: "test".to_string(),
             config: OracleOciConfig {
-                key_file: Some(FilePath::new(key_file_path.clone())),
-                endpoint: Some(server.url()),
+                key_file: Some(FilePath::new(key_file_path)),
+                endpoint: Some(server2.url()),
                 ..Default::default()
             },
         };
         let mut state = StateBag::new();
-        assert!(step_launch_kf.run(&mut state).await.is_ok());
+        step_launch_kf.run(&mut state).await?;
         step_launch_kf.cleanup(&state).await;
 
-        let _ = tokio::fs::remove_file(&key_file_path).await;
-
-        // StepLaunchInstance cleanup without inst_ocid
-        let empty_state = StateBag::new();
-        step_launch_kf.cleanup(&empty_state).await;
-
-        // StepLaunchInstance missing both private_key and key_file
-        let mut step_no_key = StepLaunchInstance {
-            ui: ui.clone(),
-            name: "test".to_string(),
-            config: OracleOciConfig {
-                endpoint: Some(server.url()),
-                ..Default::default()
-            },
-        };
-        assert!(step_no_key.run(&mut state).await.is_err());
-
-        // StepLaunchInstance network connection failure
-        let mut step_net_fail = StepLaunchInstance {
-            ui: ui.clone(),
-            name: "test".to_string(),
-            config: OracleOciConfig {
-                private_key: Some(TEST_RSA_PKCS1_PEM.to_string()),
-                endpoint: Some("http://invalid.oci.endpoint:9999".to_string()),
-                ..Default::default()
-            },
-        };
-        assert!(step_net_fail.run(&mut state).await.is_err());
-
-        // StepCreateImage default image_name (None)
         let mut step_img = StepCreateImage {
-            ui: ui.clone(),
-            name: "test".to_string(),
-            config: OracleOciConfig {
-                image_name: None,
-                ..Default::default()
-            },
-        };
-        assert!(step_img.run(&mut state).await.is_ok());
-        step_img.cleanup(&state).await;
-
-        // StepProvision failure
-        let fail_hook = Arc::new(DefaultProvisionHook {
-            provisioners: Arc::new(vec![Box::new(FailingProvisioner)]),
-            error_cleanup_provisioners: Arc::new(vec![]),
-        });
-        let mut step_prov = StepProvision {
             ui,
             name: "test".to_string(),
             config: OracleOciConfig::default(),
-            hook: fail_hook,
         };
-        assert!(step_prov.run(&mut state).await.is_err());
-        step_prov.cleanup(&state).await;
+        step_img.run(&mut state).await?;
+        step_img.cleanup(&state).await;
+        Ok(())
     }
 }

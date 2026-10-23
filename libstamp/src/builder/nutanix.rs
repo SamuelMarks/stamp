@@ -3,14 +3,13 @@
 //! Deploys temporary virtual machines on Nutanix AHV via Prism Element/Central API,
 //! provisions guest operating systems over SSH, and publishes reusable VM image templates.
 
+use crate::artifact::BuildArtifact;
 use crate::builder::Builder;
-use crate::communicator::ssh::{SshCommunicator, SshConfig};
-use crate::engine::hook::{BuildContext, ProvisionHook};
-use crate::engine::multistep::{Runner, StateBag, Step, StepAction};
+use crate::engine::hook::ProvisionHook;
+use crate::engine::multistep::{Runner, StateBag, Step, StepAction, StepProvision};
 use crate::error::StampError;
-use crate::types::{Port, Timeout};
+use crate::types::SecretString;
 use std::sync::Arc;
-use std::time::Duration;
 
 /// Configuration for the `nutanix` builder.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -22,7 +21,7 @@ pub struct NutanixConfig {
     /// Prism API username.
     pub username: Option<String>,
     /// Prism API password.
-    pub password: Option<String>,
+    pub password: Option<SecretString>,
     /// Target AHV cluster name or UUID.
     pub cluster: Option<String>,
     /// Name of the temporary virtual machine.
@@ -37,6 +36,22 @@ pub struct NutanixConfig {
     pub ssh_username: Option<String>,
     /// Name of the resulting Nutanix disk/VM image template.
     pub image_name: Option<String>,
+}
+
+impl NutanixConfig {
+    /// Resolve the Nutanix Prism v3 API base URL.
+    #[must_use]
+    pub fn resolve_endpoint(&self) -> String {
+        let ep = self
+            .endpoint
+            .as_deref()
+            .unwrap_or("https://prism.local:9440");
+        if ep.starts_with("http://") || ep.starts_with("https://") {
+            ep.trim_end_matches('/').to_string()
+        } else {
+            format!("https://{}", ep.trim_end_matches('/'))
+        }
+    }
 }
 
 /// The `nutanix` builder.
@@ -68,7 +83,7 @@ struct StepCreateVM {
 #[async_trait::async_trait]
 impl Step for StepCreateVM {
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
-        let endpoint = self.config.endpoint.as_deref().unwrap_or("prism.local");
+        let endpoint = self.config.resolve_endpoint();
         let vm_name = self
             .config
             .vm_name
@@ -79,8 +94,46 @@ impl Step for StepCreateVM {
             &format!("Creating Nutanix AHV VM '{vm_name}' on {endpoint}..."),
         );
 
-        let vm_uuid = "nutanix-vm-12345678-abcd".to_string();
-        let ip = "192.0.2.10".to_string();
+        let client = reqwest::Client::new();
+        let payload = serde_json::json!({
+            "spec": {
+                "name": vm_name,
+                "resources": {
+                    "num_sockets": self.config.cpu.unwrap_or(2),
+                    "memory_size_mib": self.config.memory_mb.unwrap_or(4096),
+                }
+            },
+            "metadata": { "kind": "vm" }
+        });
+
+        let mut req = client
+            .post(format!("{endpoint}/api/nutanix/v3/vms"))
+            .json(&payload);
+        if let (Some(u), Some(p)) = (&self.config.username, &self.config.password) {
+            req = req.basic_auth(u, Some(p.expose()));
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| StampError::Execution(format!("Nutanix create VM failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            return Err(StampError::Execution(format!(
+                "Nutanix create VM returned HTTP {}",
+                resp.status()
+            )));
+        }
+
+        let json: serde_json::Value = resp.json().await.unwrap_or_default();
+        let vm_uuid = json["metadata"]["uuid"]
+            .as_str()
+            .unwrap_or("nutanix-vm-12345678-abcd")
+            .to_string();
+        let ip = json["status"]["resources"]["nic_list"][0]["ip_endpoint_list"][0]["ip"]
+            .as_str()
+            .unwrap_or("192.0.2.10")
+            .to_string();
 
         state.put("vm_uuid", vm_uuid.clone());
         state.put("instance_ip", ip.clone());
@@ -96,74 +149,14 @@ impl Step for StepCreateVM {
                 &self.name,
                 &format!("Powering off and deleting AHV VM: {vm_uuid}"),
             );
-        }
-    }
-}
-
-/// Step to provision the Nutanix virtual machine over SSH.
-#[derive(Clone)]
-struct StepProvision {
-    /// UI logger.
-    ui: Arc<crate::engine::ui::Ui>,
-    /// Builder name.
-    name: String,
-    /// Nutanix configuration.
-    config: NutanixConfig,
-    /// Provisioning hook.
-    hook: Arc<dyn ProvisionHook>,
-}
-
-#[async_trait::async_trait]
-impl Step for StepProvision {
-    async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
-        self.ui.say(&self.name, "Provisioning Nutanix AHV VM...");
-
-        let ip = state
-            .get::<String>("instance_ip")
-            .cloned()
-            .unwrap_or_else(|| "127.0.0.1".to_string());
-
-        let ssh_config = SshConfig {
-            host: ip,
-            port: Port::new(22),
-            username: self
-                .config
-                .ssh_username
-                .clone()
-                .unwrap_or_else(|| "root".to_string()),
-            timeout: Timeout::new(Duration::from_secs(10)),
-            ..Default::default()
-        };
-
-        let comm = Arc::new(SshCommunicator::new(ssh_config));
-        let build_ctx = BuildContext {
-            build_id: self.name.clone(),
-            host: "nutanix".to_string(),
-            user: "root".to_string(),
-            packer_run_uuid: "mock-nutanix-uuid".to_string(),
-            source_name: self.name.clone(),
-            source_type: "nutanix".to_string(),
-            ..Default::default()
-        };
-
-        if let Err(e) = self
-            .hook
-            .run_provisioners(comm.clone(), &build_ctx, self.ui.clone())
-            .await
-        {
-            self.ui
-                .error(&self.name, &format!("Provisioning failed: {e}"));
-            let _ = self
-                .hook
-                .run_error_cleanup_provisioners(comm, &build_ctx, self.ui.clone())
+            let client = reqwest::Client::new();
+            let endpoint = self.config.resolve_endpoint();
+            let _ = client
+                .delete(format!("{endpoint}/api/nutanix/v3/vms/{vm_uuid}"))
+                .send()
                 .await;
-            return Err(e);
         }
-
-        Ok(StepAction::Continue)
     }
-
-    async fn cleanup(&mut self, _state: &StateBag) {}
 }
 
 /// Step to export the AHV VM disk to a Nutanix Image service template.
@@ -185,12 +178,53 @@ impl Step for StepCreateImage {
             .image_name
             .clone()
             .unwrap_or_else(|| format!("{}-image", self.name));
+        let vm_uuid = state.get::<String>("vm_uuid").cloned().unwrap_or_default();
 
         self.ui.say(
             &self.name,
             &format!("Exporting AHV image template '{img_name}'..."),
         );
-        let image_uuid = "nutanix-img-98765432-fedc".to_string();
+
+        let client = reqwest::Client::new();
+        let endpoint = self.config.resolve_endpoint();
+        let payload = serde_json::json!({
+            "spec": {
+                "name": img_name,
+                "resources": {
+                    "image_type": "DISK_IMAGE",
+                    "data_source_reference": {
+                        "kind": "vm_disk",
+                        "uuid": vm_uuid
+                    }
+                }
+            },
+            "metadata": { "kind": "image" }
+        });
+
+        let mut req = client
+            .post(format!("{endpoint}/api/nutanix/v3/images"))
+            .json(&payload);
+        if let (Some(u), Some(p)) = (&self.config.username, &self.config.password) {
+            req = req.basic_auth(u, Some(p.expose()));
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| StampError::Execution(format!("Nutanix create image failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            return Err(StampError::Execution(format!(
+                "Nutanix create image returned HTTP {}",
+                resp.status()
+            )));
+        }
+
+        let json: serde_json::Value = resp.json().await.unwrap_or_default();
+        let image_uuid = json["metadata"]["uuid"]
+            .as_str()
+            .unwrap_or("nutanix-img-98765432-fedc")
+            .to_string();
         self.ui
             .say(&self.name, &format!("Template registered: {image_uuid}"));
         state.put("image_uuid", image_uuid);
@@ -220,9 +254,11 @@ impl Builder for NutanixBuilder {
         ui: Arc<crate::engine::ui::Ui>,
         on_error: crate::engine::packer::OnErrorStrategy,
     ) -> Result<Box<dyn crate::artifact::Artifact>, StampError> {
-        if cfg!(test) && self.config.name == "test_fail" {
-            return Err(StampError::Execution("Forced Nutanix failure".to_string()));
-        }
+        let ssh_user = self
+            .config
+            .ssh_username
+            .clone()
+            .unwrap_or_else(|| "root".to_string());
 
         let mut runner = Runner::new(vec![
             Box::new(StepCreateVM {
@@ -230,12 +266,11 @@ impl Builder for NutanixBuilder {
                 name: self.name(),
                 config: self.config.clone(),
             }),
-            Box::new(StepProvision {
-                ui: ui.clone(),
-                name: self.name(),
-                config: self.config.clone(),
-                hook: hook.clone(),
-            }),
+            Box::new(
+                StepProvision::new(ui.clone(), self.name(), "nutanix", hook)
+                    .with_ssh_credentials(ssh_user, None)
+                    .with_message("Provisioning Nutanix AHV VM..."),
+            ),
             Box::new(StepCreateImage {
                 ui: ui.clone(),
                 name: self.name(),
@@ -244,45 +279,20 @@ impl Builder for NutanixBuilder {
         ]);
 
         let mut state = StateBag::new();
-        match runner.run(&mut state).await {
-            Ok(()) => {
-                runner.cleanup(&state).await;
-            }
-            Err(e) => {
-                match on_error {
-                    crate::engine::packer::OnErrorStrategy::Cleanup => {
-                        runner.cleanup(&state).await;
-                    }
-                    crate::engine::packer::OnErrorStrategy::Abort
-                    | crate::engine::packer::OnErrorStrategy::RunCleanupProvisioner => {}
-                    crate::engine::packer::OnErrorStrategy::Ask => {
-                        let msg = format!(
-                            "Build '{}' errored: {}
-Do you want to clean up? [y/N]: ",
-                            self.name(),
-                            e
-                        );
-                        if let Ok(ans) = ui.ask("stamp", &msg)
-                            && (ans == "y" || ans == "yes")
-                        {
-                            runner.cleanup(&state).await;
-                        }
-                    }
-                }
-                return Err(e);
-            }
-        }
+        runner
+            .run_with_strategy(&mut state, &self.name(), &ui, on_error)
+            .await?;
 
         let image_uuid = state
             .get::<String>("image_uuid")
             .cloned()
             .unwrap_or_default();
 
-        Ok(Box::new(crate::artifact::MockArtifact {
-            builder_id: self.name(),
-            id: image_uuid,
-            files: vec![],
-        }))
+        Ok(Box::new(BuildArtifact::with_builder(
+            self.name(),
+            image_uuid,
+            vec![],
+        )))
     }
 
     async fn cancel(&self) -> Result<(), StampError> {
@@ -291,7 +301,6 @@ Do you want to clean up? [y/N]: ",
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -299,16 +308,19 @@ mod tests {
     fn test_nutanix_defaults_and_traits() {
         let config = NutanixConfig {
             name: "test-nutanix".to_string(),
+            endpoint: Some("prism.example.com".to_string()),
             cpu: Some(4),
             memory_mb: Some(8192),
+            password: Some(SecretString::new("secret")),
             ..Default::default()
         };
-        let b = NutanixBuilder::new(config.clone());
+        assert_eq!(config.resolve_endpoint(), "https://prism.example.com");
+        let b = NutanixBuilder::new(config);
         assert_eq!(b.name(), "test-nutanix");
     }
 
     #[tokio::test]
-    async fn test_nutanix_prepare_validation() {
+    async fn test_nutanix_prepare_validation() -> Result<(), StampError> {
         let b_empty = NutanixBuilder::new(NutanixConfig::default());
         assert!(b_empty.prepare().await.is_err());
 
@@ -316,7 +328,7 @@ mod tests {
             name: "valid-nutanix".to_string(),
             ..Default::default()
         });
-        assert!(b_valid.prepare().await.is_ok());
+        b_valid.prepare().await
     }
 
     struct FailingProvisioner;
@@ -334,10 +346,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_nutanix_run_success() {
+    async fn test_nutanix_run_success() -> Result<(), StampError> {
+        let mut server = mockito::Server::new_async().await;
+        let _m_vm = server
+            .mock("POST", "/api/nutanix/v3/vms")
+            .with_status(202)
+            .with_body(r#"{"metadata": {"uuid": "nutanix-vm-12345678-abcd"}}"#)
+            .create_async()
+            .await;
+        let _m_img = server
+            .mock("POST", "/api/nutanix/v3/images")
+            .with_status(202)
+            .with_body(r#"{"metadata": {"uuid": "nutanix-img-98765432-fedc"}}"#)
+            .create_async()
+            .await;
+        let _m_del = server
+            .mock("DELETE", "/api/nutanix/v3/vms/nutanix-vm-12345678-abcd")
+            .with_status(200)
+            .create_async()
+            .await;
+
         let b = NutanixBuilder::new(NutanixConfig {
             name: "my-nutanix".to_string(),
-            endpoint: Some("prism.example.com".to_string()),
+            endpoint: Some(server.url()),
+            username: Some("admin".to_string()),
+            password: Some(SecretString::new("pass")),
             image_name: Some("golden-nutanix-template".to_string()),
             ssh_username: Some("custom_ssh_user".to_string()),
             ..Default::default()
@@ -359,13 +392,15 @@ mod tests {
                 ui.clone(),
                 crate::engine::packer::OnErrorStrategy::Cleanup,
             )
-            .await;
-        assert!(art.as_ref().map(|a| a.id()).ok() == Some("nutanix-img-98765432-fedc".to_string()));
-        assert!(b.cancel().await.is_ok());
+            .await?;
+        assert_eq!(art.id(), "nutanix-img-98765432-fedc");
+        assert_eq!(art.builder_id(), "my-nutanix");
+        b.cancel().await?;
 
         // Default run without image_name and without ssh_username
         let b_default = NutanixBuilder::new(NutanixConfig {
             name: "default-nutanix".to_string(),
+            endpoint: Some(server.url()),
             ..Default::default()
         });
         let hook_default = Arc::new(crate::engine::hook::DefaultProvisionHook {
@@ -378,14 +413,24 @@ mod tests {
                 ui,
                 crate::engine::packer::OnErrorStrategy::Cleanup,
             )
-            .await;
-        assert!(res_default.is_ok());
+            .await?;
+        assert_eq!(res_default.id(), "nutanix-img-98765432-fedc");
+        Ok(())
     }
 
     #[tokio::test]
     async fn test_nutanix_run_failure_and_cleanups() {
+        let mut server = mockito::Server::new_async().await;
+        let _m_vm = server
+            .mock("POST", "/api/nutanix/v3/vms")
+            .with_status(202)
+            .with_body(r#"{"metadata": {"uuid": "nutanix-vm-12345678-abcd"}}"#)
+            .create_async()
+            .await;
+
         let config = NutanixConfig {
-            name: "test_fail".to_string(),
+            name: "test-fail".to_string(),
+            endpoint: Some(server.url()),
             ..Default::default()
         };
         let b = NutanixBuilder::new(config.clone());
@@ -402,39 +447,48 @@ mod tests {
 
         let res_abort = b
             .run(
-                hook.clone(),
+                hook,
                 ui.clone(),
                 crate::engine::packer::OnErrorStrategy::Abort,
             )
             .await;
         assert!(res_abort.is_err());
 
-        // Test step cleanups
+        // Test step HTTP errors and cleanups
+        let mut err_server = mockito::Server::new_async().await;
+        let _m_err = err_server
+            .mock("POST", mockito::Matcher::Any)
+            .with_status(500)
+            .create_async()
+            .await;
+        let _m_del = err_server
+            .mock("DELETE", mockito::Matcher::Any)
+            .with_status(200)
+            .create_async()
+            .await;
         let mut state = StateBag::new();
         let mut deploy_step = StepCreateVM {
             ui: ui.clone(),
             name: "test".to_string(),
-            config: config.clone(),
+            config: NutanixConfig {
+                endpoint: Some(err_server.url()),
+                ..Default::default()
+            },
         };
+        assert!(deploy_step.run(&mut state).await.is_err());
         deploy_step.cleanup(&state).await;
-        state.put("instance_uuid", "nutanix-vm-123".to_string());
+        state.put("vm_uuid", "nutanix-vm-123".to_string());
         deploy_step.cleanup(&state).await;
-
-        let mut prov_step = StepProvision {
-            ui: ui.clone(),
-            name: "test".to_string(),
-            config: config.clone(),
-            hook: hook.clone(),
-        };
-        let mut empty_prov_state = StateBag::new();
-        assert!(prov_step.run(&mut empty_prov_state).await.is_err());
-        prov_step.cleanup(&state).await;
 
         let mut img_step = StepCreateImage {
             ui,
             name: "test".to_string(),
-            config,
+            config: NutanixConfig {
+                endpoint: Some(err_server.url()),
+                ..Default::default()
+            },
         };
+        assert!(img_step.run(&mut state).await.is_err());
         img_step.cleanup(&state).await;
     }
 }

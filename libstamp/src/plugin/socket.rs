@@ -118,10 +118,11 @@ pub async fn bind_bounded_tcp_listener() -> Result<TcpListener, StampError> {
 }
 
 #[cfg(test)]
-#[allow(clippy::pedantic, clippy::all)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use crate::plugin::handshake::{PACKER_PLUGIN_MAX_PORT_ENV, PACKER_PLUGIN_MIN_PORT_ENV};
+    use crate::utils::{ENV_MUTEX, ScopedEnvVar};
 
     #[tokio::test]
     async fn test_unix_socket_guard_lifecycle() -> Result<(), StampError> {
@@ -182,13 +183,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_bind_bounded_tcp_listener_default() -> Result<(), StampError> {
-        let _guard = crate::utils::ENV_MUTEX
+        let _guard = ENV_MUTEX
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::remove_var(PACKER_PLUGIN_MIN_PORT_ENV);
-            std::env::remove_var(PACKER_PLUGIN_MAX_PORT_ENV);
-        }
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _rm_min = ScopedEnvVar::remove(PACKER_PLUGIN_MIN_PORT_ENV);
+        let _rm_max = ScopedEnvVar::remove(PACKER_PLUGIN_MAX_PORT_ENV);
         let listener = bind_bounded_tcp_listener().await?;
         let port = listener.local_addr().map_err(StampError::Io)?.port();
         assert!(port > 0);
@@ -197,9 +196,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_bind_bounded_tcp_listener_bounded() -> Result<(), StampError> {
-        let _guard = crate::utils::ENV_MUTEX
+        let _guard = ENV_MUTEX
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Reserve an arbitrary free port range
         let temp = TcpListener::bind("127.0.0.1:0")
             .await
@@ -210,10 +209,8 @@ mod tests {
         // Allow a small range in case of rapid port re-bind semantics
         let max_port = port.saturating_add(5);
 
-        unsafe {
-            std::env::set_var(PACKER_PLUGIN_MIN_PORT_ENV, port.to_string());
-            std::env::set_var(PACKER_PLUGIN_MAX_PORT_ENV, max_port.to_string());
-        }
+        let _s_min = ScopedEnvVar::set(PACKER_PLUGIN_MIN_PORT_ENV, port.to_string());
+        let _s_max = ScopedEnvVar::set(PACKER_PLUGIN_MAX_PORT_ENV, max_port.to_string());
 
         let listener = bind_bounded_tcp_listener().await?;
         let bound_port = listener.local_addr().map_err(StampError::Io)?.port();
@@ -221,18 +218,11 @@ mod tests {
 
         // Conflict test: set single port and occupy it
         let occ_port = bound_port;
-        unsafe {
-            std::env::set_var(PACKER_PLUGIN_MIN_PORT_ENV, occ_port.to_string());
-            std::env::set_var(PACKER_PLUGIN_MAX_PORT_ENV, occ_port.to_string());
-        }
+        let _s_min2 = ScopedEnvVar::set(PACKER_PLUGIN_MIN_PORT_ENV, occ_port.to_string());
+        let _s_max2 = ScopedEnvVar::set(PACKER_PLUGIN_MAX_PORT_ENV, occ_port.to_string());
 
         let res = bind_bounded_tcp_listener().await;
         assert!(res.is_err());
-
-        unsafe {
-            std::env::remove_var(PACKER_PLUGIN_MIN_PORT_ENV);
-            std::env::remove_var(PACKER_PLUGIN_MAX_PORT_ENV);
-        }
         Ok(())
     }
 }

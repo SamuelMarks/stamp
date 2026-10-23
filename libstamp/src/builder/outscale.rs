@@ -3,26 +3,27 @@
 //! Provides an Outscale API v1 client for managing virtual machines (VMs), block storage (BSU),
 //! and machine images (OMIs).
 
+use crate::artifact::BuildArtifact;
 use crate::builder::Builder;
-use crate::communicator::ssh::{SshCommunicator, SshConfig};
-use crate::engine::hook::{BuildContext, ProvisionHook};
-use crate::engine::multistep::{Runner, StateBag, Step, StepAction};
+use crate::engine::hook::ProvisionHook;
+use crate::engine::multistep::{Runner, StateBag, Step, StepAction, StepProvision};
 use crate::error::StampError;
-use crate::types::{Port, Timeout};
+use crate::types::SecretString;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::Duration;
 
 /// Configuration for the `outscale-bsu` builder.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct OutscaleBsuConfig {
     /// Name of the builder instance.
     pub name: String,
+    /// Optional custom Outscale API endpoint URL override.
+    pub endpoint: Option<String>,
     /// Outscale API Access Key.
-    pub access_key: Option<String>,
+    pub access_key: Option<SecretString>,
     /// Outscale API Secret Key.
-    pub secret_key: Option<String>,
+    pub secret_key: Option<SecretString>,
     /// Outscale region (e.g. `eu-west-2`, `us-east-2`).
     pub region: Option<String>,
     /// Source OMI (Outscale Machine Image) ID.
@@ -36,33 +37,60 @@ pub struct OutscaleBsuConfig {
     /// SSH username for provisioner connection.
     pub ssh_username: Option<String>,
     /// SSH password.
-    pub ssh_password: Option<String>,
+    pub ssh_password: Option<SecretString>,
 }
 
 /// Outscale API v1 client.
 #[derive(Debug, Clone)]
 pub struct OutscaleClient {
     /// Access key.
-    pub access_key: Option<String>,
+    pub access_key: Option<SecretString>,
     /// Secret key.
-    pub secret_key: Option<String>,
+    pub secret_key: Option<SecretString>,
     /// Region.
     pub region: String,
+    /// Base URL for Outscale API.
+    pub endpoint: Option<String>,
 }
 
 impl OutscaleClient {
     /// Create a new `OutscaleClient`.
     #[must_use]
     pub const fn new(
-        access_key: Option<String>,
-        secret_key: Option<String>,
+        access_key: Option<SecretString>,
+        secret_key: Option<SecretString>,
         region: String,
     ) -> Self {
         Self {
             access_key,
             secret_key,
             region,
+            endpoint: None,
         }
+    }
+
+    /// Create a new `OutscaleClient` with a custom API endpoint.
+    #[must_use]
+    pub fn with_endpoint(
+        access_key: Option<SecretString>,
+        secret_key: Option<SecretString>,
+        region: String,
+        endpoint: impl Into<String>,
+    ) -> Self {
+        Self {
+            access_key,
+            secret_key,
+            region,
+            endpoint: Some(endpoint.into()),
+        }
+    }
+
+    /// Returns the base URL for the Outscale API.
+    fn base_url(&self) -> String {
+        self.endpoint.as_deref().map_or_else(
+            || format!("https://api.{}.outscale.com/api/v1", self.region),
+            |e| e.trim_end_matches('/').to_string(),
+        )
     }
 
     /// Launch a new VM instance in Outscale.
@@ -71,12 +99,19 @@ impl OutscaleClient {
     ///
     /// Returns `StampError::Execution` if VM launch fails.
     pub async fn create_vm(&self, image_id: &str, vm_type: &str) -> Result<String, StampError> {
-        if cfg!(test) {
-            return Ok(format!("vm-{}", uuid::Uuid::new_v4().simple()));
+        #[derive(Deserialize)]
+        struct CreateVmResponse {
+            #[serde(rename = "Vms")]
+            vms: Option<Vec<VmInfo>>,
+        }
+        #[derive(Deserialize)]
+        struct VmInfo {
+            #[serde(rename = "VmId")]
+            vm_id: String,
         }
 
         let client = reqwest::Client::new();
-        let url = format!("https://api.{}.outscale.com/api/v1/CreateVms", self.region);
+        let url = format!("{}/CreateVms", self.base_url());
         let payload = serde_json::json!({
             "ImageId": image_id,
             "VmType": vm_type,
@@ -90,17 +125,6 @@ impl OutscaleClient {
             .send()
             .await
             .map_err(|e| StampError::Execution(format!("Outscale CreateVms failed: {e}")))?;
-
-        #[derive(Deserialize)]
-        struct CreateVmResponse {
-            #[serde(rename = "Vms")]
-            vms: Option<Vec<VmInfo>>,
-        }
-        #[derive(Deserialize)]
-        struct VmInfo {
-            #[serde(rename = "VmId")]
-            vm_id: String,
-        }
 
         let res: CreateVmResponse = resp
             .json()
@@ -123,15 +147,19 @@ impl OutscaleClient {
         image_name: &str,
         description: Option<&str>,
     ) -> Result<String, StampError> {
-        if cfg!(test) {
-            return Ok(format!("omi-{}", uuid::Uuid::new_v4().simple()));
+        #[derive(Deserialize)]
+        struct CreateImageResponse {
+            #[serde(rename = "Image")]
+            image: Option<ImageInfo>,
+        }
+        #[derive(Deserialize)]
+        struct ImageInfo {
+            #[serde(rename = "ImageId")]
+            image_id: String,
         }
 
         let client = reqwest::Client::new();
-        let url = format!(
-            "https://api.{}.outscale.com/api/v1/CreateImage",
-            self.region
-        );
+        let url = format!("{}/CreateImage", self.base_url());
         let mut payload = serde_json::json!({
             "VmId": vm_id,
             "ImageName": image_name,
@@ -146,17 +174,6 @@ impl OutscaleClient {
             .send()
             .await
             .map_err(|e| StampError::Execution(format!("Outscale CreateImage failed: {e}")))?;
-
-        #[derive(Deserialize)]
-        struct CreateImageResponse {
-            #[serde(rename = "Image")]
-            image: Option<ImageInfo>,
-        }
-        #[derive(Deserialize)]
-        struct ImageInfo {
-            #[serde(rename = "ImageId")]
-            image_id: String,
-        }
 
         let res: CreateImageResponse = resp
             .json()
@@ -173,12 +190,8 @@ impl OutscaleClient {
     ///
     /// Returns `StampError::Execution` if deletion fails.
     pub async fn delete_vms(&self, vm_id: &str) -> Result<(), StampError> {
-        if cfg!(test) {
-            return Ok(());
-        }
-
         let client = reqwest::Client::new();
-        let url = format!("https://api.{}.outscale.com/api/v1/DeleteVms", self.region);
+        let url = format!("{}/DeleteVms", self.base_url());
         let payload = serde_json::json!({
             "VmIds": [vm_id]
         });
@@ -248,73 +261,6 @@ impl Step for StepLaunchOutscaleVm {
     }
 }
 
-/// Step to provision the Outscale VM over SSH.
-#[derive(Clone)]
-struct StepProvisionOutscale {
-    /// UI reference.
-    ui: Arc<crate::engine::ui::Ui>,
-    /// Builder name.
-    name: String,
-    /// Provisioning hook.
-    hook: Arc<dyn ProvisionHook>,
-    /// SSH username.
-    ssh_username: Option<String>,
-    /// SSH password.
-    ssh_password: Option<String>,
-}
-
-#[async_trait]
-impl Step for StepProvisionOutscale {
-    async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
-        self.ui.say(&self.name, "Provisioning Outscale VM...");
-        let ip = state
-            .get::<String>("vm_ip")
-            .cloned()
-            .unwrap_or_else(|| "127.0.0.1".to_string());
-
-        let ssh_config = SshConfig {
-            host: ip,
-            port: Port::new(22),
-            username: self
-                .ssh_username
-                .clone()
-                .unwrap_or_else(|| "outscale".to_string()),
-            password: self.ssh_password.clone(),
-            timeout: Timeout::new(Duration::from_secs(10)),
-            ..Default::default()
-        };
-
-        let comm = Arc::new(SshCommunicator::new(ssh_config));
-        let build_ctx = BuildContext {
-            build_id: self.name.clone(),
-            host: "outscale".to_string(),
-            user: "outscale".to_string(),
-            packer_run_uuid: "mocked-uuid".to_string(),
-            source_name: self.name.clone(),
-            source_type: "outscale-bsu".to_string(),
-            ..Default::default()
-        };
-
-        if let Err(e) = self
-            .hook
-            .run_provisioners(comm.clone(), &build_ctx, self.ui.clone())
-            .await
-        {
-            self.ui
-                .error(&self.name, &format!("Provisioning failed: {e}"));
-            let _ = self
-                .hook
-                .run_error_cleanup_provisioners(comm, &build_ctx, self.ui.clone())
-                .await;
-            return Err(e);
-        }
-
-        Ok(StepAction::Continue)
-    }
-
-    async fn cleanup(&mut self, _state: &StateBag) {}
-}
-
 /// Step to register custom OMI in Outscale.
 #[derive(Debug, Clone)]
 struct StepCreateOmiImage {
@@ -382,14 +328,35 @@ impl Builder for OutscaleBsuBuilder {
         ui: Arc<crate::engine::ui::Ui>,
         on_error: crate::engine::packer::OnErrorStrategy,
     ) -> Result<Box<dyn crate::artifact::Artifact>, StampError> {
-        let client = OutscaleClient::new(
-            self.config.access_key.clone(),
-            self.config.secret_key.clone(),
-            self.config
-                .region
-                .clone()
-                .unwrap_or_else(|| "eu-west-2".to_string()),
-        );
+        let region = self
+            .config
+            .region
+            .clone()
+            .unwrap_or_else(|| "eu-west-2".to_string());
+        let client = if let Some(ref ep) = self.config.endpoint {
+            OutscaleClient::with_endpoint(
+                self.config.access_key.clone(),
+                self.config.secret_key.clone(),
+                region,
+                ep,
+            )
+        } else {
+            OutscaleClient::new(
+                self.config.access_key.clone(),
+                self.config.secret_key.clone(),
+                region,
+            )
+        };
+        let ssh_user = self
+            .config
+            .ssh_username
+            .clone()
+            .unwrap_or_else(|| "outscale".to_string());
+        let ssh_pass = self
+            .config
+            .ssh_password
+            .as_ref()
+            .map(|s| s.expose().to_string());
 
         let steps: Vec<Box<dyn Step>> = vec![
             Box::new(StepLaunchOutscaleVm {
@@ -398,13 +365,12 @@ impl Builder for OutscaleBsuBuilder {
                 client: client.clone(),
                 config: self.config.clone(),
             }),
-            Box::new(StepProvisionOutscale {
-                ui: ui.clone(),
-                name: self.name(),
-                hook,
-                ssh_username: self.config.ssh_username.clone(),
-                ssh_password: self.config.ssh_password.clone(),
-            }),
+            Box::new(
+                StepProvision::new(ui.clone(), self.name(), "outscale-bsu", hook)
+                    .with_ip_key("vm_ip")
+                    .with_ssh_credentials(ssh_user, ssh_pass)
+                    .with_message("Provisioning Outscale VM..."),
+            ),
             Box::new(StepCreateOmiImage {
                 ui: ui.clone(),
                 name: self.name(),
@@ -416,28 +382,20 @@ impl Builder for OutscaleBsuBuilder {
         let mut runner = Runner::new(steps);
         let mut state = StateBag::new();
 
-        match runner.run(&mut state).await {
-            Ok(()) => {
-                runner.cleanup(&state).await;
-            }
-            Err(e) => {
-                if on_error == crate::engine::packer::OnErrorStrategy::Cleanup {
-                    runner.cleanup(&state).await;
-                }
-                return Err(e);
-            }
-        }
+        runner
+            .run_with_strategy(&mut state, &self.name(), &ui, on_error)
+            .await?;
 
         let artifact_id = state
             .get::<String>("artifact_id")
             .cloned()
             .unwrap_or_else(|| format!("outscale:{}", self.name()));
 
-        Ok(Box::new(crate::artifact::MockArtifact {
-            builder_id: self.name(),
-            id: artifact_id,
-            files: vec![],
-        }))
+        Ok(Box::new(BuildArtifact::with_builder(
+            self.name(),
+            artifact_id,
+            vec![],
+        )))
     }
 
     async fn cancel(&self) -> Result<(), StampError> {
@@ -451,9 +409,9 @@ pub struct OutscaleChrootConfig {
     /// Name of the builder.
     pub name: String,
     /// Access key.
-    pub access_key: Option<String>,
+    pub access_key: Option<SecretString>,
     /// Secret key.
-    pub secret_key: Option<String>,
+    pub secret_key: Option<SecretString>,
     /// Region.
     pub region: Option<String>,
     /// Source OMI.
@@ -497,11 +455,11 @@ impl Builder for OutscaleChrootBuilder {
         _on_error: crate::engine::packer::OnErrorStrategy,
     ) -> Result<Box<dyn crate::artifact::Artifact>, StampError> {
         ui.say(&self.name(), "Building Outscale chroot image...");
-        Ok(Box::new(crate::artifact::MockArtifact {
-            builder_id: self.name(),
-            id: format!("outscale-chroot:{}", self.name()),
-            files: vec![],
-        }))
+        Ok(Box::new(BuildArtifact::with_builder(
+            self.name(),
+            format!("outscale-chroot:{}", self.name()),
+            vec![],
+        )))
     }
 
     async fn cancel(&self) -> Result<(), StampError> {
@@ -510,7 +468,6 @@ impl Builder for OutscaleChrootBuilder {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -526,7 +483,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_outscale_bsu_prepare() {
+    async fn test_outscale_bsu_prepare() -> Result<(), StampError> {
         let mut c = OutscaleBsuConfig::default();
         let b = OutscaleBsuBuilder::new(c.clone());
         assert!(b.prepare().await.is_err());
@@ -541,23 +498,47 @@ mod tests {
 
         c.image_name = "new-img".to_string();
         let b = OutscaleBsuBuilder::new(c);
-        assert!(b.prepare().await.is_ok());
+        b.prepare().await
     }
 
     #[tokio::test]
-    async fn test_outscale_client_mocked() -> Result<(), StampError> {
-        let client = OutscaleClient::new(
-            Some("ak".to_string()),
-            Some("sk".to_string()),
+    async fn test_outscale_client_http() -> Result<(), StampError> {
+        let mut server = mockito::Server::new_async().await;
+        let url = server.url();
+
+        let _m_vm = server
+            .mock("POST", "/CreateVms")
+            .with_status(200)
+            .with_body(r#"{"Vms":[{"VmId":"vm-http-1"}]}"#)
+            .create_async()
+            .await;
+
+        let _m_img = server
+            .mock("POST", "/CreateImage")
+            .with_status(200)
+            .with_body(r#"{"Image":{"ImageId":"omi-http-1"}}"#)
+            .create_async()
+            .await;
+
+        let _m_del = server
+            .mock("POST", "/DeleteVms")
+            .with_status(200)
+            .create_async()
+            .await;
+
+        let client = OutscaleClient::with_endpoint(
+            Some(SecretString::new("ak")),
+            Some(SecretString::new("sk")),
             "eu-west-2".to_string(),
+            &url,
         );
         let vm_id = client.create_vm("omi-src", "tinav4.c2r4").await?;
-        assert!(vm_id.starts_with("vm-"));
+        assert_eq!(vm_id, "vm-http-1");
 
         let img_id = client
             .create_image(&vm_id, "test-img", Some("desc"))
             .await?;
-        assert!(img_id.starts_with("omi-"));
+        assert_eq!(img_id, "omi-http-1");
 
         client.delete_vms(&vm_id).await?;
         Ok(())
@@ -565,10 +546,35 @@ mod tests {
 
     #[tokio::test]
     async fn test_outscale_bsu_run() -> Result<(), StampError> {
+        let mut server = mockito::Server::new_async().await;
+        let _m_vm = server
+            .mock("POST", "/CreateVms")
+            .with_status(200)
+            .with_body(r#"{"Vms":[{"VmId":"vm-run-1"}]}"#)
+            .create_async()
+            .await;
+        let _m_img = server
+            .mock("POST", "/CreateImage")
+            .with_status(200)
+            .with_body(r#"{"Image":{"ImageId":"omi-run-1"}}"#)
+            .create_async()
+            .await;
+        let _m_del = server
+            .mock("POST", "/DeleteVms")
+            .with_status(200)
+            .create_async()
+            .await;
+
+        assert_eq!(
+            OutscaleClient::new(None, None, "eu-west-2".to_string()).base_url(),
+            "https://api.eu-west-2.outscale.com/api/v1"
+        );
         let config = OutscaleBsuConfig {
             name: "test-bsu".to_string(),
+            endpoint: Some(server.url()),
             source_omi: "omi-source".to_string(),
             image_name: "test-omi".to_string(),
+            ssh_password: Some(SecretString::new("pass")),
             ..Default::default()
         };
         let b = OutscaleBsuBuilder::new(config);
@@ -585,6 +591,7 @@ mod tests {
             .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
             .await?;
         assert!(artifact.id().starts_with("outscale:omi-"));
+        assert_eq!(artifact.builder_id(), "test-bsu");
         b.cancel().await?;
         Ok(())
     }
@@ -596,7 +603,7 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(b.name(), "chroot-test");
-        assert!(b.prepare().await.is_ok());
+        b.prepare().await?;
         let hook = Arc::new(crate::engine::hook::DefaultProvisionHook {
             provisioners: Arc::new(vec![]),
             error_cleanup_provisioners: Arc::new(vec![]),
@@ -610,18 +617,10 @@ mod tests {
             .run(hook, ui, crate::engine::packer::OnErrorStrategy::Cleanup)
             .await?;
         assert_eq!(artifact.id(), "outscale-chroot:chroot-test");
-        assert!(b.cancel().await.is_ok());
+        b.cancel().await?;
+
+        let b_empty = OutscaleChrootBuilder::new(OutscaleChrootConfig::default());
+        assert!(b_empty.prepare().await.is_err());
         Ok(())
-    }
-
-    #[test]
-    fn test_derived_traits() {
-        let c1 = OutscaleBsuConfig::default();
-        let c2 = c1.clone();
-        assert_eq!(c1, c2);
-        assert_eq!(format!("{c1:?}"), format!("{c2:?}"));
-
-        let client = OutscaleClient::new(None, None, "eu-west-2".to_string());
-        assert_eq!(format!("{client:?}"), format!("{client:?}"));
     }
 }

@@ -537,28 +537,47 @@ pub fn init_packer_logging() -> Result<Option<String>, crate::error::StampError>
 }
 
 /// Maps any displayable error to a `tonic::Status` internal error.
-pub(crate) fn map_status_internal(e: impl std::fmt::Display) -> tonic::Status {
+///
+/// # Arguments
+/// * `e` - Displayable error value.
+#[must_use]
+pub fn map_status_internal(e: impl std::fmt::Display) -> tonic::Status {
     tonic::Status::internal(e.to_string())
 }
 
 /// Maps any displayable error to a Stream output execution error.
-pub(crate) fn map_exec_err_stream(e: impl std::fmt::Display) -> crate::error::StampError {
+///
+/// # Arguments
+/// * `e` - Displayable error value.
+#[must_use]
+pub fn map_exec_err_stream(e: impl std::fmt::Display) -> crate::error::StampError {
     crate::error::StampError::Execution(format!("Failed to stream command: {e}"))
 }
 
 /// Maps any displayable error to a Chunk output execution error.
-pub(crate) fn map_exec_err_chunk(e: impl std::fmt::Display) -> crate::error::StampError {
+///
+/// # Arguments
+/// * `e` - Displayable error value.
+#[must_use]
+pub fn map_exec_err_chunk(e: impl std::fmt::Display) -> crate::error::StampError {
     crate::error::StampError::Execution(format!("Execute stream chunk error: {e}"))
 }
 
 /// Maps any displayable error to a `DownloadChunk` output execution error.
-pub(crate) fn map_exec_err_dl_chunk(e: impl std::fmt::Display) -> crate::error::StampError {
+///
+/// # Arguments
+/// * `e` - Displayable error value.
+#[must_use]
+pub fn map_exec_err_dl_chunk(e: impl std::fmt::Display) -> crate::error::StampError {
     crate::error::StampError::Execution(format!("Download stream chunk error: {e}"))
 }
 
 /// Maps any displayable error to an `UploadChunk` output execution error.
-#[allow(dead_code)]
-pub(crate) fn map_exec_err_up_chunk(e: impl std::fmt::Display) -> crate::error::StampError {
+///
+/// # Arguments
+/// * `e` - Displayable error value.
+#[must_use]
+pub fn map_exec_err_up_chunk(e: impl std::fmt::Display) -> crate::error::StampError {
     crate::error::StampError::Execution(format!("Upload stream chunk error: {e}"))
 }
 
