@@ -1,5 +1,3 @@
-#![cfg(not(tarpaulin_include))]
-
 //! HCL parser for Packer templates.
 
 use crate::error::StampError;

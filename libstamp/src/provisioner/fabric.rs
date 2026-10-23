@@ -97,14 +97,12 @@ impl Provisioner for FabricProvisioner {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
-
     use super::*;
     use crate::communicator::mock::MockCommunicator;
 
     #[tokio::test]
-    async fn test_fabric_provision_success() {
+    async fn test_fabric_provision_success() -> Result<(), StampError> {
         let comm = MockCommunicator::new();
         let ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
             crate::engine::packer::FeatureState::Disabled,
@@ -119,8 +117,8 @@ mod tests {
         };
         let prov = FabricProvisioner::new(cfg);
 
-        let res = prov.provision(&comm, ui).await;
-        assert!(res.is_ok());
+        prov.provision(&comm, ui).await?;
+        Ok(())
     }
 
     #[tokio::test]
@@ -163,20 +161,22 @@ mod tests {
     }
 
     #[test]
-    fn test_fabric_derived_traits() {
+    fn test_fabric_derived_traits() -> Result<(), StampError> {
         let config1 = FabricConfig {
             tasks: vec!["test".to_string()],
             ..Default::default()
         };
         let config2 = config1.clone();
         assert_eq!(config1, config2);
-        assert_eq!(format!("{config1:?}"), format!("{config2:?}"));
+        assert!(format!("{config1:?}").contains("FabricConfig"));
         let p1 = FabricProvisioner::new(config1.clone());
         let p2 = p1.clone();
-        assert_eq!(format!("{p1:?}"), format!("{p2:?}"));
+        assert!(format!("{p1:?}").contains("FabricProvisioner"));
+        assert_eq!(p2.config.tasks, vec!["test"]);
 
-        let json = serde_json::to_string(&config1).unwrap();
-        let deser: FabricConfig = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&config1)?;
+        let deser: FabricConfig = serde_json::from_str(&json)?;
         assert_eq!(deser, config1);
+        Ok(())
     }
 }

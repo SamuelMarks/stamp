@@ -982,7 +982,6 @@ impl SshCommunicator {
 
 #[async_trait::async_trait]
 impl Communicator for SshCommunicator {
-    #[cfg(not(tarpaulin_include))]
     async fn execute(&self, cmd: &Command) -> Result<CommandResult, StampError> {
         let handle = match self.connect().await {
             Ok(h) => h,
@@ -1074,7 +1073,6 @@ impl Communicator for SshCommunicator {
         })
     }
 
-    #[cfg(not(tarpaulin_include))]
     async fn upload(
         &self,
         local_path: &FilePath,
@@ -1162,7 +1160,6 @@ impl Communicator for SshCommunicator {
         Ok(())
     }
 
-    #[cfg(not(tarpaulin_include))]
     async fn download(
         &self,
         remote_path: &FilePath,
@@ -1375,7 +1372,7 @@ mod tests {
     }
 
     #[test]
-    fn test_known_hosts_append() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_known_hosts_append() -> Result<(), StampError> {
         let temp_dir = tempfile::tempdir()?;
         let known_hosts_path = temp_dir.path().join("known_hosts");
 
@@ -1393,7 +1390,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_check_server_key_modes() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_check_server_key_modes() -> Result<(), StampError> {
         let temp_dir = tempfile::tempdir()?;
         let known_hosts_path = temp_dir.path().join("known_hosts");
 
@@ -1470,7 +1467,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_load_private_key_file() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_load_private_key_file() -> Result<(), StampError> {
         let temp_dir = tempfile::tempdir()?;
         let key_path = temp_dir.path().join("id_ed25519");
 

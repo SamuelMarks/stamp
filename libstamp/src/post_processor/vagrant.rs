@@ -352,7 +352,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_vagrant_more_coverage() {
+    async fn test_vagrant_more_coverage() -> Result<(), StampError> {
         // 114: except is not empty
         let config_hcl = crate::template::PostProcessorConfig {
             post_processor_type: "vagrant".to_string(),
@@ -386,7 +386,7 @@ mod tests {
 
         // 221-227: default vagrantfile without template and without mac address logic triggered?
         // Wait, "generate_vagrantfile" is called during run(). But we can call it directly:
-        let s = b2.generate_vagrantfile().expect("test");
+        let s = b2.generate_vagrantfile()?;
         assert!(s.contains("config.vm.base_mac = \"nil\""));
 
         // 251: parent unwrap_or_else
@@ -394,11 +394,9 @@ mod tests {
         let mut b3 = b2.clone();
         b3.config.passthrough = true;
         b3.config.output = "test.box".to_string(); // no parent
-        // if we run b3 with passthrough, it will put metadata.json in "."
-        // let's do a quick run
-        let td = tempfile::tempdir().expect("test");
-        let wd = std::env::current_dir().expect("test");
-        std::env::set_current_dir(td.path()).expect("test");
+        let td = tempfile::tempdir()?;
+        let wd = std::env::current_dir()?;
+        std::env::set_current_dir(td.path())?;
 
         let _ui = std::sync::Arc::new(crate::engine::ui::Ui::new(
             crate::engine::packer::FeatureState::Disabled,
@@ -411,7 +409,8 @@ mod tests {
 
         // 336-338: keep_input_artifact
         b3.config.keep_input_artifact = true;
-        assert_eq!(b3.keep_input_artifact(), true);
+        assert!(b3.keep_input_artifact());
+        Ok(())
     }
 
     #[test]

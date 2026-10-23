@@ -17,6 +17,14 @@ pub enum StepAction {
     Halt,
 }
 
+/// A compile-time typed key for storing and retrieving values in a [`StateBag`].
+pub trait TypedStateKey {
+    /// The concrete value type associated with this key.
+    type Value: Any + Send + Sync + 'static;
+    /// The unique string key identifier.
+    const KEY: &'static str;
+}
+
 /// A container for state shared between steps.
 #[derive(Default)]
 pub struct StateBag {
@@ -41,10 +49,50 @@ impl StateBag {
         self.state.insert(key.to_string(), Box::new(value));
     }
 
+    /// Puts a strongly-typed value into the state bag using a [`TypedStateKey`].
+    pub fn put_typed<K: TypedStateKey>(&mut self, value: K::Value) {
+        self.put(K::KEY, value);
+    }
+
     /// Gets a reference to a value from the state bag.
     #[must_use]
     pub fn get<T: Any + Send + Sync>(&self, key: &str) -> Option<&T> {
         self.state.get(key).and_then(|v| v.downcast_ref::<T>())
+    }
+
+    /// Gets a reference to a value using a [`TypedStateKey`].
+    #[must_use]
+    pub fn get_typed<K: TypedStateKey>(&self) -> Option<&K::Value> {
+        self.get::<K::Value>(K::KEY)
+    }
+
+    /// Attempts to get a reference to a value from the state bag, returning a structured
+    /// [`crate::error::StampError::StateBagMissingKey`] or
+    /// [`crate::error::StampError::StateBagTypeMismatch`] on failure.
+    ///
+    /// # Errors
+    /// Returns `StampError` if the key does not exist or has a different concrete type.
+    pub fn try_get<T: Any + Send + Sync>(&self, key: &str) -> Result<&T, crate::error::StampError> {
+        let Some(boxed) = self.state.get(key) else {
+            return Err(crate::error::StampError::StateBagMissingKey {
+                key: key.to_string(),
+                expected_type: std::any::type_name::<T>(),
+            });
+        };
+        boxed
+            .downcast_ref::<T>()
+            .ok_or_else(|| crate::error::StampError::StateBagTypeMismatch {
+                key: key.to_string(),
+                expected_type: std::any::type_name::<T>(),
+            })
+    }
+
+    /// Attempts to get a reference to a value using a [`TypedStateKey`].
+    ///
+    /// # Errors
+    /// Returns `StampError` if the key does not exist or has a different concrete type.
+    pub fn try_get_typed<K: TypedStateKey>(&self) -> Result<&K::Value, crate::error::StampError> {
+        self.try_get::<K::Value>(K::KEY)
     }
 
     /// Gets a mutable reference to a value from the state bag.
@@ -779,6 +827,46 @@ impl Runner {
     pub async fn cleanup(&mut self, state: &StateBag) {
         for i in self.executed_steps.drain(..).rev() {
             self.steps[i].cleanup(state).await;
+        }
+    }
+
+    /// Runs the multistep sequence and applies the given [`crate::engine::packer::OnErrorStrategy`]
+    /// for automatic cleanup or interactive prompting.
+    ///
+    /// # Errors
+    /// Returns `StampError` if any step fails during execution.
+    pub async fn run_with_strategy(
+        &mut self,
+        state: &mut StateBag,
+        builder_name: &str,
+        ui: &crate::engine::ui::Ui,
+        on_error: crate::engine::packer::OnErrorStrategy,
+    ) -> Result<(), crate::error::StampError> {
+        match self.run(state).await {
+            Ok(()) => {
+                self.cleanup(state).await;
+                Ok(())
+            }
+            Err(e) => {
+                match on_error {
+                    crate::engine::packer::OnErrorStrategy::Cleanup => {
+                        self.cleanup(state).await;
+                    }
+                    crate::engine::packer::OnErrorStrategy::Abort
+                    | crate::engine::packer::OnErrorStrategy::RunCleanupProvisioner => {}
+                    crate::engine::packer::OnErrorStrategy::Ask => {
+                        let msg = format!(
+                            "Build '{builder_name}' errored: {e}\nDo you want to clean up? [y/N]: "
+                        );
+                        if let Ok(ans) = ui.ask("stamp", &msg)
+                            && (ans == "y" || ans == "yes")
+                        {
+                            self.cleanup(state).await;
+                        }
+                    }
+                }
+                Err(e)
+            }
         }
     }
 }

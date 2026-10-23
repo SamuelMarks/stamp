@@ -1,4 +1,3 @@
-#![cfg(not(tarpaulin_include))]
 //! AWS Systems Manager (SSM) Session Manager tunnel communicator.
 //!
 //! Provides tunneling of commands and file transfers to EC2 instances using the
@@ -293,7 +292,6 @@ fn ssm_poll_sleep_duration() -> Duration {
 
 #[async_trait]
 impl Communicator for SsmCommunicator {
-    #[cfg(not(tarpaulin_include))]
     async fn execute(&self, cmd: &Command) -> Result<CommandResult, StampError> {
         if self.config.instance_id == "invalid_instance" {
             return Err(StampError::Execution("Instance not found".to_string()));
@@ -335,7 +333,6 @@ impl Communicator for SsmCommunicator {
         })
     }
 
-    #[cfg(not(tarpaulin_include))]
     async fn upload(
         &self,
         local_path: &FilePath,
@@ -353,7 +350,6 @@ impl Communicator for SsmCommunicator {
         Ok(())
     }
 
-    #[cfg(not(tarpaulin_include))]
     async fn download(
         &self,
         remote_path: &FilePath,

@@ -1,4 +1,3 @@
-#![cfg(not(tarpaulin_include))]
 //! Plugins management, discovery, semantic version constraint resolution,
 //! cryptographic verification, and safe extraction for `HashiCorp` Packer plugins.
 
@@ -641,7 +640,7 @@ pub fn unpack_plugin(
         };
 
         let outpath = temp_unpack_dir.join(&enclosed);
-        if (*file.name()).ends_with('/') {
+        if file.is_dir() {
             std::fs::create_dir_all(&outpath).map_err(StampError::Io)?;
         } else {
             if let Some(parent) = outpath.parent()

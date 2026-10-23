@@ -1,5 +1,3 @@
-#![cfg(not(tarpaulin_include))]
-
 //! Telemetry and version checking capabilities.
 //!
 //! Provides opt-in telemetry for usage data and version checking against Checkpoint.

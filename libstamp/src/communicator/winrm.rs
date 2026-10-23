@@ -1,4 +1,3 @@
-#![cfg(not(tarpaulin_include))]
 //! `WinRM` communicator implementation supporting Basic, NTLM, and Kerberos authentication,
 //! HTTPS transport, elevated task wrappers, chunked Base64 file transfers, and output stream isolation.
 
@@ -380,7 +379,6 @@ impl WinRmCommunicator {
 
 #[async_trait::async_trait]
 impl Communicator for WinRmCommunicator {
-    #[cfg(not(tarpaulin_include))]
     async fn execute(&self, cmd: &Command) -> Result<CommandResult, StampError> {
         let client = match self.create_client() {
             Ok(c) => c,
@@ -468,7 +466,6 @@ impl Communicator for WinRmCommunicator {
         }
     }
 
-    #[cfg(not(tarpaulin_include))]
     async fn upload(
         &self,
         local_path: &FilePath,
@@ -489,7 +486,6 @@ impl Communicator for WinRmCommunicator {
             .await
     }
 
-    #[cfg(not(tarpaulin_include))]
     async fn download(
         &self,
         remote_path: &FilePath,

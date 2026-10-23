@@ -6,7 +6,7 @@ use crate::engine::hook::{BuildContext, ProvisionHook};
 use crate::engine::multistep::{Runner, StateBag, Step, StepAction};
 use crate::error::StampError;
 use crate::types::{Port, Timeout};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha1::Sha1;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -83,9 +83,7 @@ pub fn alicloud_sign(params: &BTreeMap<String, String>, method: &str, secret_key
     } else {
         key_arr[..key_bytes.len()].copy_from_slice(key_bytes);
     }
-    let mut mac = Hmac::<Sha1>::new(hmac::digest::generic_array::GenericArray::from_slice(
-        &key_arr,
-    ));
+    let mut mac = Hmac::<Sha1>::new((&key_arr).into());
     mac.update(string_to_sign.as_bytes());
     let result = mac.finalize();
     base64::engine::general_purpose::STANDARD.encode(result.into_bytes())

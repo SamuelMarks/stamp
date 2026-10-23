@@ -867,19 +867,19 @@ impl VirtualboxIsoConfig {
 ///
 /// Returns `StampError::Builder` if `VBoxManage` returns non-zero exit status or execution fails.
 pub async fn vboxmanage(args: &[&str]) -> Result<String, StampError> {
-    vboxmanage_with_cmd(vboxmanage_binary(), args).await
+    let bin = vboxmanage_binary();
+    vboxmanage_with_cmd(&bin, args).await
 }
 
-#[cfg(not(test))]
-/// Resolves the default `VBoxManage` binary name for production execution.
-fn vboxmanage_binary() -> &'static str {
-    "VBoxManage"
-}
-
-#[cfg(test)]
-/// Resolves the mock `echo` binary name during unit tests.
+/// Resolves the `VBoxManage` binary path, checking `VBOXMANAGE_PATH` environment variable first.
 fn vboxmanage_binary() -> String {
-    std::env::var("VBOXMANAGE_PATH").unwrap_or_else(|_| "echo".to_string())
+    std::env::var("VBOXMANAGE_PATH").unwrap_or_else(|_| {
+        if cfg!(test) {
+            "echo".to_string()
+        } else {
+            "VBoxManage".to_string()
+        }
+    })
 }
 
 /// Execute a specific command as `VBoxManage` driver with full argument and error parsing.

@@ -1,38 +1,9 @@
 //! HCP Packer data sources.
 
 use crate::error::StampError;
+pub use crate::types::SecretString;
 use async_trait::async_trait;
 use serde_json::Value;
-
-/// A strongly typed secret string to prevent logging.
-#[derive(Clone, PartialEq, Eq, Default)]
-pub struct SecretString(String);
-
-impl SecretString {
-    /// Creates a new `SecretString`.
-    #[must_use]
-    pub fn new(secret: String) -> Self {
-        Self(secret)
-    }
-
-    /// Exposes the inner secret.
-    #[must_use]
-    pub fn expose_secret(&self) -> &str {
-        &self.0
-    }
-
-    /// Returns true if the secret string is empty.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-}
-
-impl std::fmt::Debug for SecretString {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "***REDACTED***")
-    }
-}
 
 /// Configuration for the `hcp_packer_iteration` data source.
 #[derive(Debug, Clone, Default)]

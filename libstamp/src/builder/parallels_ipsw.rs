@@ -1,4 +1,3 @@
-#![cfg(not(tarpaulin_include))]
 //! Implementation of the `parallels-ipsw` builder for automating macOS Apple Silicon VM creation
 //! from IPSW restore images via `prlctl` CLI driver.
 
@@ -307,7 +306,6 @@ struct StepVerifyIpsw {
 
 #[async_trait::async_trait]
 impl Step for StepVerifyIpsw {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let ipsw_source = self
             .config
@@ -348,7 +346,6 @@ struct StepCreateMacVM {
 
 #[async_trait::async_trait]
 impl Step for StepCreateMacVM {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let vm_name = self
             .config
@@ -440,7 +437,6 @@ struct StepRunVM {
 
 #[async_trait::async_trait]
 impl Step for StepRunVM {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let vm_name = state.get::<String>("vm_name").cloned().unwrap_or_default();
         self.ui.say(&self.name, "Starting macOS VM...");
@@ -490,7 +486,6 @@ struct StepProvision {
 
 #[async_trait::async_trait]
 impl Step for StepProvision {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Provisioning macOS VM...");
 
@@ -555,7 +550,6 @@ struct StepShutdown {
 
 #[async_trait::async_trait]
 impl Step for StepShutdown {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Shutting down macOS VM...");
         let vm_name = state.get::<String>("vm_name").cloned().unwrap_or_default();
@@ -592,15 +586,7 @@ impl Step for StepShutdown {
 
         if let Some(ref ver_file) = self.config.prlctl_version_file {
             let ver_opt = query_prlctl_version().await;
-            #[cfg_attr(coverage_nightly, coverage(off))]
-            let ver = if let Some(v) = ver_opt {
-                v
-            } else {
-                #[cfg_attr(coverage_nightly, coverage(off))]
-                {
-                    "19.0".to_string()
-                }
-            };
+            let ver = ver_opt.unwrap_or_else(|| "19.0".to_string());
             let target_path = format!("{output_dir}/{ver_file}");
             let _ = tokio::fs::write(&target_path, ver).await;
         }
@@ -624,7 +610,6 @@ struct StepExport {
 
 #[async_trait::async_trait]
 impl Step for StepExport {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let vm_name = state.get::<String>("vm_name").cloned().unwrap_or_default();
         let output_dir = self
@@ -650,7 +635,6 @@ impl Step for StepExport {
 
 #[async_trait::async_trait]
 impl Builder for ParallelsIpswBuilder {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn prepare(&self) -> Result<(), StampError> {
         if self.config.name.is_empty() {
             return Err(StampError::Parse("Name cannot be empty".to_string()));
@@ -658,7 +642,6 @@ impl Builder for ParallelsIpswBuilder {
         Ok(())
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(
         &self,
         hook: Arc<dyn ProvisionHook>,

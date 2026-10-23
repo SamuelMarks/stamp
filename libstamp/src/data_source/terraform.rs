@@ -107,7 +107,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_terraform_data_source_all_outputs() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_terraform_data_source_all_outputs() -> Result<(), StampError> {
         let temp_dir = std::env::temp_dir();
         let state_file = temp_dir.join("test_terraform.tfstate");
         let state_content = r#"{
@@ -140,8 +140,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_terraform_data_source_specific_output() -> Result<(), Box<dyn std::error::Error>>
-    {
+    async fn test_terraform_data_source_specific_output() -> Result<(), StampError> {
         let temp_dir = std::env::temp_dir();
         let state_file = temp_dir.join("test_terraform_specific.tfstate");
         let state_content = r#"{
@@ -189,7 +188,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_terraform_data_source_invalid_json() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_terraform_data_source_invalid_json() -> Result<(), StampError> {
         let temp_dir = std::env::temp_dir();
         let state_file = temp_dir.join("test_terraform_invalid.tfstate");
         tokio::fs::write(&state_file, "not json").await?;
@@ -205,8 +204,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_terraform_data_source_no_outputs_block() -> Result<(), Box<dyn std::error::Error>>
-    {
+    async fn test_terraform_data_source_no_outputs_block() -> Result<(), StampError> {
         let temp_dir = std::env::temp_dir();
         let state_file = temp_dir.join("test_terraform_no_outputs.tfstate");
         tokio::fs::write(&state_file, "{\"version\": 4}").await?;

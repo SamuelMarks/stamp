@@ -322,18 +322,7 @@ impl DockerCommunicator {
             url_encode(self.config.container_id.as_str())
         );
         let http_post_create = format!(
-            "POST {exec_url} HTTP/1.1
-
-             Host: docker
-
-             Content-Type: application/json
-
-             Content-Length: {}
-
-             Connection: close
-
-
-             {create_body}",
+            "POST {exec_url} HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{create_body}",
             create_body.len()
         );
 
@@ -366,20 +355,7 @@ impl DockerCommunicator {
             serde_json::to_string(&start_req).map_err(|e| StampError::Parse(e.to_string()))?;
 
         let http_post_start = format!(
-            "POST {start_url} HTTP/1.1
-
-             Host: docker
-
-             Content-Type: application/json
-
-             Content-Length: {}
-
-             Connection: Upgrade
-
-             Upgrade: tcp
-
-
-             {start_body}",
+            "POST {start_url} HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n{start_body}",
             start_body.len()
         );
 
@@ -419,15 +395,8 @@ impl DockerCommunicator {
 
         // 3. GET /exec/{id}/json to get ExitCode
         let inspect_url = format!("/exec/{}/json", exec_resp.id);
-        let http_get_inspect = format!(
-            "GET {inspect_url} HTTP/1.1
-
-             Host: docker
-
-             Connection: close
-
-"
-        );
+        let http_get_inspect =
+            format!("GET {inspect_url} HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n");
 
         let mut stream3 = tokio::net::UnixStream::connect(socket_path)
             .await
@@ -475,17 +444,7 @@ impl DockerCommunicator {
         );
 
         let http_put = format!(
-            "PUT {archive_url} HTTP/1.1
-
-             Host: docker
-
-             Content-Type: application/x-tar
-
-             Content-Length: {}
-
-             Connection: close
-
-",
+            "PUT {archive_url} HTTP/1.1\r\nHost: docker\r\nContent-Type: application/x-tar\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             tar_payload.len()
         );
 
@@ -530,15 +489,8 @@ impl DockerCommunicator {
             url_encode(&remote_path.get().to_string_lossy())
         );
 
-        let http_get = format!(
-            "GET {archive_url} HTTP/1.1
-
-             Host: docker
-
-             Connection: close
-
-"
-        );
+        let http_get =
+            format!("GET {archive_url} HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n");
 
         let mut stream = tokio::net::UnixStream::connect(socket_path)
             .await
@@ -561,6 +513,132 @@ impl DockerCommunicator {
 
         let body = &response[header_end + 4..];
         extract_tar_archive(body, local_path.get())
+    }
+
+    /// Execute a command via the Docker Engine HTTP API over a TCP socket.
+    async fn execute_api_tcp(
+        &self,
+        tcp_addr: &str,
+        cmd: &Command,
+    ) -> Result<CommandResult, StampError> {
+        let mut full_cmd = self.config.shell.clone();
+        full_cmd.push(cmd.command.clone());
+
+        let create_req = CreateExecRequest {
+            streams: ExecAttachStreams {
+                attach_stdin: false,
+                attach_stdout: true,
+                attach_stderr: true,
+            },
+            tty: self.config.tty,
+            user: self.config.user.as_deref(),
+            cmd: &full_cmd,
+        };
+        let create_body =
+            serde_json::to_string(&create_req).map_err(|e| StampError::Parse(e.to_string()))?;
+
+        let exec_url = format!(
+            "/containers/{}/exec",
+            url_encode(self.config.container_id.as_str())
+        );
+        let http_post_create = format!(
+            "POST {exec_url} HTTP/1.1\r\nHost: {tcp_addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{create_body}",
+            create_body.len()
+        );
+
+        let mut stream = tokio::net::TcpStream::connect(tcp_addr)
+            .await
+            .map_err(StampError::Io)?;
+        stream
+            .write_all(http_post_create.as_bytes())
+            .await
+            .map_err(StampError::Io)?;
+
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .map_err(StampError::Io)?;
+
+        let resp_str = String::from_utf8_lossy(&response);
+        let body_start = resp_str.find("\r\n\r\n").map_or(0, |idx| idx + 4);
+        let exec_resp: CreateExecResponse = serde_json::from_str(&resp_str[body_start..])
+            .map_err(|e| StampError::Parse(format!("Failed to parse TCP exec response: {e}")))?;
+
+        let start_url = format!("/exec/{}/start", exec_resp.id);
+        let start_req = StartExecRequest {
+            detach: false,
+            tty: self.config.tty,
+        };
+        let start_body =
+            serde_json::to_string(&start_req).map_err(|e| StampError::Parse(e.to_string()))?;
+        let http_post_start = format!(
+            "POST {start_url} HTTP/1.1\r\nHost: {tcp_addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{start_body}",
+            start_body.len()
+        );
+
+        let mut stream2 = tokio::net::TcpStream::connect(tcp_addr)
+            .await
+            .map_err(StampError::Io)?;
+        stream2
+            .write_all(http_post_start.as_bytes())
+            .await
+            .map_err(StampError::Io)?;
+
+        let mut stream_data = Vec::new();
+        stream2
+            .read_to_end(&mut stream_data)
+            .await
+            .map_err(StampError::Io)?;
+
+        let stream_body = stream_data
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map_or(&stream_data[..], |pos| &stream_data[pos + 4..]);
+
+        let frames = parse_multiplexed_stream(stream_body)?;
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        for frame in frames {
+            match frame.stream_type {
+                StreamType::Stdout => stdout.push_str(&String::from_utf8_lossy(&frame.payload)),
+                StreamType::Stderr | StreamType::SystemErr => {
+                    stderr.push_str(&String::from_utf8_lossy(&frame.payload));
+                }
+                _ => {}
+            }
+        }
+
+        let inspect_url = format!("/exec/{}/json", exec_resp.id);
+        let http_get_inspect =
+            format!("GET {inspect_url} HTTP/1.1\r\nHost: {tcp_addr}\r\nConnection: close\r\n\r\n");
+
+        let mut stream3 = tokio::net::TcpStream::connect(tcp_addr)
+            .await
+            .map_err(StampError::Io)?;
+        stream3
+            .write_all(http_get_inspect.as_bytes())
+            .await
+            .map_err(StampError::Io)?;
+
+        let mut inspect_response = Vec::new();
+        stream3
+            .read_to_end(&mut inspect_response)
+            .await
+            .map_err(StampError::Io)?;
+
+        let inspect_str = String::from_utf8_lossy(&inspect_response);
+        let inspect_start = inspect_str.find("\r\n\r\n").map_or(0, |idx| idx + 4);
+        let inspect_resp: InspectExecResponse = serde_json::from_str(&inspect_str[inspect_start..])
+            .map_err(|e| {
+                StampError::Parse(format!("Failed to parse TCP exec inspection response: {e}"))
+            })?;
+
+        Ok(CommandResult {
+            exit_code: inspect_resp.exit_code.unwrap_or(0),
+            stdout,
+            stderr,
+        })
     }
 
     /// CLI fallback execution for `docker exec`.
@@ -647,7 +725,6 @@ impl DockerCommunicator {
 
 #[async_trait]
 impl Communicator for DockerCommunicator {
-    #[cfg(not(tarpaulin_include))]
     async fn execute(&self, cmd: &Command) -> Result<CommandResult, StampError> {
         if self.config.container_id.as_str() == "invalid_container" {
             return Err(StampError::Execution("No such container".to_string()));
@@ -670,11 +747,17 @@ impl Communicator for DockerCommunicator {
                     self.execute_cli(cmd).await
                 }
             }
-            DockerTransport::Cli | DockerTransport::Tcp(_) => self.execute_cli(cmd).await,
+            DockerTransport::Tcp(addr) => {
+                if let Ok(res) = self.execute_api_tcp(addr, cmd).await {
+                    Ok(res)
+                } else {
+                    self.execute_cli(cmd).await
+                }
+            }
+            DockerTransport::Cli => self.execute_cli(cmd).await,
         }
     }
 
-    #[cfg(not(tarpaulin_include))]
     async fn upload(
         &self,
         local_path: &FilePath,
@@ -704,7 +787,6 @@ impl Communicator for DockerCommunicator {
         }
     }
 
-    #[cfg(not(tarpaulin_include))]
     async fn download(
         &self,
         remote_path: &FilePath,
@@ -736,7 +818,6 @@ impl Communicator for DockerCommunicator {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -770,7 +851,7 @@ mod tests {
     }
 
     #[test]
-    fn test_multiplexed_stream_parsing() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_multiplexed_stream_parsing() -> Result<(), StampError> {
         // Build sample frames:
         // Frame 1: stdout, 5 bytes "hello"
         // Frame 2: stderr, 5 bytes "world"
@@ -808,7 +889,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tar_archive_creation_and_extraction() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_tar_archive_creation_and_extraction() -> Result<(), StampError> {
         let temp_dir = tempfile::tempdir()?;
         let source_file = temp_dir.path().join("test_file.txt");
         std::fs::write(&source_file, "hello archive test")?;
@@ -841,7 +922,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_docker_communicator_execution() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_docker_communicator_execution() -> Result<(), StampError> {
         let config = DockerConfig::new("test_container");
         let comm = DockerCommunicator::new(config);
 
@@ -1116,9 +1197,58 @@ mod tests {
         assert!(cli_comm.upload(&dummy, &dummy).await.is_err());
         assert!(cli_comm.download(&dummy, &dummy).await.is_err());
 
-        // TCP transport
+        // TCP transport with real local TCP listener
+        let tcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let tcp_local_addr = tcp_listener.local_addr()?.to_string();
+        let tcp_server_task = tokio::spawn(async move {
+            if let Ok((mut stream, _)) = tcp_listener.accept().await {
+                let mut buf = vec![0u8; 2048];
+                let _ = stream.read(&mut buf).await;
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"Id\":\"tcp_exec\"}",
+                    )
+                    .await;
+            }
+            if let Ok((mut stream, _)) = tcp_listener.accept().await {
+                let mut buf = vec![0u8; 2048];
+                let _ = stream.read(&mut buf).await;
+                let mut frame_out = vec![1, 0, 0, 0, 0, 0, 0, 8];
+                frame_out.extend_from_slice(b"tcp_out\n");
+                let mut frame_err = vec![2, 0, 0, 0, 0, 0, 0, 8];
+                frame_err.extend_from_slice(b"tcp_err\n");
+                let mut frame_ign = vec![0, 0, 0, 0, 0, 0, 0, 1];
+                frame_ign.extend_from_slice(b"x");
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await;
+                let _ = stream.write_all(&frame_out).await;
+                let _ = stream.write_all(&frame_err).await;
+                let _ = stream.write_all(&frame_ign).await;
+            }
+            if let Ok((mut stream, _)) = tcp_listener.accept().await {
+                let mut buf = vec![0u8; 2048];
+                let _ = stream.read(&mut buf).await;
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ExitCode\":0,\"Running\":false}",
+                    )
+                    .await;
+            }
+        });
+
+        let mut tcp_live_cfg = DockerConfig::new("c_tcp_live");
+        tcp_live_cfg.transport = DockerTransport::Tcp(tcp_local_addr);
+        let tcp_live_comm = DockerCommunicator::new(tcp_live_cfg);
+        let tcp_res = tcp_live_comm
+            .execute(&Command::new("echo tcp".to_string()))
+            .await?;
+        assert_eq!(tcp_res.exit_code, 0);
+        assert_eq!(tcp_res.stdout, "tcp_out\n");
+        assert_eq!(tcp_res.stderr, "tcp_err\n");
+        let _ = tcp_server_task.await;
+
+        // TCP transport fallback when server is unreachable
         let mut tcp_cfg = DockerConfig::new("c_tcp_test");
-        tcp_cfg.transport = DockerTransport::Tcp("127.0.0.1:2375".to_string());
+        tcp_cfg.transport = DockerTransport::Tcp("127.0.0.1:1".to_string());
         let tcp_comm = DockerCommunicator::new(tcp_cfg);
         let _ = tcp_comm
             .execute(&Command::new("echo test".to_string()))

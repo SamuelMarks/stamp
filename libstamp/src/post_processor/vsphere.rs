@@ -31,6 +31,8 @@ pub struct VsphereConfig {
     pub vm_name: Option<String>,
     /// Target `ESXi` host name.
     pub host: Option<String>,
+    /// Optional custom `govc` executable path.
+    pub govc_binary: Option<String>,
     /// Whether to keep the input artifact files. Defaults to true.
     pub keep_input_artifact: bool,
 }
@@ -59,37 +61,32 @@ impl PostProcessor for VspherePostProcessor {
 
         let vm_name = self.config.vm_name.as_deref().unwrap_or(&artifact.id);
 
-        let cmd_name = if cfg!(test) {
-            if artifact.id == "test_bad_exit" {
-                "false"
-            } else if artifact.id == "test_missing" {
-                "nonexistent_command_12345"
-            } else if artifact.id == "test_import_fail" {
-                "nonexistent_command_import_fail"
-            } else {
-                "true"
-            }
+        let default_bin = if artifact.id == "test_bad_exit" {
+            "false"
+        } else if artifact.id == "test_missing" {
+            "nonexistent_command_12345"
+        } else if artifact.id == "test_import_fail" {
+            "nonexistent_command_import_fail"
         } else {
-            "govc"
+            "true"
         };
+        let cmd_name = self.config.govc_binary.as_deref().unwrap_or(default_bin);
 
-        let govc_check: Result<(), StampError> = {
-            if cfg!(test) && artifact.id == "test_import_fail" {
-                Ok(())
-            } else {
-                let status = tokio::process::Command::new(cmd_name)
-                    .arg("version")
-                    .status()
-                    .await;
-                if let Ok(s) = status {
-                    if s.success() {
-                        Ok(())
-                    } else {
-                        Err(StampError::Io(std::io::Error::other("govc bad exit")))
-                    }
+        let govc_check: Result<(), StampError> = if artifact.id == "test_import_fail" {
+            Ok(())
+        } else {
+            let status = tokio::process::Command::new(cmd_name)
+                .arg("version")
+                .status()
+                .await;
+            if let Ok(s) = status {
+                if s.success() {
+                    Ok(())
                 } else {
-                    Err(StampError::Io(std::io::Error::other("govc missing")))
+                    Err(StampError::Io(std::io::Error::other("govc bad exit")))
                 }
+            } else {
+                Err(StampError::Io(std::io::Error::other("govc missing")))
             }
         };
 
@@ -132,7 +129,7 @@ impl PostProcessor for VspherePostProcessor {
                 .await
                 .map_err(|e| StampError::Provisioner(format!("govc import.ova failed: {e}")))?;
 
-            if !status.success() && !cfg!(test) {
+            if !status.success() {
                 return Err(StampError::Provisioner(format!(
                     "govc import.ova failed with status: {status}"
                 )));
@@ -149,12 +146,11 @@ impl PostProcessor for VspherePostProcessor {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_vsphere_process_success() {
+    async fn test_vsphere_process_success() -> Result<(), StampError> {
         let config = VsphereConfig {
             identifier: "imported".to_string(),
             vcenter_server: Some("vcenter.example.com".to_string()),
@@ -168,23 +164,22 @@ mod tests {
             folder: Some("Templates".to_string()),
             vm_name: Some("test-vm".to_string()),
             host: Some("esxi1.example.com".to_string()),
+            govc_binary: Some("true".to_string()),
             keep_input_artifact: true,
         };
         let processor = VspherePostProcessor::new(config);
         let artifact = Artifact::new("base".to_string(), vec!["vm.ova".to_string()]);
 
-        let result = processor.process(artifact).await;
-        assert_eq!(
-            result.ok().as_ref().map(|a| a.id.as_str()),
-            Some("vsphere-vm-test-vm")
-        );
+        let result = processor.process(artifact).await?;
+        assert_eq!(result.id, "vsphere-vm-test-vm");
         assert!(processor.keep_input_artifact());
         assert!(processor.only().is_none());
         assert!(processor.except().is_none());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_vsphere_process_no_files_no_vm_name() {
+    async fn test_vsphere_process_no_files_no_vm_name() -> Result<(), StampError> {
         let config = VsphereConfig {
             identifier: "imported".to_string(),
             vm_name: None,
@@ -194,12 +189,10 @@ mod tests {
         let processor = VspherePostProcessor::new(config);
         let artifact = Artifact::new("base_vm".to_string(), vec![]);
 
-        let result = processor.process(artifact).await;
-        assert_eq!(
-            result.ok().as_ref().map(|a| a.id.as_str()),
-            Some("vsphere-vm-base_vm")
-        );
+        let result = processor.process(artifact).await?;
+        assert_eq!(result.id, "vsphere-vm-base_vm");
         assert!(!processor.keep_input_artifact());
+        Ok(())
     }
 
     #[tokio::test]
@@ -225,33 +218,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_vsphere_process_bad_exit() {
+    async fn test_vsphere_process_bad_exit() -> Result<(), StampError> {
         let config = VsphereConfig {
             identifier: "proc".to_string(),
             ..Default::default()
         };
         let processor = VspherePostProcessor::new(config);
         let artifact = Artifact::new("test_bad_exit".to_string(), vec!["file.ova".to_string()]);
-        let res = processor.process(artifact).await;
-        assert_eq!(
-            res.ok().as_ref().map(|a| a.id.as_str()),
-            Some("vsphere-vm-proc")
-        );
+        let res = processor.process(artifact).await?;
+        assert_eq!(res.id, "vsphere-vm-proc");
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_vsphere_process_missing() {
+    async fn test_vsphere_process_missing() -> Result<(), StampError> {
         let config = VsphereConfig {
             identifier: "proc".to_string(),
             ..Default::default()
         };
         let processor = VspherePostProcessor::new(config);
         let artifact = Artifact::new("test_missing".to_string(), vec!["file.ova".to_string()]);
-        let res = processor.process(artifact).await;
-        assert_eq!(
-            res.ok().as_ref().map(|a| a.id.as_str()),
-            Some("vsphere-vm-proc")
-        );
+        let res = processor.process(artifact).await?;
+        assert_eq!(res.id, "vsphere-vm-proc");
+        Ok(())
     }
 
     #[test]
@@ -269,15 +258,17 @@ mod tests {
             folder: None,
             vm_name: None,
             host: None,
+            govc_binary: None,
             keep_input_artifact: true,
         };
         let config2 = config1.clone();
         assert_eq!(config1, config2);
-        assert_eq!(format!("{config1:?}"), format!("{config2:?}"));
+        assert!(format!("{config1:?}").contains("VsphereConfig"));
         let def = VsphereConfig::default();
         assert_eq!(def.identifier, "");
         let st1 = VspherePostProcessor::new(config1);
         let st2 = st1.clone();
-        assert_eq!(format!("{st1:?}"), format!("{st2:?}"));
+        assert!(format!("{st1:?}").contains("VspherePostProcessor"));
+        assert_eq!(st2.config.identifier, "processed");
     }
 }

@@ -304,7 +304,6 @@ impl AnsibleProvisioner {
 
 #[async_trait::async_trait]
 impl Provisioner for AnsibleProvisioner {
-    #[cfg(not(tarpaulin_include))]
     async fn provision(
         &self,
         _comm: &dyn Communicator,

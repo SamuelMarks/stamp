@@ -1,5 +1,3 @@
-#![cfg(not(tarpaulin_include))]
-
 //! DAG resolution for evaluating templates in the correct dependency order.
 
 use crate::error::StampError;
@@ -367,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dag_coverage_extra_2() {
+    fn test_dag_coverage_extra_2() -> Result<(), StampError> {
         use hashicorp_configuration_language_rs::ast::expr::Expression;
         use hashicorp_configuration_language_rs::number::Number;
         use hashicorp_configuration_language_rs::span::Span;
@@ -377,7 +375,9 @@ mod tests {
             .insert("v1".to_string(), crate::template::VariableConfig::default());
 
         let mut parser = Parser::new("var.v1 + 2");
-        let expr = parser.parse_expression().unwrap();
+        let expr = parser
+            .parse_expression()
+            .ok_or_else(|| StampError::Parse("failed to parse expr".to_string()))?;
 
         tmpl.locals
             .insert("my_local".to_string(), "var.v1 + 2".to_string());
@@ -389,7 +389,7 @@ mod tests {
         b.expressions.insert("k".to_string(), expr.clone());
         tmpl.builders.push(b);
 
-        let sorted = resolve_dag(&tmpl).unwrap();
+        let sorted = resolve_dag(&tmpl)?;
         assert!(sorted.len() >= 2);
 
         // test extract_dependencies_from_str fallback
@@ -406,6 +406,7 @@ mod tests {
             &mut deps_out,
         );
         assert!(deps_out.is_empty());
+        Ok(())
     }
 
     #[test]

@@ -24,6 +24,8 @@ pub struct YandexImportConfig {
     pub min_disk_size: Option<u64>,
     /// Key-value labels to assign to the image.
     pub labels: HashMap<String, String>,
+    /// Optional custom Yandex Compute API endpoint override.
+    pub endpoint: Option<String>,
     /// Whether to keep the input artifact. Defaults to true.
     pub keep_input_artifact: bool,
 }
@@ -53,7 +55,36 @@ impl PostProcessor for YandexImportPostProcessor {
         }
 
         let folder = self.config.folder_id.as_deref().unwrap_or("b1gfolder123");
-        let image_id = format!("fd8yandex{}", self.config.image_name.replace('-', ""));
+
+        let image_id = if let Some(ref endpoint) = self.config.endpoint {
+            let client = reqwest::Client::new();
+            let payload = serde_json::json!({
+                "folderId": folder,
+                "name": self.config.image_name,
+                "uri": self.config.object_url,
+            });
+            let resp = client
+                .post(format!(
+                    "{}/compute/v1/images",
+                    endpoint.trim_end_matches('/')
+                ))
+                .json(&payload)
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                return Err(StampError::PostProcessor(format!(
+                    "Yandex image import failed with status {}",
+                    resp.status()
+                )));
+            }
+            let body: serde_json::Value = resp.json().await?;
+            body["response"]["id"].as_str().map_or_else(
+                || format!("fd8yandex{}", self.config.image_name.replace('-', "")),
+                ToString::to_string,
+            )
+        } else {
+            format!("fd8yandex{}", self.config.image_name.replace('-', ""))
+        };
 
         let mut output_files = artifact.files.clone();
         output_files.push(format!("yandex://{folder}/{image_id}"));
@@ -67,7 +98,6 @@ impl PostProcessor for YandexImportPostProcessor {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -84,17 +114,18 @@ mod tests {
             os_type: Some("LINUX".to_string()),
             min_disk_size: Some(20),
             labels,
+            endpoint: None,
             keep_input_artifact: true,
         };
         assert_eq!(config.clone(), config);
-        assert_eq!(format!("{config:?}"), format!("{config:?}"));
+        assert!(format!("{config:?}").contains("YandexImportConfig"));
         let proc = YandexImportPostProcessor::new(config);
-        assert_eq!(format!("{proc:?}"), format!("{:?}", proc.clone()));
-        assert!(proc.keep_input_artifact());
+        assert!(format!("{proc:?}").contains("YandexImportPostProcessor"));
+        assert!(proc.clone().keep_input_artifact());
     }
 
     #[tokio::test]
-    async fn test_yandex_import_success() {
+    async fn test_yandex_import_success_and_http() -> Result<(), StampError> {
         let proc = YandexImportPostProcessor::new(YandexImportConfig {
             image_name: "my-image".to_string(),
             folder_id: Some("folder-xyz".to_string()),
@@ -104,10 +135,45 @@ mod tests {
         assert!(!proc.keep_input_artifact());
 
         let artifact = Artifact::new("art-999".to_string(), vec!["disk.qcow2".to_string()]);
-        let res = proc.process(artifact).await.unwrap();
+        let res = proc.process(artifact.clone()).await?;
         assert_eq!(res.id, "fd8yandexmyimage");
         assert_eq!(res.files.len(), 2);
         assert_eq!(res.files[1], "yandex://folder-xyz/fd8yandexmyimage");
+
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("POST", "/compute/v1/images")
+            .with_status(200)
+            .with_body(r#"{"response":{"id":"fd8live1"}}"#)
+            .create_async()
+            .await;
+
+        let proc_http = YandexImportPostProcessor::new(YandexImportConfig {
+            image_name: "my-image".to_string(),
+            endpoint: Some(server.url()),
+            ..Default::default()
+        });
+        assert_eq!(proc_http.process(artifact.clone()).await?.id, "fd8live1");
+
+        let _m_fb = server
+            .mock("POST", "/compute/v1/images")
+            .with_status(200)
+            .with_body(r"{}")
+            .create_async()
+            .await;
+        assert_eq!(
+            proc_http.process(artifact.clone()).await?.id,
+            "fd8yandexmyimage"
+        );
+
+        let _m_err = server
+            .mock("POST", "/compute/v1/images")
+            .with_status(500)
+            .create_async()
+            .await;
+        assert!(proc_http.process(artifact).await.is_err());
+
+        Ok(())
     }
 
     #[tokio::test]

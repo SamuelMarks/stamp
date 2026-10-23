@@ -96,14 +96,15 @@ impl HyperoneClient {
 
         #[derive(Deserialize)]
         struct VmResp {
-            _id: String,
+            #[serde(rename = "_id")]
+            id: String,
         }
 
         let vm: VmResp = resp
             .json()
             .await
             .map_err(|e| StampError::Execution(e.to_string()))?;
-        Ok(vm._id)
+        Ok(vm.id)
     }
 
     /// Retrieve the external IP of a HyperOne VM.
@@ -211,14 +212,15 @@ impl HyperoneClient {
 
         #[derive(Deserialize)]
         struct ImgResp {
-            _id: String,
+            #[serde(rename = "_id")]
+            id: String,
         }
 
         let img: ImgResp = resp
             .json()
             .await
             .map_err(|e| StampError::Execution(e.to_string()))?;
-        Ok(img._id)
+        Ok(img.id)
     }
 
     /// Delete a temporary VM in HyperOne.

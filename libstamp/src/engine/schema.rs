@@ -455,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn test_schema_json_roundtrip_and_validation() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_schema_json_roundtrip_and_validation() -> Result<(), StampError> {
         let attr = SchemaAttribute::new("ami_id", SchemaType::String)
             .required()
             .with_description("Target AMI")
@@ -509,8 +509,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_remote_schema_server_and_client_roundtrip()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_remote_schema_server_and_client_roundtrip() -> Result<(), StampError> {
         use crate::r#gen::packer::schema_server::SchemaServer;
         use tokio_stream::wrappers::TcpListenerStream;
 

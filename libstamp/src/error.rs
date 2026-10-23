@@ -1,9 +1,9 @@
 //! Core error types for the Stamp library.
 
-use derive_more::derive::{Display, From};
+use derive_more::derive::{Display, Error, From};
 
 /// The unified error type for all operations in Stamp.
-#[derive(Debug, Display, From)]
+#[derive(Debug, Display, Error, From)]
 pub enum StampError {
     /// An I/O error occurred.
     #[display("I/O error: {_0}")]
@@ -11,77 +11,164 @@ pub enum StampError {
     /// A JSON parsing error occurred.
     #[display("JSON error: {_0}")]
     Json(serde_json::Error),
+    /// A YAML parsing error occurred.
+    #[display("YAML error: {_0}")]
+    Yaml(serde_yaml::Error),
+    /// An HTTP client error occurred.
+    #[display("HTTP error: {_0}")]
+    Http(reqwest::Error),
+    /// A URL parsing error occurred.
+    #[display("URL parse error: {_0}")]
+    UrlParse(url::ParseError),
+    /// A semantic version parsing error occurred.
+    #[display("SemVer error: {_0}")]
+    SemVer(semver::Error),
+    /// A regular expression compilation error occurred.
+    #[display("Regex error: {_0}")]
+    Regex(regex::Error),
+    /// A glob pattern error occurred.
+    #[display("Glob pattern error: {_0}")]
+    GlobPattern(glob::PatternError),
+    /// A glob iteration error occurred.
+    #[display("Glob error: {_0}")]
+    Glob(glob::GlobError),
+    /// A ZIP archive error occurred.
+    #[display("ZIP error: {_0}")]
+    Zip(zip::result::ZipError),
+    /// A gRPC transport error occurred.
+    #[display("gRPC transport error: {_0}")]
+    TonicTransport(tonic::transport::Error),
+    /// A gRPC status error occurred.
+    #[display("gRPC status error: {_0}")]
+    TonicStatus(Box<tonic::Status>),
+    /// A protobuf decode error occurred.
+    #[display("Protobuf decode error: {_0}")]
+    ProstDecode(prost::DecodeError),
+    /// A protobuf encode error occurred.
+    #[display("Protobuf encode error: {_0}")]
+    ProstEncode(prost::EncodeError),
+    /// A UTF-8 string conversion error occurred.
+    #[display("UTF-8 error: {_0}")]
+    Utf8(std::string::FromUtf8Error),
+    /// A UTF-8 slice conversion error occurred.
+    #[display("UTF-8 slice error: {_0}")]
+    StrUtf8(std::str::Utf8Error),
+    /// An integer parsing error occurred.
+    #[display("Integer parse error: {_0}")]
+    ParseInt(std::num::ParseIntError),
+    /// A floating-point parsing error occurred.
+    #[display("Float parse error: {_0}")]
+    ParseFloat(std::num::ParseFloatError),
+    /// A boolean parsing error occurred.
+    #[display("Boolean parse error: {_0}")]
+    ParseBool(std::str::ParseBoolError),
+    /// A socket address parsing error occurred.
+    #[display("Address parse error: {_0}")]
+    AddrParse(std::net::AddrParseError),
+    /// An IP network CIDR parsing error occurred.
+    #[display("IP network parse error: {_0}")]
+    IpNetAddrParse(ipnet::AddrParseError),
+    /// A TLS certificate generation error occurred.
+    #[display("Certificate generation error: {_0}")]
+    Rcgen(rcgen::Error),
+    /// An RSA cryptographic error occurred.
+    #[display("RSA error: {_0}")]
+    Rsa(rsa::Error),
+    /// A bcrypt hashing error occurred.
+    #[display("Bcrypt error: {_0}")]
+    Bcrypt(bcrypt::BcryptError),
+    /// An SSH protocol error occurred.
+    #[display("SSH error: {_0}")]
+    Russh(Box<russh::Error>),
+    /// An SSH key error occurred.
+    #[display("SSH key error: {_0}")]
+    RusshKeys(russh::keys::Error),
+    /// An OpenSSH key format error occurred.
+    #[display("SSH key format error: {_0}")]
+    SshKey(russh::keys::ssh_key::Error),
+    /// An SFTP protocol error occurred.
+    #[display("SFTP error: {_0}")]
+    RusshSftp(russh_sftp::client::error::Error),
     /// An HCL parsing error occurred.
     #[display("HCL error: {_0}")]
     Hcl(hashicorp_configuration_language_rs::error::HclError),
     /// A parsing error occurred.
     #[display("Parse error: {_0}")]
     #[from(ignore)]
-    Parse(String),
+    Parse(#[error(not(source))] String),
     /// A builder-specific error occurred.
     #[display("Builder error: {_0}")]
     #[from(ignore)]
-    Builder(String),
+    Builder(#[error(not(source))] String),
     /// A provisioner-specific error occurred.
     #[display("Provisioner error: {_0}")]
     #[from(ignore)]
-    Provisioner(String),
+    Provisioner(#[error(not(source))] String),
     /// A post-processor-specific error occurred.
     #[display("Post-processor error: {_0}")]
     #[from(ignore)]
-    PostProcessor(String),
+    PostProcessor(#[error(not(source))] String),
     /// A communicator-specific error occurred.
     #[display("Communicator error: {_0}")]
     #[from(ignore)]
-    Communicator(String),
+    Communicator(#[error(not(source))] String),
     /// A generic execution error.
     #[display("Execution error: {_0}")]
     #[from(ignore)]
-    Execution(String),
+    Execution(#[error(not(source))] String),
     /// A validation error occurred.
     #[display("Validation error: {_0}")]
     #[from(ignore)]
-    Validation(String),
+    Validation(#[error(not(source))] String),
+    /// A structured field validation error occurred.
+    #[display("Field validation error on '{field}': {reason}")]
+    #[from(ignore)]
+    FieldValidation {
+        /// The configuration field name.
+        field: String,
+        /// The reason validation failed.
+        reason: String,
+    },
     /// A circular dependency was detected in DAG resolution.
     #[display("Circular dependency error: {_0}")]
     #[from(ignore)]
-    CircularDependency(String),
+    CircularDependency(#[error(not(source))] String),
     /// A plugin resolution error occurred.
     #[display("Plugin resolution error: {_0}")]
     #[from(ignore)]
-    PluginResolution(String),
+    PluginResolution(#[error(not(source))] String),
     /// A plugin handshake error occurred.
     #[display("Plugin handshake error: {_0}")]
     #[from(ignore)]
-    PluginHandshake(String),
+    PluginHandshake(#[error(not(source))] String),
     /// A protocol violation error occurred.
     #[display("Protocol violation error: {_0}")]
     #[from(ignore)]
-    ProtocolViolation(String),
+    ProtocolViolation(#[error(not(source))] String),
     /// A schema mismatch error occurred.
     #[display("Schema mismatch error: {_0}")]
     #[from(ignore)]
-    SchemaMismatch(String),
+    SchemaMismatch(#[error(not(source))] String),
     /// A test block parsing error occurred.
     #[display("Test block parse error: {_0}")]
     #[from(ignore)]
-    ParseTestBlock(String),
+    ParseTestBlock(#[error(not(source))] String),
     /// A test failure occurred.
     #[display("Test failure in test '{}': {}", _0.test_name, _0.failed_condition)]
     #[from(ignore)]
-    TestFailure(crate::template::TestFailureDetails),
+    TestFailure(#[error(not(source))] crate::template::TestFailureDetails),
     /// A telemetry error occurred.
     #[display("Telemetry error: {_0}")]
     #[from(ignore)]
-    Telemetry(String),
+    Telemetry(#[error(not(source))] String),
     /// An HCP API error occurred.
     #[display("HCP API error: {_0}")]
     #[from(ignore)]
-    HcpApi(String),
+    HcpApi(#[error(not(source))] String),
     /// A plugin RPC error occurred.
     #[display("Plugin RPC error: {_0}")]
     #[from(ignore)]
-    PluginRpc(String),
+    PluginRpc(#[error(not(source))] String),
     /// A cryptographic checksum mismatch occurred.
     #[display("Checksum mismatch: expected {expected}, got {actual}")]
     #[from(ignore)]
@@ -94,7 +181,7 @@ pub enum StampError {
     /// A digital signature verification failed.
     #[display("Signature verification failed: {_0}")]
     #[from(ignore)]
-    SignatureVerification(String),
+    SignatureVerification(#[error(not(source))] String),
     /// A communicator operation timed out.
     #[display("Communicator timeout after {timeout_secs}s connecting to {target}")]
     #[from(ignore)]
@@ -103,6 +190,44 @@ pub enum StampError {
         target: String,
         /// Timeout duration in seconds.
         timeout_secs: u64,
+    },
+    /// A general operation timed out.
+    #[display("Operation '{operation}' timed out after {}ms", duration.as_millis())]
+    #[from(ignore)]
+    Timeout {
+        /// The name of the timed-out operation.
+        operation: String,
+        /// The elapsed timeout duration.
+        duration: std::time::Duration,
+    },
+    /// A subprocess command failed with a non-zero exit code.
+    #[display("Subprocess '{command}' failed with exit code {exit_code:?}: {stderr}")]
+    #[from(ignore)]
+    SubprocessFailed {
+        /// The command that was executed.
+        command: String,
+        /// The exit code, if available.
+        exit_code: Option<i32>,
+        /// Captured standard error output.
+        stderr: String,
+    },
+    /// A required key was missing from the multistep state bag.
+    #[display("StateBag missing key '{key}' (expected type {expected_type})")]
+    #[from(ignore)]
+    StateBagMissingKey {
+        /// The missing state key.
+        key: String,
+        /// The expected Rust type name.
+        expected_type: &'static str,
+    },
+    /// A key in the multistep state bag had an unexpected type.
+    #[display("StateBag type mismatch for key '{key}' (expected type {expected_type})")]
+    #[from(ignore)]
+    StateBagTypeMismatch {
+        /// The state key.
+        key: String,
+        /// The expected Rust type name.
+        expected_type: &'static str,
     },
     /// A policy enforcement check failed.
     #[display("Policy violation for '{policy}': {details}")]
@@ -116,11 +241,11 @@ pub enum StampError {
     /// A template validation constraint failed.
     #[display("Template validation error: {_0}")]
     #[from(ignore)]
-    TemplateValidation(String),
+    TemplateValidation(#[error(not(source))] String),
     /// An invalid domain type was encountered.
     #[display("Invalid type error: {_0}")]
     #[from(ignore)]
-    InvalidType(String),
+    InvalidType(#[error(not(source))] String),
     /// A plugin process crashed unexpectedly with captured stderr.
     #[display("Plugin process '{binary}' crashed with exit code {exit_code:?}: {stderr}")]
     #[from(ignore)]
@@ -134,22 +259,141 @@ pub enum StampError {
     },
 }
 
-impl std::error::Error for StampError {}
+impl From<tonic::Status> for StampError {
+    fn from(status: tonic::Status) -> Self {
+        Self::TonicStatus(Box::new(status))
+    }
+}
+
+impl From<russh::Error> for StampError {
+    fn from(err: russh::Error) -> Self {
+        Self::Russh(Box::new(err))
+    }
+}
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
+    use std::error::Error as StdError;
 
     #[test]
-    fn test_stamp_error_display() {
-        assert_eq!(
-            StampError::Io(std::io::Error::other("io error")).to_string(),
-            "I/O error: io error"
+    fn test_stamp_error_display_and_sources() {
+        let io_err = std::io::Error::other("io error");
+        let stamp_io = StampError::from(io_err);
+        assert_eq!(stamp_io.to_string(), "I/O error: io error");
+        assert!(stamp_io.source().is_some());
+
+        let json_res: Result<serde_json::Value, _> = serde_json::from_str("{ bad json");
+        if let Err(e) = json_res {
+            let stamp_err = StampError::from(e);
+            assert!(stamp_err.to_string().starts_with("JSON error:"));
+            assert!(stamp_err.source().is_some());
+        }
+
+        let yaml_res: Result<serde_yaml::Value, _> = serde_yaml::from_str(
+            "::::
+	bad",
         );
+        if let Err(e) = yaml_res {
+            let stamp_err = StampError::from(e);
+            assert!(stamp_err.to_string().starts_with("YAML error:"));
+            assert!(stamp_err.source().is_some());
+        }
+
+        let url_res = url::Url::parse("not a url");
+        if let Err(e) = url_res {
+            let stamp_err = StampError::from(e);
+            assert!(stamp_err.to_string().starts_with("URL parse error:"));
+            assert!(stamp_err.source().is_some());
+        }
+
+        let semver_res = semver::Version::parse("not-a-semver");
+        if let Err(e) = semver_res {
+            let stamp_err = StampError::from(e);
+            assert!(stamp_err.to_string().starts_with("SemVer error:"));
+            assert!(stamp_err.source().is_some());
+        }
+
+        let regex_res = regex::Regex::new("[unclosed");
+        if let Err(e) = regex_res {
+            let stamp_err = StampError::from(e);
+            assert!(stamp_err.to_string().starts_with("Regex error:"));
+            assert!(stamp_err.source().is_some());
+        }
+
+        let glob_res = glob::Pattern::new("[unclosed");
+        if let Err(e) = glob_res {
+            let stamp_err = StampError::from(e);
+            assert!(stamp_err.to_string().starts_with("Glob pattern error:"));
+            assert!(stamp_err.source().is_some());
+        }
+
+        let int_res = "abc".parse::<u32>();
+        if let Err(e) = int_res {
+            let stamp_err = StampError::from(e);
+            assert!(stamp_err.to_string().starts_with("Integer parse error:"));
+            assert!(stamp_err.source().is_some());
+        }
+
+        let float_res = "abc".parse::<f64>();
+        if let Err(e) = float_res {
+            let stamp_err = StampError::from(e);
+            assert!(stamp_err.to_string().starts_with("Float parse error:"));
+            assert!(stamp_err.source().is_some());
+        }
+
+        let bool_res = "notbool".parse::<bool>();
+        if let Err(e) = bool_res {
+            let stamp_err = StampError::from(e);
+            assert!(stamp_err.to_string().starts_with("Boolean parse error:"));
+            assert!(stamp_err.source().is_some());
+        }
+
+        let addr_res = "bad_addr".parse::<std::net::SocketAddr>();
+        if let Err(e) = addr_res {
+            let stamp_err = StampError::from(e);
+            assert!(stamp_err.to_string().starts_with("Address parse error:"));
+            assert!(stamp_err.source().is_some());
+        }
+
+        let ipnet_res = "bad_cidr".parse::<ipnet::Ipv4Net>();
+        if let Err(e) = ipnet_res {
+            let stamp_err = StampError::from(e);
+            assert!(stamp_err.to_string().starts_with("IP network parse error:"));
+            assert!(stamp_err.source().is_some());
+        }
+
+        let utf8_res = String::from_utf8(vec![0xff, 0xfe]);
+        if let Err(e) = utf8_res {
+            let stamp_err = StampError::from(e);
+            assert!(stamp_err.to_string().starts_with("UTF-8 error:"));
+            assert!(stamp_err.source().is_some());
+        }
+
+        let bad_bytes = vec![0xff_u8, 0xfe_u8];
+        let str_utf8_res = std::str::from_utf8(&bad_bytes);
+        if let Err(e) = str_utf8_res {
+            let stamp_err = StampError::from(e);
+            assert!(stamp_err.to_string().starts_with("UTF-8 slice error:"));
+            assert!(stamp_err.source().is_some());
+        }
+
+        let status_err = StampError::from(tonic::Status::internal("grpc fail"));
+        assert!(status_err.to_string().starts_with("gRPC status error:"));
+        assert!(status_err.source().is_some());
+
+        let zip_err = StampError::from(zip::result::ZipError::FileNotFound);
+        assert!(zip_err.to_string().starts_with("ZIP error:"));
+        assert!(zip_err.source().is_some());
+
         assert_eq!(
             StampError::Parse("invalid syntax".to_string()).to_string(),
             "Parse error: invalid syntax"
+        );
+        assert!(
+            StampError::Parse("invalid syntax".to_string())
+                .source()
+                .is_none()
         );
         assert_eq!(
             StampError::Builder("failed to build".to_string()).to_string(),
@@ -174,6 +418,14 @@ mod tests {
         assert_eq!(
             StampError::Validation("invalid template".to_string()).to_string(),
             "Validation error: invalid template"
+        );
+        assert_eq!(
+            StampError::FieldValidation {
+                field: "memory".to_string(),
+                reason: "must be > 0".to_string(),
+            }
+            .to_string(),
+            "Field validation error on 'memory': must be > 0"
         );
         assert_eq!(
             StampError::CircularDependency("a -> b -> a".to_string()).to_string(),
@@ -241,6 +493,39 @@ mod tests {
             "Communicator timeout after 30s connecting to 10.0.0.1"
         );
         assert_eq!(
+            StampError::Timeout {
+                operation: "ssh_connect".to_string(),
+                duration: std::time::Duration::from_secs(5),
+            }
+            .to_string(),
+            "Operation 'ssh_connect' timed out after 5000ms"
+        );
+        assert_eq!(
+            StampError::SubprocessFailed {
+                command: "qemu-img".to_string(),
+                exit_code: Some(2),
+                stderr: "disk full".to_string(),
+            }
+            .to_string(),
+            "Subprocess 'qemu-img' failed with exit code Some(2): disk full"
+        );
+        assert_eq!(
+            StampError::StateBagMissingKey {
+                key: "vm_ip".to_string(),
+                expected_type: "String",
+            }
+            .to_string(),
+            "StateBag missing key 'vm_ip' (expected type String)"
+        );
+        assert_eq!(
+            StampError::StateBagTypeMismatch {
+                key: "vm_id".to_string(),
+                expected_type: "u32",
+            }
+            .to_string(),
+            "StateBag type mismatch for key 'vm_id' (expected type u32)"
+        );
+        assert_eq!(
             StampError::PolicyViolation {
                 policy: "deny-root".to_string(),
                 details: "root user prohibited".to_string(),
@@ -265,16 +550,5 @@ mod tests {
             .to_string(),
             "Plugin process 'packer-plugin-amazon' crashed with exit code Some(1): panic: nil pointer dereference"
         );
-
-        let json_err: Result<serde_json::Value, _> = serde_json::from_str("{ bad json");
-        if let Err(e) = json_err {
-            let stamp_err = StampError::from(e);
-            assert!(stamp_err.to_string().starts_with("JSON error:"));
-        }
-
-        let io_err = std::io::Error::other("custom io err");
-        let stamp_io = StampError::Io(io_err);
-        use std::error::Error;
-        assert!(stamp_io.source().is_none());
     }
 }

@@ -1,5 +1,3 @@
-#![cfg(not(tarpaulin_include))]
-
 //! UI Module for standard and machine-readable output.
 
 use crate::engine::packer::FeatureState;

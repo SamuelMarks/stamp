@@ -1,4 +1,3 @@
-#![cfg_attr(coverage_nightly, coverage(off))]
 //! Implementation of the `lxd` builder using native LXD / Incus REST API / CLI.
 //!
 //! Manages container creation, provisioning, snapshotting, and image publishing (`/1.0/images` or `lxc publish`).
@@ -462,7 +461,6 @@ impl Builder for LxdBuilder {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(
     clippy::unwrap_used,
     clippy::pedantic,

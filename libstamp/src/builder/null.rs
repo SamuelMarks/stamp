@@ -187,7 +187,6 @@ impl Builder for NullBuilder {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

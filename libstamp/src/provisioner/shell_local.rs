@@ -1,5 +1,3 @@
-#![cfg(not(tarpaulin_include))]
-
 //! Implementation of the `shell-local` provisioner.
 
 use crate::communicator::Communicator;

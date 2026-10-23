@@ -28,7 +28,6 @@ impl ArtifactoryPostProcessor {
 
 #[async_trait]
 impl PostProcessor for ArtifactoryPostProcessor {
-    #[cfg(not(tarpaulin_include))]
     async fn process(&self, artifact: Artifact) -> Result<Artifact, StampError> {
         if self.config.identifier.is_empty() {
             return Err(StampError::Parse("Identifier is empty".to_string()));

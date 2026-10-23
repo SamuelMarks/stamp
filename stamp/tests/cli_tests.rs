@@ -2,17 +2,19 @@
 
 use clap::Parser;
 use clap::error::ErrorKind;
+use libstamp::error::StampError;
 use stamp::{Cli, Commands, normalize_go_flags, parse_cli_from};
 
 /// Verifies that the CLI definition is valid and handles the `--version` flag.
 /// Ensures output format matches `Packer v1.11.2 (Stamp drop-in replacement)`
 /// so that Bento's `cmd.stdout.split(' ')[1]` extracts `v1.11.2`.
 #[test]
-fn test_cli_definition_and_version_flag() {
+fn test_cli_definition_and_version_flag() -> Result<(), StampError> {
     let args = ["stamp", "--version"];
-    let err = match Cli::try_parse_from(args) {
-        Ok(_) => panic!("Expected error"),
-        Err(e) => e,
+    let Err(err) = Cli::try_parse_from(args) else {
+        return Err(StampError::Execution(
+            "Expected DisplayVersion error".to_string(),
+        ));
     };
     assert_eq!(err.kind(), ErrorKind::DisplayVersion);
     let output = err.to_string();
@@ -24,19 +26,22 @@ fn test_cli_definition_and_version_flag() {
     // Validate Bento split parsing
     let token = output.split(' ').nth(1);
     assert_eq!(token, Some("v1.11.2"));
+    Ok(())
 }
 
 /// Verifies single-dash `-version` parsing via `parse_cli_from`.
 #[test]
-fn test_single_dash_version_flag() {
+fn test_single_dash_version_flag() -> Result<(), StampError> {
     let args = ["packer", "-version"];
-    let err = match parse_cli_from(args) {
-        Ok(_) => panic!("Expected error"),
-        Err(e) => e,
+    let Err(err) = parse_cli_from(args) else {
+        return Err(StampError::Execution(
+            "Expected DisplayVersion error".to_string(),
+        ));
     };
     assert_eq!(err.kind(), ErrorKind::DisplayVersion);
     let output = err.to_string();
     assert!(output.contains("Packer v1.11.2"));
+    Ok(())
 }
 
 /// Verifies parsing the standard `version` subcommand and verbose flag.
@@ -66,7 +71,7 @@ fn test_cli_parse_subcommand_version() {
 
 /// Verifies parsing Go-style single-dash flags on the `build` subcommand.
 #[test]
-fn test_go_style_flags_build() {
+fn test_go_style_flags_build() -> Result<(), StampError> {
     let args = [
         "packer",
         "build",
@@ -85,48 +90,45 @@ fn test_go_style_flags_build() {
         "packer_templates",
     ];
 
-    let cli = match parse_cli_from(args) {
-        Ok(r) => r,
-        Err(e) => panic!("Failed to parse Go-style build flags: {e}"),
+    let cli = parse_cli_from(args).map_err(|e| StampError::Parse(e.to_string()))?;
+    let Some(Commands::Build {
+        template,
+        timestamp_ui,
+        force,
+        debug,
+        on_error,
+        parallel,
+        only,
+        except,
+        var,
+        var_file,
+        ..
+    }) = cli.command
+    else {
+        return Err(StampError::Parse("Expected Commands::Build".to_string()));
     };
-    match cli.command {
-        Some(Commands::Build {
-            template,
-            timestamp_ui,
-            force,
-            debug,
-            on_error,
-            parallel,
-            only,
-            except,
-            var,
-            var_file,
-            ..
-        }) => {
-            assert_eq!(template, vec!["packer_templates"]);
-            assert!(timestamp_ui);
-            assert!(force);
-            assert!(debug);
-            assert_eq!(on_error, Some("abort".to_string()));
-            assert_eq!(parallel, Some(false));
-            assert_eq!(only, Some("qemu.vm,virtualbox-iso.vm".to_string()));
-            assert_eq!(except, Some("parallels-iso.vm".to_string()));
-            assert_eq!(
-                var,
-                Some(vec![
-                    "cpus=4".to_string(),
-                    r#"sources_enabled=["source.qemu.vm"]"#.to_string()
-                ])
-            );
-            assert_eq!(var_file, Some(vec!["os.pkrvars.hcl".to_string()]));
-        }
-        other => panic!("Expected Commands::Build, got {other:?}"),
-    }
+    assert_eq!(template, vec!["packer_templates"]);
+    assert!(timestamp_ui);
+    assert!(force);
+    assert!(debug);
+    assert_eq!(on_error, Some("abort".to_string()));
+    assert_eq!(parallel, Some(false));
+    assert_eq!(only, Some("qemu.vm,virtualbox-iso.vm".to_string()));
+    assert_eq!(except, Some("parallels-iso.vm".to_string()));
+    assert_eq!(
+        var,
+        Some(vec![
+            "cpus=4".to_string(),
+            r#"sources_enabled=["source.qemu.vm"]"#.to_string()
+        ])
+    );
+    assert_eq!(var_file, Some(vec!["os.pkrvars.hcl".to_string()]));
+    Ok(())
 }
 
 /// Verifies parsing Go-style flags on `validate`, `init`, and `fix`.
 #[test]
-fn test_go_style_flags_subcommands() {
+fn test_go_style_flags_subcommands() -> Result<(), StampError> {
     // Validate
     let val_args = [
         "packer",
@@ -135,56 +137,44 @@ fn test_go_style_flags_subcommands() {
         "-var-file=vars.pkrvars.hcl",
         "template.pkr.hcl",
     ];
-    let val_cli = match parse_cli_from(val_args) {
-        Ok(r) => r,
-        Err(e) => panic!("Failed to parse validate command: {e}"),
+    let val_cli = parse_cli_from(val_args).map_err(|e| StampError::Parse(e.to_string()))?;
+    let Some(Commands::Validate {
+        syntax_only,
+        var_file,
+        template,
+        ..
+    }) = val_cli.command
+    else {
+        return Err(StampError::Parse("Expected Commands::Validate".to_string()));
     };
-    match val_cli.command {
-        Some(Commands::Validate {
-            syntax_only,
-            var_file,
-            template,
-            ..
-        }) => {
-            assert!(syntax_only);
-            assert_eq!(var_file, Some(vec!["vars.pkrvars.hcl".to_string()]));
-            assert_eq!(template, "template.pkr.hcl");
-        }
-        other => panic!("Expected Commands::Validate, got {other:?}"),
-    }
+    assert!(syntax_only);
+    assert_eq!(var_file, Some(vec!["vars.pkrvars.hcl".to_string()]));
+    assert_eq!(template, "template.pkr.hcl");
 
     // Init
     let init_args = ["packer", "init", "-upgrade", "-force", "packer_templates"];
-    let init_cli = match parse_cli_from(init_args) {
-        Ok(r) => r,
-        Err(e) => panic!("Failed to parse init command: {e}"),
+    let init_cli = parse_cli_from(init_args).map_err(|e| StampError::Parse(e.to_string()))?;
+    let Some(Commands::Init {
+        upgrade,
+        force,
+        template,
+    }) = init_cli.command
+    else {
+        return Err(StampError::Parse("Expected Commands::Init".to_string()));
     };
-    match init_cli.command {
-        Some(Commands::Init {
-            upgrade,
-            force,
-            template,
-        }) => {
-            assert!(upgrade);
-            assert!(force);
-            assert_eq!(template, "packer_templates");
-        }
-        other => panic!("Expected Commands::Init, got {other:?}"),
-    }
+    assert!(upgrade);
+    assert!(force);
+    assert_eq!(template, "packer_templates");
 
     // Fix
     let fix_args = ["packer", "fix", "-validate", "template.json"];
-    let fix_cli = match parse_cli_from(fix_args) {
-        Ok(r) => r,
-        Err(e) => panic!("Failed to parse fix command: {e}"),
+    let fix_cli = parse_cli_from(fix_args).map_err(|e| StampError::Parse(e.to_string()))?;
+    let Some(Commands::Fix { validate, template }) = fix_cli.command else {
+        return Err(StampError::Parse("Expected Commands::Fix".to_string()));
     };
-    match fix_cli.command {
-        Some(Commands::Fix { validate, template }) => {
-            assert!(validate);
-            assert_eq!(template, "template.json");
-        }
-        other => panic!("Expected Commands::Fix, got {other:?}"),
-    }
+    assert!(validate);
+    assert_eq!(template, "template.json");
+    Ok(())
 }
 
 /// Verifies normalization helper rules for numeric and short flags.

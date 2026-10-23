@@ -1,4 +1,3 @@
-#![cfg(not(tarpaulin_include))]
 //! Implementation of the `hyperv-iso` builder with PowerShell/WMI driver,
 //! Generation 1 (BIOS) & Generation 2 (UEFI) support, dynamic memory, virtual switch binding,
 //! optical media and floppy attachment, WinRM & SSH provisioning, and IP address discovery.
@@ -275,7 +274,6 @@ impl HypervIsoConfig {
 /// # Errors
 ///
 /// Returns `StampError::Builder` if execution fails or PowerShell returns non-zero.
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn run_hyperv_ps(cmd: &str) -> Result<String, StampError> {
     if cfg!(test) && std::env::var("HYPERV_REAL_POWERSHELL").is_err() {
         if cmd.contains("TEST_FAIL") {
@@ -372,7 +370,6 @@ struct StepCreateVM {
 
 #[async_trait::async_trait]
 impl Step for StepCreateVM {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let vm_name = self
             .config
@@ -512,7 +509,6 @@ struct StepRunVM {
 
 #[async_trait::async_trait]
 impl Step for StepRunVM {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         let vm_name = state.get::<String>("vm_name").cloned().unwrap_or_default();
         self.ui.say(&self.name, "Starting Hyper-V VM...");
@@ -569,7 +565,6 @@ struct StepProvision {
 
 #[async_trait::async_trait]
 impl Step for StepProvision {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Provisioning Hyper-V VM...");
 
@@ -662,7 +657,6 @@ struct StepShutdown {
 
 #[async_trait::async_trait]
 impl Step for StepShutdown {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Shutting down Hyper-V VM...");
         let vm_name = state.get::<String>("vm_name").cloned().unwrap_or_default();
@@ -686,7 +680,6 @@ impl Step for StepShutdown {
 
 #[async_trait::async_trait]
 impl Builder for HypervIsoBuilder {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn prepare(&self) -> Result<(), StampError> {
         if self.config.name.is_empty() {
             return Err(StampError::Parse("Name cannot be empty".to_string()));
@@ -694,7 +687,6 @@ impl Builder for HypervIsoBuilder {
         Ok(())
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn run(
         &self,
         hook: Arc<dyn ProvisionHook>,

@@ -222,40 +222,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_tests_invalid_json() {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("test_invalid_{}.json", uuid::Uuid::new_v4()));
-        let _ = std::fs::write(&path, "invalid json");
+    async fn test_run_tests_invalid_json() -> Result<(), StampError> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("test_invalid.json");
+        std::fs::write(&path, "invalid json")?;
         let config = TestConfig {
             verbose: false,
             junit_xml: None,
         };
-        let err = run_tests(path.to_str().unwrap_or_default(), &config);
-        for res in [err, Ok(())] {
-            match res {
-                Err(StampError::Json(_)) => assert!(matches!(res, Err(StampError::Json(_)))),
-                _ => assert!(res.is_ok()),
-            }
-        }
-        let _ = std::fs::remove_file(path);
+        let err = run_tests(&path.to_string_lossy(), &config);
+        assert!(matches!(err, Err(StampError::Json(_))));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_run_tests_invalid_hcl() {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("test_invalid_{}.pkr.hcl", uuid::Uuid::new_v4()));
-        let _ = std::fs::write(&path, "invalid hcl {{{");
+    async fn test_run_tests_invalid_hcl() -> Result<(), StampError> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("test_invalid.pkr.hcl");
+        std::fs::write(&path, "invalid hcl {{{")?;
         let config = TestConfig {
             verbose: false,
             junit_xml: None,
         };
-        let err = run_tests(path.to_str().unwrap_or_default(), &config);
-        for res in [err, Ok(())] {
-            match res {
-                Err(StampError::Parse(_)) => assert!(matches!(res, Err(StampError::Parse(_)))),
-                _ => assert!(res.is_ok()),
-            }
-        }
-        let _ = std::fs::remove_file(path);
+        let err = run_tests(&path.to_string_lossy(), &config);
+        assert!(matches!(err, Err(StampError::Parse(_))));
+        Ok(())
     }
 }

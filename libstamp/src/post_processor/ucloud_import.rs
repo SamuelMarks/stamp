@@ -21,6 +21,8 @@ pub struct UcloudImportConfig {
     pub region: Option<String>,
     /// `UCloud` project ID (optional).
     pub project_id: Option<String>,
+    /// Optional custom `UCloud` API endpoint override.
+    pub endpoint: Option<String>,
     /// Whether to keep the input artifact. Defaults to true.
     pub keep_input_artifact: bool,
 }
@@ -50,11 +52,39 @@ impl PostProcessor for UcloudImportPostProcessor {
         }
 
         let region = self.config.region.as_deref().unwrap_or("cn-bj2");
-        let image_id = format!(
-            "uimage-{}-{}",
-            region,
-            self.config.image_name.replace(' ', "-").to_lowercase()
-        );
+
+        let image_id = if let Some(ref endpoint) = self.config.endpoint {
+            let client = reqwest::Client::new();
+            let resp = client
+                .post(format!(
+                    "{}/?Action=ImportCustomImage&Region={region}&ImageName={}",
+                    endpoint.trim_end_matches('/'),
+                    self.config.image_name
+                ))
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                return Err(StampError::PostProcessor(format!(
+                    "UCloud ImportCustomImage failed with status {}",
+                    resp.status()
+                )));
+            }
+            let body: serde_json::Value = resp.json().await?;
+            body["ImageId"].as_str().map_or_else(
+                || {
+                    format!(
+                        "uimage-{region}-{}",
+                        self.config.image_name.replace(' ', "-").to_lowercase()
+                    )
+                },
+                ToString::to_string,
+            )
+        } else {
+            format!(
+                "uimage-{region}-{}",
+                self.config.image_name.replace(' ', "-").to_lowercase()
+            )
+        };
 
         let mut output_files = artifact.files.clone();
         output_files.push(format!("ucloud://{region}/{image_id}"));
@@ -68,7 +98,6 @@ impl PostProcessor for UcloudImportPostProcessor {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -82,17 +111,18 @@ mod tests {
             os_type: Some("Ubuntu".to_string()),
             region: Some("cn-bj2".to_string()),
             project_id: Some("org-123".to_string()),
+            endpoint: None,
             keep_input_artifact: true,
         };
         assert_eq!(config.clone(), config);
-        assert_eq!(format!("{config:?}"), format!("{config:?}"));
+        assert!(format!("{config:?}").contains("UcloudImportConfig"));
         let proc = UcloudImportPostProcessor::new(config);
-        assert_eq!(format!("{proc:?}"), format!("{:?}", proc.clone()));
-        assert!(proc.keep_input_artifact());
+        assert!(format!("{proc:?}").contains("UcloudImportPostProcessor"));
+        assert!(proc.clone().keep_input_artifact());
     }
 
     #[tokio::test]
-    async fn test_ucloud_import_success() {
+    async fn test_ucloud_import_success_and_http() -> Result<(), StampError> {
         let proc = UcloudImportPostProcessor::new(UcloudImportConfig {
             image_name: "my-ucloud-img".to_string(),
             region: Some("hk".to_string()),
@@ -102,10 +132,57 @@ mod tests {
         assert!(!proc.keep_input_artifact());
 
         let artifact = Artifact::new("u-art-1".to_string(), vec!["disk.raw".to_string()]);
-        let res = proc.process(artifact).await.unwrap();
+        let res = proc.process(artifact.clone()).await?;
         assert_eq!(res.id, "uimage-hk-my-ucloud-img");
         assert_eq!(res.files.len(), 2);
         assert_eq!(res.files[1], "ucloud://hk/uimage-hk-my-ucloud-img");
+
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock(
+                "POST",
+                "/?Action=ImportCustomImage&Region=cn-bj2&ImageName=u-img",
+            )
+            .with_status(200)
+            .with_body(r#"{"ImageId":"uimage-live-1"}"#)
+            .create_async()
+            .await;
+
+        let proc_http = UcloudImportPostProcessor::new(UcloudImportConfig {
+            image_name: "u-img".to_string(),
+            endpoint: Some(server.url()),
+            ..Default::default()
+        });
+        assert_eq!(
+            proc_http.process(artifact.clone()).await?.id,
+            "uimage-live-1"
+        );
+
+        let _m_fb = server
+            .mock(
+                "POST",
+                "/?Action=ImportCustomImage&Region=cn-bj2&ImageName=u-img",
+            )
+            .with_status(200)
+            .with_body(r"{}")
+            .create_async()
+            .await;
+        assert_eq!(
+            proc_http.process(artifact.clone()).await?.id,
+            "uimage-cn-bj2-u-img"
+        );
+
+        let _m_err = server
+            .mock(
+                "POST",
+                "/?Action=ImportCustomImage&Region=cn-bj2&ImageName=u-img",
+            )
+            .with_status(500)
+            .create_async()
+            .await;
+        assert!(proc_http.process(artifact).await.is_err());
+
+        Ok(())
     }
 
     #[tokio::test]

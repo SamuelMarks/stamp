@@ -20,8 +20,9 @@ pub fn create_data_source(config: &DataSourceConfig) -> Result<Box<dyn DataSourc
     match config.source_type.as_str() {
         "git" => {
             let path = config.config.get("path").cloned();
+            let git_binary = config.config.get("git_binary").cloned();
             Ok(Box::new(git::GitDataSource::new(
-                git::GitDataSourceConfig { path },
+                git::GitDataSourceConfig { path, git_binary },
             )))
         }
         "file" | "local_file" | "local-file" => {
@@ -193,20 +194,30 @@ pub fn create_data_source(config: &DataSourceConfig) -> Result<Box<dyn DataSourc
     }
 }
 
+/// Alibaba Cloud image data source.
 pub mod alicloud;
+/// Consul KV data source.
 pub mod consul_key;
+/// External subprocess data source.
 pub mod external;
+/// Git repository metadata data source.
 pub mod git;
+/// Out-of-process Go plugin data source RPC client.
 pub mod go_plugin;
+/// HCP Packer registry data sources.
 pub mod hcp;
+/// HTTP GET/POST data source.
 pub mod http;
+/// Local file content data source.
 pub mod local_file;
+/// Terraform state output data source.
 pub mod terraform;
+/// HashiCorp Vault secret data source.
 pub mod vault_secret;
+/// VMware vSphere virtual machine data source.
 pub mod vsphere;
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 

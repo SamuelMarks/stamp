@@ -1,9 +1,8 @@
-#![cfg(not(tarpaulin_include))]
-
 //! Packer-specific template functions for evaluating configuration templates.
 //! Standard HCL functions are provided directly by `hashicorp_configuration_language_rs::eval::stdlib`.
 
 use crate::error::StampError;
+use hashicorp_configuration_language_rs::error::HclError;
 use hashicorp_configuration_language_rs::eval::func::Function;
 use hashicorp_configuration_language_rs::types::{Type, Value, ValueData};
 use std::sync::Arc;
@@ -153,7 +152,9 @@ pub fn packer_functions() -> Vec<Function> {
             signature: None,
             func: Arc::new(|args| {
                 if args.len() != 1 {
-                    return Err("clean_resource_name requires exactly 1 argument".to_string());
+                    return Err(HclError::Eval(
+                        "clean_resource_name requires exactly 1 argument".to_string(),
+                    ));
                 }
                 let raw = match &*args[0].data {
                     ValueData::String(s) => s.clone(),
@@ -161,7 +162,7 @@ pub fn packer_functions() -> Vec<Function> {
                 };
                 let cleaned = CleanResourceName
                     .evaluate(&[raw])
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| HclError::Eval(e.to_string()))?;
                 Ok(Value::new(Type::String, ValueData::String(cleaned)))
             }),
         },
@@ -170,17 +171,29 @@ pub fn packer_functions() -> Vec<Function> {
             signature: None,
             func: Arc::new(|args| {
                 if args.len() < 2 {
-                    return Err("vault requires at least 2 arguments (path, key)".to_string());
+                    return Err(HclError::Eval(
+                        "vault requires at least 2 arguments (path, key)".to_string(),
+                    ));
                 }
                 let path = match &*args[0].data {
                     ValueData::String(s) => s.clone(),
-                    _ => return Err("vault path argument must be a string".to_string()),
+                    _ => {
+                        return Err(HclError::Eval(
+                            "vault path argument must be a string".to_string(),
+                        ));
+                    }
                 };
                 let key = match &*args[1].data {
                     ValueData::String(s) => s.clone(),
-                    _ => return Err("vault key argument must be a string".to_string()),
+                    _ => {
+                        return Err(HclError::Eval(
+                            "vault key argument must be a string".to_string(),
+                        ));
+                    }
                 };
-                let secret = Vault.evaluate(&[path, key]).map_err(|e| e.to_string())?;
+                let secret = Vault
+                    .evaluate(&[path, key])
+                    .map_err(|e| HclError::Eval(e.to_string()))?;
                 Ok(Value::new(Type::String, ValueData::String(secret)))
             }),
         },
@@ -189,7 +202,7 @@ pub fn packer_functions() -> Vec<Function> {
             signature: None,
             func: Arc::new(|args| {
                 if !args.is_empty() {
-                    return Err("timestamp requires 0 arguments".to_string());
+                    return Err(HclError::Eval("timestamp requires 0 arguments".to_string()));
                 }
                 let now = chrono::Utc::now().to_rfc3339();
                 Ok(Value::new(Type::String, ValueData::String(now)))
@@ -200,7 +213,7 @@ pub fn packer_functions() -> Vec<Function> {
             signature: None,
             func: Arc::new(|args| {
                 if !args.is_empty() {
-                    return Err("uuidv4 requires 0 arguments".to_string());
+                    return Err(HclError::Eval("uuidv4 requires 0 arguments".to_string()));
                 }
                 let id = uuid::Uuid::new_v4().to_string();
                 Ok(Value::new(Type::String, ValueData::String(id)))
@@ -228,7 +241,9 @@ pub fn packer_functions() -> Vec<Function> {
                         ValueData::String(now.format(&chrono_fmt).to_string()),
                     ))
                 } else {
-                    Err("legacy_isotime accepts 0 or 1 arguments (format)".to_string())
+                    Err(HclError::Eval(
+                        "legacy_isotime accepts 0 or 1 arguments (format)".to_string(),
+                    ))
                 }
             }),
         },
@@ -288,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vault_http_v2_and_v1_and_errors() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_vault_http_v2_and_v1_and_errors() -> Result<(), StampError> {
         let _guard = crate::utils::ENV_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -402,7 +417,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_vault_inside_tokio_runtime() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_vault_inside_tokio_runtime() -> Result<(), StampError> {
         let _guard = crate::utils::ENV_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -443,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn test_packer_functions_registered() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_packer_functions_registered() -> Result<(), StampError> {
         let _guard = crate::utils::ENV_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -495,7 +510,7 @@ mod tests {
     }
 
     #[test]
-    fn test_packer_functions_errors() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_packer_functions_errors() -> Result<(), StampError> {
         let funcs = packer_functions();
         let clean = &funcs[0];
         assert!((clean.func)(&[]).is_err());

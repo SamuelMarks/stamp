@@ -1,5 +1,3 @@
-#![cfg(not(tarpaulin_include))]
-
 //! Template evaluation engine.
 
 use crate::error::StampError;
@@ -1541,8 +1539,9 @@ mod tests {
     #[test]
     fn test_json_to_hcl_val_coverage() {
         use hashicorp_configuration_language_rs::types::ValueData;
-        let val: serde_json::Value = serde_json::from_str("1e300").unwrap();
+        let val: serde_json::Value = serde_json::from_str("1e300").unwrap_or_default();
         let hcl = super::json_to_hcl_val(&val);
+        assert!(matches!(hcl.data.as_ref(), ValueData::Number(_)));
         let hcl_null = super::json_to_hcl_val(&serde_json::Value::Null);
         assert!(matches!(hcl_null.data.as_ref(), ValueData::Null));
     }

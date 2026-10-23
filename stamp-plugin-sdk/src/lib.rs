@@ -251,10 +251,11 @@ impl libstamp::r#gen::packer::post_processor_server::PostProcessor for SdkPostPr
         request: tonic::Request<libstamp::r#gen::packer::PostProcessRequest>,
     ) -> Result<tonic::Response<libstamp::r#gen::packer::PostProcessResponse>, tonic::Status> {
         let req = request.into_inner();
-        let artifact = libstamp::post_processor::Artifact {
-            id: req.artifact_id,
-            files: req.files,
-        };
+        let artifact = libstamp::post_processor::Artifact::with_builder(
+            req.builder_id.clone(),
+            req.artifact_id,
+            req.files,
+        );
         match self.post_processor.process(artifact).await {
             Ok(out_art) => Ok(tonic::Response::new(
                 libstamp::r#gen::packer::PostProcessResponse {
@@ -596,10 +597,10 @@ mod tests {
             if self.should_fail {
                 Err(StampError::PostProcessor("post process failed".to_string()))
             } else {
-                Ok(libstamp::post_processor::Artifact {
-                    id: format!("{}-processed", artifact.id),
-                    files: artifact.files,
-                })
+                Ok(libstamp::post_processor::Artifact::new(
+                    format!("{}-processed", artifact.id),
+                    artifact.files,
+                ))
             }
         }
     }

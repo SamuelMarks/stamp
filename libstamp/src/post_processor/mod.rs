@@ -3,22 +3,8 @@
 use crate::error::StampError;
 use async_trait::async_trait;
 
-/// A build artifact.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Artifact {
-    /// The ID of the artifact.
-    pub id: String,
-    /// List of files associated with the artifact.
-    pub files: Vec<String>,
-}
-
-impl Artifact {
-    /// Create a new `Artifact`.
-    #[must_use]
-    pub const fn new(id: String, files: Vec<String>) -> Self {
-        Self { id, files }
-    }
-}
+/// Re-exported unified build artifact type for post-processing pipelines.
+pub type Artifact = crate::artifact::BuildArtifact;
 
 /// The main trait for post-processors.
 #[async_trait]
@@ -78,6 +64,8 @@ pub mod vagrant;
 pub mod vagrant_cloud;
 /// `vsphere` post-processor.
 pub mod vsphere;
+/// `vsphere_export` post-processor.
+pub mod vsphere_export;
 /// `vsphere_template` post-processor.
 pub mod vsphere_template;
 /// `yandex_import` post-processor.
@@ -143,6 +131,9 @@ pub fn create_post_processor(
         "vsphere" => Ok(Box::new(vsphere::VspherePostProcessor::new(
             vsphere::VsphereConfig::default(),
         ))),
+        "vsphere-export" => Ok(Box::new(vsphere_export::VsphereExportPostProcessor::new(
+            vsphere_export::VsphereExportConfig::default(),
+        ))),
         "vsphere-template" => Ok(Box::new(
             vsphere_template::VsphereTemplatePostProcessor::new(
                 vsphere_template::VsphereTemplateConfig::default(),
@@ -178,10 +169,10 @@ pub fn create_post_processor(
     }
 }
 
+/// Out-of-process Go plugin post-processor RPC client.
 pub mod go_plugin;
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -203,6 +194,7 @@ mod tests {
             "shell-local",
             "ucloud-import",
             "vsphere",
+            "vsphere-export",
             "vsphere-template",
             "vagrant",
             "vagrant-cloud",

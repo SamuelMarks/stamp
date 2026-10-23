@@ -289,12 +289,7 @@ pub async fn start_http_server_advanced(
                         {
                             let mime = mime_type_for_path(Path::new(req_path));
                             let response_header = format!(
-                                "HTTP/1.1 200 OK
-Content-Type: {mime}
-Content-Length: {}
-Connection: close
-
-",
+                                "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                                 content.len()
                             );
                             let _ = socket.write_all(response_header.as_bytes()).await;
@@ -323,12 +318,7 @@ Connection: close
                         {
                             let mime = mime_type_for_path(&canon_candidate);
                             let response_header = format!(
-                                "HTTP/1.1 200 OK
-Content-Type: {mime}
-Content-Length: {}
-Connection: close
-
-",
+                                "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                                 content.len()
                             );
                             let _ = socket.write_all(response_header.as_bytes()).await;
@@ -348,11 +338,7 @@ Connection: close
                     }
                 }
 
-                let not_found = "HTTP/1.1 404 Not Found
-Content-Length: 9
-Connection: close
-
-Not Found";
+                let not_found = "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nNot Found";
                 let _ = socket.write_all(not_found.as_bytes()).await;
                 if let Some(ref u) = ui_clone {
                     u.say(&name_clone, &format!("HTTP: {peer_addr} 404 Not Found"));
@@ -427,18 +413,17 @@ impl crate::engine::multistep::Step for StepHttpServer {
 }
 
 #[cfg(test)]
-#[allow(clippy::all, clippy::pedantic, for_loops_over_fallibles)]
 mod tests {
     use super::*;
     use crate::engine::multistep::{StateBag, Step};
     use tokio::io::AsyncWriteExt;
 
     #[tokio::test]
-    async fn test_start_http_server_success() {
-        let dir = std::env::temp_dir().join("stamp_test_http_success");
-        let _ = std::fs::create_dir_all(&dir);
+    async fn test_start_http_server_success() -> Result<(), StampError> {
+        let temp_dir = tempfile::tempdir()?;
+        let dir = temp_dir.path().to_path_buf();
         let file_path = dir.join("preseed.cfg");
-        let _ = std::fs::write(&file_path, b"d-i debian-installer/locale string en_US");
+        std::fs::write(&file_path, b"d-i debian-installer/locale string en_US")?;
 
         let ui = Arc::new(crate::engine::ui::Ui::new(
             crate::engine::packer::FeatureState::Disabled,
@@ -446,99 +431,67 @@ mod tests {
             crate::engine::packer::FeatureState::Disabled,
         ));
 
-        let res = start_http_server_with_ui(
+        let handle = start_http_server_with_ui(
             dir.clone(),
             (29100, 29150),
-            Some(ui.clone()),
+            Some(ui),
             Some("test-http".to_string()),
         )
-        .await;
-        assert!(res.is_ok());
+        .await?;
+        assert!(handle.port >= 29100);
 
-        for handle in res {
-            assert!(handle.port >= 29100);
+        // 1. GET with leading slash and query string
+        let url = format!("http://127.0.0.1:{}/preseed.cfg?param=1", handle.port);
+        let resp = reqwest::get(&url).await?;
+        assert!(resp.status().is_success());
+        let body = resp.text().await?;
+        assert!(body.contains("d-i debian-installer"));
 
-            // 1. GET with leading slash and query string
-            let url = format!("http://127.0.0.1:{}/preseed.cfg?param=1", handle.port);
-            let resp = reqwest::get(&url).await;
-            assert!(resp.as_ref().map(|r| r.status().is_success()).ok() == Some(true));
-            for r in resp {
-                let body = r.text().await;
-                assert!(
-                    body.as_ref()
-                        .map(|b| b.contains("d-i debian-installer"))
-                        .ok()
-                        == Some(true)
-                );
-            }
+        // 2. 404 test with UI logging
+        let bad_url = format!("http://127.0.0.1:{}/missing.cfg", handle.port);
+        let resp_bad = reqwest::get(&bad_url).await?;
+        assert_eq!(resp_bad.status().as_u16(), 404);
 
-            // 2. 404 test with UI logging
-            let bad_url = format!("http://127.0.0.1:{}/missing.cfg", handle.port);
-            let resp_bad = reqwest::get(&bad_url).await;
-            assert!(resp_bad.as_ref().map(|r| r.status().as_u16()).ok() == Some(404));
+        // 3. Raw TCP: non-GET request (POST) -> 404
+        let mut s = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", handle.port)).await?;
+        s.write_all(b"POST /preseed.cfg HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await?;
+        let mut response_buf = [0u8; 512];
+        let n = s.read(&mut response_buf).await?;
+        let resp_str = String::from_utf8_lossy(&response_buf[..n]);
+        assert!(resp_str.contains("404 Not Found"));
 
-            // 3. Raw TCP: non-GET request (POST) -> 404
-            let stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", handle.port)).await;
-            assert!(stream.is_ok());
-            for mut s in stream {
-                let _ = s
-                    .write_all(
-                        b"POST /preseed.cfg HTTP/1.1
-Host: localhost
+        // 4. Raw TCP: path without leading slash
+        let mut s2 = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", handle.port)).await?;
+        s2.write_all(b"GET preseed.cfg HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await?;
+        let mut response_buf2 = [0u8; 512];
+        let n2 = s2.read(&mut response_buf2).await?;
+        let resp_str2 = String::from_utf8_lossy(&response_buf2[..n2]);
+        assert!(resp_str2.contains("200 OK"));
 
-",
-                    )
-                    .await;
-                let mut response_buf = [0u8; 512];
-                let n = s.read(&mut response_buf).await.unwrap_or_default();
-                let resp_str = String::from_utf8_lossy(&response_buf[..n]);
-                assert!(resp_str.contains("404 Not Found"));
-            }
+        // 5. Raw TCP: empty request (immediate EOF / zero bytes read)
+        let stream3 = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", handle.port)).await?;
+        drop(stream3);
 
-            // 4. Raw TCP: path without leading slash
-            let stream2 =
-                tokio::net::TcpStream::connect(format!("127.0.0.1:{}", handle.port)).await;
-            assert!(stream2.is_ok());
-            for mut s2 in stream2 {
-                let _ = s2
-                    .write_all(
-                        b"GET preseed.cfg HTTP/1.1
-Host: localhost
+        // 6. Path traversal attempt (e.g. "../")
+        let traversal_url = format!("http://127.0.0.1:{}/../test.txt", handle.port);
+        let resp_traversal = reqwest::get(&traversal_url).await?;
+        assert_eq!(resp_traversal.status().as_u16(), 404);
 
-",
-                    )
-                    .await;
-                let mut response_buf2 = [0u8; 512];
-                let n2 = s2.read(&mut response_buf2).await.unwrap_or_default();
-                let resp_str2 = String::from_utf8_lossy(&response_buf2[..n2]);
-                assert!(resp_str2.contains("200 OK"));
-            }
+        // 7. Request a directory rather than a file -> 404
+        let sub_dir = dir.join("subdir");
+        std::fs::create_dir_all(&sub_dir)?;
+        let dir_url = format!("http://127.0.0.1:{}/subdir", handle.port);
+        let resp_dir = reqwest::get(&dir_url).await?;
+        assert_eq!(resp_dir.status().as_u16(), 404);
 
-            // 5. Raw TCP: empty request (immediate EOF / zero bytes read)
-            let stream3 =
-                tokio::net::TcpStream::connect(format!("127.0.0.1:{}", handle.port)).await;
-            drop(stream3);
-
-            // 6. Path traversal attempt (e.g. "../")
-            let traversal_url = format!("http://127.0.0.1:{}/../test.txt", handle.port);
-            let resp_traversal = reqwest::get(&traversal_url).await;
-            assert!(resp_traversal.as_ref().map(|r| r.status().as_u16()).ok() == Some(404));
-
-            // 7. Request a directory rather than a file -> 404
-            let sub_dir = dir.join("subdir");
-            let _ = std::fs::create_dir_all(&sub_dir);
-            let dir_url = format!("http://127.0.0.1:{}/subdir", handle.port);
-            let resp_dir = reqwest::get(&dir_url).await;
-            assert!(resp_dir.as_ref().map(|r| r.status().as_u16()).ok() == Some(404));
-
-            handle.shutdown().await;
-        }
-
-        let _ = std::fs::remove_dir_all(&dir);
+        handle.shutdown().await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_in_memory_content_and_step() {
+    async fn test_in_memory_content_and_step() -> Result<(), StampError> {
         let mut string_content = HashMap::new();
         string_content.insert(
             "/autounattend.xml".to_string(),
@@ -560,8 +513,7 @@ Host: localhost
         let mut step = StepHttpServer::new(cfg, "test-in-mem".to_string(), Some(ui));
         let mut state = StateBag::new();
 
-        let run_res = step.run(&mut state).await;
-        assert!(run_res.is_ok());
+        step.run(&mut state).await?;
 
         let ip = state.http_ip().unwrap_or_default().to_string();
         let port = state.http_port().unwrap_or_default();
@@ -570,21 +522,15 @@ Host: localhost
 
         // Fetch /autounattend.xml
         let url1 = format!("http://127.0.0.1:{port}/autounattend.xml");
-        let resp1 = reqwest::get(&url1).await;
-        assert!(resp1.as_ref().map(|r| r.status().is_success()).ok() == Some(true));
-        for r in resp1 {
-            let body = r.text().await.unwrap_or_default();
-            assert_eq!(body, "<unattend>test</unattend>");
-        }
+        let resp1 = reqwest::get(&url1).await?;
+        assert!(resp1.status().is_success());
+        assert_eq!(resp1.text().await?, "<unattend>test</unattend>");
 
         // Fetch ks.cfg without slash
         let url2 = format!("http://127.0.0.1:{port}/ks.cfg");
-        let resp2 = reqwest::get(&url2).await;
-        assert!(resp2.as_ref().map(|r| r.status().is_success()).ok() == Some(true));
-        for r in resp2 {
-            let body = r.text().await.unwrap_or_default();
-            assert_eq!(body, "rootpw testpass");
-        }
+        let resp2 = reqwest::get(&url2).await?;
+        assert!(resp2.status().is_success());
+        assert_eq!(resp2.text().await?, "rootpw testpass");
 
         // Test step cleanup
         step.cleanup(&state).await;
@@ -593,8 +539,9 @@ Host: localhost
         let mut empty_step =
             StepHttpServer::new(HttpServerConfig::new(), "empty".to_string(), None);
         let mut empty_state = StateBag::new();
-        assert!(empty_step.run(&mut empty_state).await.is_ok());
+        empty_step.run(&mut empty_state).await?;
         empty_step.cleanup(&empty_state).await;
+        Ok(())
     }
 
     #[test]
@@ -648,46 +595,36 @@ Host: localhost
     }
 
     #[tokio::test]
-    async fn test_port_range_fallback() {
-        let dir = std::env::temp_dir().join("stamp_test_http_fallback");
-        let _ = std::fs::create_dir_all(&dir);
-        let res = start_http_server(dir.clone(), (29200, 29250)).await;
-        assert!(res.is_ok());
-        for handle in res {
-            assert!(handle.port >= 29200 && handle.port <= 29250);
-            handle.abort();
-            let _ = handle.task.await;
-        }
-        let _ = std::fs::remove_dir_all(&dir);
+    async fn test_port_range_fallback() -> Result<(), StampError> {
+        let temp_dir = tempfile::tempdir()?;
+        let handle = start_http_server(temp_dir.path().to_path_buf(), (29200, 29250)).await?;
+        assert!(handle.port >= 29200 && handle.port <= 29250);
+        handle.abort();
+        let _ = handle.task.await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_start_http_server_full_bind_address_and_no_ui() {
-        let dir = std::env::temp_dir().join("stamp_test_http_no_ui");
-        let _ = std::fs::create_dir_all(&dir);
+    async fn test_start_http_server_full_bind_address_and_no_ui() -> Result<(), StampError> {
+        let temp_dir = tempfile::tempdir()?;
+        let dir = temp_dir.path().to_path_buf();
         let file_path = dir.join("data.txt");
-        let _ = std::fs::write(&file_path, b"hello");
+        std::fs::write(&file_path, b"hello")?;
 
-        let res = start_http_server_full(dir.clone(), Some("127.0.0.1"), (0, 0), None, None).await;
-        assert!(res.is_ok());
+        let handle = start_http_server_full(dir, Some("127.0.0.1"), (0, 0), None, None).await?;
+        assert_eq!(handle.ip, "127.0.0.1");
+        assert!(handle.port > 0);
 
-        for handle in res {
-            assert_eq!(handle.ip, "127.0.0.1");
-            assert!(handle.port > 0);
+        let url = format!("http://127.0.0.1:{}/data.txt", handle.port);
+        let resp = reqwest::get(&url).await?;
+        assert_eq!(resp.status().as_u16(), 200);
 
-            // Fetch without UI logger to cover None branches
-            let url = format!("http://127.0.0.1:{}/data.txt", handle.port);
-            let resp = reqwest::get(&url).await;
-            assert!(resp.as_ref().map(|r| r.status().as_u16()).ok() == Some(200));
+        let bad_url = format!("http://127.0.0.1:{}/nonexistent.txt", handle.port);
+        let resp_404 = reqwest::get(&bad_url).await?;
+        assert_eq!(resp_404.status().as_u16(), 404);
 
-            let bad_url = format!("http://127.0.0.1:{}/nonexistent.txt", handle.port);
-            let resp_404 = reqwest::get(&bad_url).await;
-            assert!(resp_404.as_ref().map(|r| r.status().as_u16()).ok() == Some(404));
-
-            handle.shutdown().await;
-        }
-
-        let _ = std::fs::remove_dir_all(&dir);
+        handle.shutdown().await;
+        Ok(())
     }
 
     #[tokio::test]
@@ -698,18 +635,13 @@ Host: localhost
     }
 
     #[tokio::test]
-    async fn test_start_http_server_port_bind_failure() {
+    async fn test_start_http_server_port_bind_failure() -> Result<(), StampError> {
         let dir = std::env::temp_dir();
-        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await;
-        assert!(occupied.is_ok());
-        for occ in occupied {
-            let port = occ.local_addr().map(|a| a.port()).unwrap_or_default();
-            let res =
-                start_http_server_full(dir.clone(), Some("127.0.0.1"), (port, port), None, None)
-                    .await;
-
-            assert!(res.is_err());
-        }
+        let occ = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = occ.local_addr()?.port();
+        let res = start_http_server_full(dir, Some("127.0.0.1"), (port, port), None, None).await;
+        assert!(res.is_err());
+        Ok(())
     }
 
     #[tokio::test]
@@ -749,17 +681,16 @@ Host: localhost
     }
 
     #[tokio::test]
-    async fn test_http_server_ui_logging() {
-        use std::sync::Arc;
+    async fn test_http_server_ui_logging() -> Result<(), StampError> {
         let ui = Arc::new(crate::engine::ui::Ui::new(
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
             crate::engine::packer::FeatureState::Disabled,
         ));
 
-        let temp_dir = tempfile::tempdir().unwrap();
+        let temp_dir = tempfile::tempdir()?;
         let test_file = temp_dir.path().join("test.txt");
-        tokio::fs::write(&test_file, b"hello world").await.unwrap();
+        tokio::fs::write(&test_file, b"hello world").await?;
 
         let mut content_map = std::collections::HashMap::new();
         content_map.insert("mem.txt".to_string(), b"mem content".to_vec());
@@ -771,29 +702,28 @@ Host: localhost
             port_range: (0, 0),
         };
 
-        let server = start_http_server_advanced(&config, Some(ui), Some("test".to_string()))
-            .await
-            .unwrap();
+        let server =
+            start_http_server_advanced(&config, Some(ui), Some("test".to_string())).await?;
         let port = server.port;
         let client = reqwest::Client::new();
 
-        // request mem.txt
-        let _ = client
+        let r_mem = client
             .get(format!("http://127.0.0.1:{port}/mem.txt"))
             .send()
-            .await;
-        // request test.txt
-        let _ = client
+            .await?;
+        assert_eq!(r_mem.status().as_u16(), 200);
+        let r_file = client
             .get(format!("http://127.0.0.1:{port}/test.txt"))
             .send()
-            .await;
+            .await?;
+        assert_eq!(r_file.status().as_u16(), 200);
 
         server.shutdown().await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_step_start_http_server_no_config() {
-        use crate::engine::multistep::Step;
+    async fn test_step_start_http_server_no_config() -> Result<(), StampError> {
         let config = HttpServerConfig {
             dir: None,
             content: None,
@@ -810,22 +740,20 @@ Host: localhost
         };
 
         let mut state = crate::engine::multistep::StateBag::new();
-        let res = step.run(&mut state).await;
-        assert!(res.is_ok());
+        step.run(&mut state).await?;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_http_server_drop() {
+    async fn test_http_server_drop() -> Result<(), StampError> {
         let config = HttpServerConfig {
             dir: None,
             content: None,
             bind_address: Some("127.0.0.1".to_string()),
             port_range: (0, 0),
         };
-        let server = start_http_server_advanced(&config, None, None)
-            .await
-            .unwrap();
-        // Just let it drop
+        let server = start_http_server_advanced(&config, None, None).await?;
         drop(server);
+        Ok(())
     }
 }

@@ -217,20 +217,16 @@ impl Builder for GoPluginBuilder {
                     NetworkType::Unix => {
                         #[cfg(unix)]
                         {
-                            let path = handshake.address.clone();
-                            let channel =
-                                tonic::transport::Endpoint::from_static("http://[::]:50051")
-                                    .connect_with_connector(tower::service_fn(
-                                        move |_: tonic::transport::Uri| {
-                                            tokio::net::UnixStream::connect(path.clone())
-                                        },
-                                    ))
-                                    .await
-                                    .map_err(|e| {
-                                        StampError::Execution(format!(
-                                            "gRPC Unix connect error: {e}"
-                                        ))
-                                    })?;
+                            let uri = format!("unix:{}", handshake.address);
+                            let channel = tonic::transport::Endpoint::from_shared(uri)
+                                .map_err(|e| {
+                                    StampError::Execution(format!("Invalid Unix endpoint: {e}"))
+                                })?
+                                .connect()
+                                .await
+                                .map_err(|e| {
+                                    StampError::Execution(format!("gRPC Unix connect error: {e}"))
+                                })?;
                             crate::r#gen::packer::builder_client::BuilderClient::new(channel)
                         }
                         #[cfg(not(unix))]
@@ -331,7 +327,6 @@ impl Builder for GoPluginBuilder {
 }
 
 #[cfg(test)]
-#[cfg(not(tarpaulin_include))]
 #[allow(
     clippy::unwrap_used,
     clippy::pedantic,

@@ -5,7 +5,6 @@ use async_trait::async_trait;
 
 /// The main trait for all builders.
 #[async_trait]
-#[cfg(not(tarpaulin_include))]
 pub trait Builder: Send + Sync {
     /// Prepare the builder (e.g., validate configuration).
     async fn prepare(&self) -> Result<(), StampError>;
@@ -37,45 +36,90 @@ pub trait Builder: Send + Sync {
 
 /// `alicloud-ecs` builder.
 pub mod alicloud;
+/// `cloudsigma` builder.
 pub mod cloudsigma;
+/// `cloudstack` builder.
 pub mod cloudstack;
+/// `digitalocean` builder.
 pub mod digitalocean;
+/// `docker` builder.
 pub mod docker;
+/// `file` builder.
 pub mod file;
+/// Out-of-process Go plugin builder RPC client.
 pub mod go_plugin;
+/// `hetzner-cloud` builder.
 pub mod hetzner_cloud;
+/// Built-in HTTP micro-server for installer kickstarts and preseeds.
+pub mod http_server;
+/// `hyperone` builder.
+pub mod hyperone;
+/// `hyperv-iso` builder.
 pub mod hyperv_iso;
+/// `hyperv-vmcx` builder.
 pub mod hyperv_vmcx;
+/// `ionoscloud` builder.
 pub mod ionoscloud;
+/// `linode` builder.
 pub mod linode;
+/// `lxc` builder.
 pub mod lxc;
+/// `lxd` builder.
 pub mod lxd;
+/// `null` builder.
 pub mod null;
+/// `nutanix` builder.
 pub mod nutanix;
+/// `opennebula` builder.
 pub mod opennebula;
+/// `openstack` builder.
 pub mod openstack;
+/// `oracle-oci` builder.
 pub mod oracle;
+/// `outscale` builder.
+pub mod outscale;
 /// `parallels-ipsw` builder.
 pub mod parallels_ipsw;
+/// `parallels-iso` builder.
 pub mod parallels_iso;
+/// `parallels-pvm` builder.
 pub mod parallels_pvm;
+/// `podman` builder.
 pub mod podman;
+/// `proxmox-clone` builder.
 pub mod proxmox_clone;
+/// `proxmox-iso` builder.
 pub mod proxmox_iso;
+/// `qemu` builder.
 pub mod qemu;
+/// `scaleway` builder.
 pub mod scaleway;
+/// `tencentcloud-cvm` builder.
 pub mod tencentcloud;
+/// `triton` builder.
 pub mod triton;
+/// `upcloud` builder.
 pub mod upcloud;
 /// `utm-iso` builder.
 pub mod utm_iso;
+/// `vagrant` builder.
 pub mod vagrant;
+/// `virtualbox-iso` builder.
 pub mod virtualbox_iso;
+/// `virtualbox-ovf` builder.
 pub mod virtualbox_ovf;
+/// Shared virtualization media (FAT12, ISO9660) and boot command (VNC, SPICE) helpers.
+pub mod virtualization;
+/// `vmware-iso` builder.
 pub mod vmware_iso;
+/// `vmware-vmx` builder.
 pub mod vmware_vmx;
+/// `vsphere-iso` and `vsphere-clone` builders.
 pub mod vsphere;
+/// `vultr` builder.
 pub mod vultr;
+/// `yandex` builder.
+pub mod yandex;
 
 use crate::template::BuilderConfig;
 
@@ -156,7 +200,7 @@ fn create_raw_builder(config: &BuilderConfig) -> Result<Box<dyn Builder>, StampE
         "parallels-pvm" => Ok(Box::new(parallels_pvm::ParallelsPvmBuilder::new(
             parallels_pvm::ParallelsPvmConfig {
                 name: config.name.clone(),
-                test_cmd: None,
+                ..Default::default()
             },
         ))),
         "proxmox-clone" => Ok(Box::new(proxmox_clone::ProxmoxCloneBuilder::new(
@@ -364,8 +408,6 @@ impl Builder for DependentBuilder {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
-
 mod tests {
 
     use super::*;
@@ -505,5 +547,3 @@ mod tests {
         Ok(())
     }
 }
-pub mod http_server;
-pub mod virtualization;

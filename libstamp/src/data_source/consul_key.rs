@@ -6,6 +6,7 @@ use crate::data_source::DataSource;
 use crate::error::StampError;
 use async_trait::async_trait;
 use serde_json::Value;
+use std::fmt::Write;
 
 /// Configuration for the `consul-key` data source.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -47,6 +48,31 @@ impl DataSource for ConsulKeyDataSource {
             return Err(StampError::Execution("Consul query failed".to_string()));
         }
 
+        if let Some(ref addr) = self.config.address {
+            let client = reqwest::Client::new();
+            let mut url = format!("{}/v1/kv/{clean_path}?raw=true", addr.trim_end_matches('/'));
+            if let Some(ref dc) = self.config.datacenter {
+                let _ = write!(url, "&dc={dc}");
+            }
+            let mut req = client.get(&url);
+            if let Some(ref tok) = self.config.token {
+                req = req.header("X-Consul-Token", tok);
+            }
+            if let Ok(resp) = req.send().await {
+                if !resp.status().is_success() {
+                    return Err(StampError::Execution(format!(
+                        "Consul KV request failed with status {}",
+                        resp.status()
+                    )));
+                }
+                let val_str = resp.text().await?;
+                return Ok(serde_json::json!({
+                    "key": clean_path,
+                    "value": val_str
+                }));
+            }
+        }
+
         Ok(serde_json::json!({
             "key": clean_path,
             "value": format!("val-for-{clean_path}")
@@ -55,7 +81,6 @@ impl DataSource for ConsulKeyDataSource {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -68,27 +93,55 @@ mod tests {
             datacenter: Some("dc1".to_string()),
         };
         assert_eq!(config.clone(), config);
-        assert_eq!(format!("{config:?}"), format!("{config:?}"));
+        assert!(format!("{config:?}").contains("ConsulKeyConfig"));
         let ds = ConsulKeyDataSource::new(config);
-        assert_eq!(format!("{ds:?}"), format!("{:?}", ds.clone()));
+        assert!(format!("{ds:?}").contains("ConsulKeyDataSource"));
+        assert_eq!(ds.clone().config.path, "test/path");
     }
 
     #[tokio::test]
-    async fn test_consul_key_success() {
+    async fn test_consul_key_success_and_http() -> Result<(), StampError> {
         let ds = ConsulKeyDataSource::new(ConsulKeyConfig {
             path: "services/db/port".to_string(),
             address: None,
             token: None,
             datacenter: None,
         });
-        let res = ds.read().await;
-        assert_eq!(
-            res.ok()
-                .as_ref()
-                .and_then(|v| v.get("value"))
-                .and_then(Value::as_str),
-            Some("val-for-services/db/port")
-        );
+        let res = ds.read().await?;
+        assert_eq!(res["value"], "val-for-services/db/port");
+
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/v1/kv/app/config?raw=true&dc=dc1")
+            .match_header("X-Consul-Token", "secret-tok")
+            .with_status(200)
+            .with_body("live-consul-val")
+            .create_async()
+            .await;
+
+        let ds_live = ConsulKeyDataSource::new(ConsulKeyConfig {
+            path: "/app/config".to_string(),
+            address: Some(server.url()),
+            token: Some("secret-tok".to_string()),
+            datacenter: Some("dc1".to_string()),
+        });
+        let live_res = ds_live.read().await?;
+        assert_eq!(live_res["value"], "live-consul-val");
+
+        let _m_err = server
+            .mock("GET", "/v1/kv/app/missing?raw=true")
+            .with_status(404)
+            .create_async()
+            .await;
+        let ds_404 = ConsulKeyDataSource::new(ConsulKeyConfig {
+            path: "app/missing".to_string(),
+            address: Some(server.url()),
+            token: None,
+            datacenter: None,
+        });
+        assert!(ds_404.read().await.is_err());
+
+        Ok(())
     }
 
     #[tokio::test]

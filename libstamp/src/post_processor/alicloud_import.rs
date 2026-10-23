@@ -23,6 +23,8 @@ pub struct AlicloudImportConfig {
     pub platform: Option<String>,
     /// Target architecture (e.g. `x86_64`, `arm64`).
     pub architecture: Option<String>,
+    /// Optional custom Alibaba Cloud ECS API endpoint override.
+    pub endpoint: Option<String>,
     /// Whether to keep the input artifact. Defaults to true.
     pub keep_input_artifact: bool,
 }
@@ -52,11 +54,40 @@ impl PostProcessor for AlicloudImportPostProcessor {
         }
 
         let region = self.config.region.as_deref().unwrap_or("cn-hangzhou");
-        let _format = self.config.format.as_deref().unwrap_or("RAW");
-        let image_id = format!(
-            "m-{region}-{}",
-            self.config.image_name.replace(' ', "-").to_lowercase()
-        );
+        let format = self.config.format.as_deref().unwrap_or("RAW");
+
+        let image_id = if let Some(ref endpoint) = self.config.endpoint {
+            let client = reqwest::Client::new();
+            let resp = client
+                .post(format!(
+                    "{}/?Action=ImportImage&RegionId={region}&ImageName={}&Format={format}",
+                    endpoint.trim_end_matches('/'),
+                    self.config.image_name
+                ))
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                return Err(StampError::PostProcessor(format!(
+                    "Alicloud ImportImage failed with status {}",
+                    resp.status()
+                )));
+            }
+            let body: serde_json::Value = resp.json().await?;
+            body["ImageId"].as_str().map_or_else(
+                || {
+                    format!(
+                        "m-{region}-{}",
+                        self.config.image_name.replace(' ', "-").to_lowercase()
+                    )
+                },
+                ToString::to_string,
+            )
+        } else {
+            format!(
+                "m-{region}-{}",
+                self.config.image_name.replace(' ', "-").to_lowercase()
+            )
+        };
 
         let mut output_files = artifact.files.clone();
         output_files.push(format!("alicloud://{region}/{image_id}"));
@@ -70,7 +101,6 @@ impl PostProcessor for AlicloudImportPostProcessor {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -85,17 +115,18 @@ mod tests {
             region: Some("cn-beijing".to_string()),
             platform: Some("Ubuntu".to_string()),
             architecture: Some("x86_64".to_string()),
+            endpoint: None,
             keep_input_artifact: true,
         };
         assert_eq!(config.clone(), config);
-        assert_eq!(format!("{config:?}"), format!("{config:?}"));
+        assert!(format!("{config:?}").contains("AlicloudImportConfig"));
         let proc = AlicloudImportPostProcessor::new(config);
-        assert_eq!(format!("{proc:?}"), format!("{:?}", proc.clone()));
-        assert!(proc.keep_input_artifact());
+        assert!(format!("{proc:?}").contains("AlicloudImportPostProcessor"));
+        assert!(proc.clone().keep_input_artifact());
     }
 
     #[tokio::test]
-    async fn test_alicloud_import_success() {
+    async fn test_alicloud_import_success_and_http() -> Result<(), StampError> {
         let proc = AlicloudImportPostProcessor::new(AlicloudImportConfig {
             image_name: "my-image".to_string(),
             region: Some("cn-hangzhou".to_string()),
@@ -106,13 +137,56 @@ mod tests {
         assert!(!proc.keep_input_artifact());
 
         let artifact = Artifact::new("art-123".to_string(), vec!["disk.raw".to_string()]);
-        let res = proc.process(artifact).await.unwrap();
+        let res = proc.process(artifact.clone()).await?;
         assert_eq!(res.id, "m-cn-hangzhou-my-image");
         assert_eq!(res.files.len(), 2);
         assert_eq!(
             res.files[1],
             "alicloud://cn-hangzhou/m-cn-hangzhou-my-image"
         );
+
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock(
+                "POST",
+                "/?Action=ImportImage&RegionId=cn-hangzhou&ImageName=my-image&Format=RAW",
+            )
+            .with_status(200)
+            .with_body(r#"{"ImageId":"m-imported-99"}"#)
+            .create_async()
+            .await;
+
+        let proc_http = AlicloudImportPostProcessor::new(AlicloudImportConfig {
+            image_name: "my-image".to_string(),
+            endpoint: Some(server.url()),
+            ..Default::default()
+        });
+        let res_http = proc_http.process(artifact.clone()).await?;
+        assert_eq!(res_http.id, "m-imported-99");
+
+        let _m_fallback = server
+            .mock(
+                "POST",
+                "/?Action=ImportImage&RegionId=cn-hangzhou&ImageName=my-image&Format=RAW",
+            )
+            .with_status(200)
+            .with_body(r"{}")
+            .create_async()
+            .await;
+        let res_fb = proc_http.process(artifact.clone()).await?;
+        assert_eq!(res_fb.id, "m-cn-hangzhou-my-image");
+
+        let _m_err = server
+            .mock(
+                "POST",
+                "/?Action=ImportImage&RegionId=cn-hangzhou&ImageName=my-image&Format=RAW",
+            )
+            .with_status(500)
+            .create_async()
+            .await;
+        assert!(proc_http.process(artifact).await.is_err());
+
+        Ok(())
     }
 
     #[tokio::test]

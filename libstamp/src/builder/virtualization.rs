@@ -1517,7 +1517,6 @@ impl KeyboardLayout {
 ///
 /// # Errors
 /// Returns `StampError::Execution` or `StampError::Io` if connection or typing fails.
-#[cfg(not(tarpaulin_include))]
 pub async fn send_spice_boot_command(
     spice_addr: &str,
     password: Option<&str>,
@@ -1551,7 +1550,6 @@ pub async fn send_spice_boot_command(
 ///
 /// # Errors
 /// Returns `StampError::Execution` or `StampError::Io` if connection or typing fails.
-#[cfg(not(tarpaulin_include))]
 pub async fn send_vnc_boot_command(
     vnc_addr: &str,
     password: Option<&str>,

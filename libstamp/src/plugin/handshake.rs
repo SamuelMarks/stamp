@@ -357,14 +357,11 @@ mod tests {
         assert_eq!(format!("{}", NetworkType::Tcp), "tcp");
         assert_eq!(format!("{}", Protocol::Grpc), "grpc");
 
-        let mut min_var = None;
-        let mut max_var = None;
+        let min_var = std::env::var(crate::plugin::handshake::PACKER_PLUGIN_MIN_PORT_ENV).ok();
+        let max_var = std::env::var(crate::plugin::handshake::PACKER_PLUGIN_MAX_PORT_ENV).ok();
 
         // This is safe if run serially or if we just want coverage
         unsafe {
-            min_var = std::env::var(crate::plugin::handshake::PACKER_PLUGIN_MIN_PORT_ENV).ok();
-            max_var = std::env::var(crate::plugin::handshake::PACKER_PLUGIN_MAX_PORT_ENV).ok();
-
             std::env::set_var(crate::plugin::handshake::PACKER_PLUGIN_MIN_PORT_ENV, "abc");
             std::env::set_var(crate::plugin::handshake::PACKER_PLUGIN_MAX_PORT_ENV, "def");
         }

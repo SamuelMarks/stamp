@@ -491,7 +491,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn test_checksum_algorithm_parsing() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_checksum_algorithm_parsing() -> Result<(), StampError> {
         assert_eq!("md5".parse::<ChecksumAlgorithm>()?, ChecksumAlgorithm::Md5);
         assert_eq!(
             "sha1".parse::<ChecksumAlgorithm>()?,
@@ -547,7 +547,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_file_hashes_and_verify() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_compute_file_hashes_and_verify() -> Result<(), StampError> {
         let dir = tempdir()?;
         let file_path = dir.path().join("test.bin");
         std::fs::write(&file_path, b"hello world")?;
@@ -577,7 +577,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cache_manager_local_file_and_locking() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_cache_manager_local_file_and_locking() -> Result<(), StampError> {
         let dir = tempdir()?;
         let cache_dir = dir.path().join("cache");
         let src_file = dir.path().join("source.iso");

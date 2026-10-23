@@ -1,4 +1,3 @@
-#![cfg(not(tarpaulin_include))]
 //! Interactive REPL console engine for Stamp.
 //!
 //! Provides an interactive environment powered by `rustyline` for querying
@@ -630,7 +629,6 @@ pub(crate) fn process_console_input(line: &str, ctx: &mut Context<'static>) -> C
 ///
 /// # Errors
 /// Returns `StampError` if editor initialization fails.
-#[cfg(not(tarpaulin_include))]
 pub fn run_console(template_path: Option<&str>, config: &ConsoleConfig) -> Result<(), StampError> {
     let (mut ctx, var_completions) = prepare_console_context(template_path, config)?;
     let helper = ConsoleHelper::new(var_completions, standard_functions());

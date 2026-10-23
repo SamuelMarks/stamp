@@ -7,6 +7,102 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
+/// A strongly-typed non-empty string.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct NonEmptyString(String);
+
+impl NonEmptyString {
+    /// Parse and validate that a string is not empty or whitespace-only.
+    ///
+    /// # Errors
+    /// Returns `StampError::InvalidType` if the string is empty or only whitespace.
+    pub fn new(value: impl Into<String>) -> Result<Self, StampError> {
+        let s = value.into();
+        if s.trim().is_empty() {
+            return Err(StampError::InvalidType(
+                "NonEmptyString cannot be empty or whitespace".to_string(),
+            ));
+        }
+        Ok(Self(s))
+    }
+
+    /// Returns a string slice of the underlying value.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for NonEmptyString {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for NonEmptyString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl FromStr for NonEmptyString {
+    type Err = StampError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::new(s)
+    }
+}
+
+/// A strongly-typed secret string that redacts its contents in `Debug` and `Display` output.
+#[derive(Clone, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub struct SecretString(pub String);
+
+impl SecretString {
+    /// Create a new `SecretString`.
+    #[must_use]
+    pub const fn new(secret: String) -> Self {
+        Self(secret)
+    }
+
+    /// Expose the underlying secret string slice.
+    #[must_use]
+    pub fn expose_secret(&self) -> &str {
+        &self.0
+    }
+
+    /// Returns `true` if the underlying secret is empty.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl fmt::Debug for SecretString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "***REDACTED***")
+    }
+}
+
+impl fmt::Display for SecretString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "***REDACTED***")
+    }
+}
+
+impl From<String> for SecretString {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for SecretString {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
 /// A strongly-typed network port.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
@@ -50,6 +146,241 @@ impl FromStr for Port {
     }
 }
 
+/// A validated inclusive network port range (`min <= max`).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct PortRange {
+    /// Minimum inclusive port.
+    min: Port,
+    /// Maximum inclusive port.
+    max: Port,
+}
+
+impl PortRange {
+    /// Create a new `PortRange`, validating that `min <= max`.
+    ///
+    /// # Errors
+    /// Returns `StampError::InvalidType` if `min > max`.
+    pub fn new(min: u16, max: u16) -> Result<Self, StampError> {
+        if min > max {
+            return Err(StampError::InvalidType(format!(
+                "invalid port range: min ({min}) > max ({max})"
+            )));
+        }
+        Ok(Self {
+            min: Port::new(min),
+            max: Port::new(max),
+        })
+    }
+
+    /// Returns the minimum port in the range.
+    #[must_use]
+    pub const fn min_port(&self) -> Port {
+        self.min
+    }
+
+    /// Returns the maximum port in the range.
+    #[must_use]
+    pub const fn max_port(&self) -> Port {
+        self.max
+    }
+
+    /// Returns the range as a `(u16, u16)` tuple.
+    #[must_use]
+    pub const fn as_tuple(&self) -> (u16, u16) {
+        (self.min.get(), self.max.get())
+    }
+}
+
+impl Default for PortRange {
+    fn default() -> Self {
+        Self {
+            min: Port::new(8000),
+            max: Port::new(9000),
+        }
+    }
+}
+
+impl fmt::Display for PortRange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}-{}", self.min, self.max)
+    }
+}
+
+/// A strongly-typed host address (either an IP address or a hostname).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum HostAddress {
+    /// An IPv4 or IPv6 address.
+    Ip(std::net::IpAddr),
+    /// A DNS hostname.
+    Hostname(NonEmptyString),
+}
+
+impl HostAddress {
+    /// Parse a host address string as either an `IpAddr` or a `NonEmptyString` hostname.
+    ///
+    /// # Errors
+    /// Returns `StampError::InvalidType` if the string is empty or whitespace.
+    pub fn parse(s: &str) -> Result<Self, StampError> {
+        let trimmed = s.trim();
+        if let Ok(ip) = trimmed.parse::<std::net::IpAddr>() {
+            Ok(Self::Ip(ip))
+        } else {
+            Ok(Self::Hostname(NonEmptyString::new(trimmed)?))
+        }
+    }
+}
+
+impl fmt::Display for HostAddress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ip(ip) => write!(f, "{ip}"),
+            Self::Hostname(h) => write!(f, "{h}"),
+        }
+    }
+}
+
+impl FromStr for HostAddress {
+    type Err = StampError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
+    }
+}
+
+/// Strongly-typed communicator protocol kind.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
+pub enum CommunicatorKind {
+    /// No communicator (`"none"`).
+    None,
+    /// SSH communicator (`"ssh"`).
+    #[default]
+    Ssh,
+    /// Windows Remote Management communicator (`"winrm"`).
+    WinRm,
+    /// Docker container communicator (`"docker"`).
+    Docker,
+    /// Podman container communicator (`"podman"`).
+    Podman,
+    /// Local chroot communicator (`"chroot"`).
+    Chroot,
+    /// AWS SSM Session Manager communicator (`"ssm"`).
+    Ssm,
+    /// gRPC proxy communicator (`"grpc-proxy"`).
+    GrpcProxy,
+    /// Mock communicator (`"mock"`).
+    Mock,
+}
+
+impl fmt::Display for CommunicatorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::None => "none",
+            Self::Ssh => "ssh",
+            Self::WinRm => "winrm",
+            Self::Docker => "docker",
+            Self::Podman => "podman",
+            Self::Chroot => "chroot",
+            Self::Ssm => "ssm",
+            Self::GrpcProxy => "grpc-proxy",
+            Self::Mock => "mock",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl FromStr for CommunicatorKind {
+    type Err = StampError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "none" => Ok(Self::None),
+            "ssh" => Ok(Self::Ssh),
+            "winrm" => Ok(Self::WinRm),
+            "docker" => Ok(Self::Docker),
+            "podman" => Ok(Self::Podman),
+            "chroot" => Ok(Self::Chroot),
+            "ssm" => Ok(Self::Ssm),
+            "grpc-proxy" | "grpc_proxy" => Ok(Self::GrpcProxy),
+            "mock" => Ok(Self::Mock),
+            other => Err(StampError::InvalidType(format!(
+                "unknown communicator kind '{other}'"
+            ))),
+        }
+    }
+}
+
+/// Strongly-typed disk/appliance image export format.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
+pub enum ExportFormat {
+    /// QEMU Copy-On-Write v2 (`"qcow2"`).
+    #[default]
+    Qcow2,
+    /// Raw disk image (`"raw"`).
+    Raw,
+    /// VMware Virtual Machine Disk (`"vmdk"`).
+    Vmdk,
+    /// VirtualBox Disk Image (`"vdi"`).
+    Vdi,
+    /// Hyper-V Virtual Hard Disk (`"vhd"`).
+    Vhd,
+    /// Hyper-V Virtual Hard Disk v2 (`"vhdx"`).
+    Vhdx,
+    /// Open Virtual Appliance archive (`"ova"`).
+    Ova,
+    /// Open Virtualization Format directory/descriptor (`"ovf"`).
+    Ovf,
+    /// Tar archive (`"tar"`).
+    Tar,
+    /// Vagrant box archive (`"box"`).
+    Box,
+}
+
+impl fmt::Display for ExportFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::Qcow2 => "qcow2",
+            Self::Raw => "raw",
+            Self::Vmdk => "vmdk",
+            Self::Vdi => "vdi",
+            Self::Vhd => "vhd",
+            Self::Vhdx => "vhdx",
+            Self::Ova => "ova",
+            Self::Ovf => "ovf",
+            Self::Tar => "tar",
+            Self::Box => "box",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl FromStr for ExportFormat {
+    type Err = StampError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "qcow2" => Ok(Self::Qcow2),
+            "raw" | "img" => Ok(Self::Raw),
+            "vmdk" => Ok(Self::Vmdk),
+            "vdi" => Ok(Self::Vdi),
+            "vhd" => Ok(Self::Vhd),
+            "vhdx" => Ok(Self::Vhdx),
+            "ova" => Ok(Self::Ova),
+            "ovf" => Ok(Self::Ovf),
+            "tar" => Ok(Self::Tar),
+            "box" => Ok(Self::Box),
+            other => Err(StampError::InvalidType(format!(
+                "unknown export format '{other}'"
+            ))),
+        }
+    }
+}
+
 /// A strongly-typed timeout duration.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
@@ -88,25 +419,25 @@ impl FromStr for Timeout {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let trimmed = s.trim();
-        if let Some(ms_str) = trimmed.strip_suffix("ms") {
-            if let Ok(ms) = ms_str.parse::<u64>() {
-                return Ok(Self(Duration::from_millis(ms)));
-            }
+        if let Some(ms_str) = trimmed.strip_suffix("ms")
+            && let Ok(ms) = ms_str.parse::<u64>()
+        {
+            return Ok(Self(Duration::from_millis(ms)));
         }
-        if let Some(s_str) = trimmed.strip_suffix('s') {
-            if let Ok(secs) = s_str.parse::<u64>() {
-                return Ok(Self(Duration::from_secs(secs)));
-            }
+        if let Some(s_str) = trimmed.strip_suffix('s')
+            && let Ok(secs) = s_str.parse::<u64>()
+        {
+            return Ok(Self(Duration::from_secs(secs)));
         }
-        if let Some(m_str) = trimmed.strip_suffix('m') {
-            if let Ok(mins) = m_str.parse::<u64>() {
-                return Ok(Self(Duration::from_secs(mins * 60)));
-            }
+        if let Some(m_str) = trimmed.strip_suffix('m')
+            && let Ok(mins) = m_str.parse::<u64>()
+        {
+            return Ok(Self(Duration::from_secs(mins * 60)));
         }
-        if let Some(h_str) = trimmed.strip_suffix('h') {
-            if let Ok(hours) = h_str.parse::<u64>() {
-                return Ok(Self(Duration::from_secs(hours * 3600)));
-            }
+        if let Some(h_str) = trimmed.strip_suffix('h')
+            && let Ok(hours) = h_str.parse::<u64>()
+        {
+            return Ok(Self(Duration::from_secs(hours * 3600)));
         }
         if let Ok(secs) = trimmed.parse::<u64>() {
             return Ok(Self(Duration::from_secs(secs)));
@@ -526,6 +857,58 @@ impl FromStr for CpuCount {
     }
 }
 
+/// A strongly-typed disk size in Megabytes.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct DiskSizeMb(pub u64);
+
+impl DiskSizeMb {
+    /// Create a new `DiskSizeMb`.
+    #[must_use]
+    pub const fn new(size_mb: u64) -> Self {
+        Self(size_mb)
+    }
+
+    /// Convert the disk size to bytes.
+    #[must_use]
+    pub const fn to_bytes(&self) -> u64 {
+        self.0 * 1024 * 1024
+    }
+
+    /// Retrieve the underlying megabyte count.
+    #[must_use]
+    pub const fn get(&self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for DiskSizeMb {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}MB", self.0)
+    }
+}
+
+impl FromStr for DiskSizeMb {
+    type Err = StampError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.parse::<u64>()
+            .map(Self)
+            .map_err(|e| StampError::InvalidType(format!("invalid disk size MB '{s}': {e}")))
+    }
+}
+
 /// A strongly-typed disk size in Gigabytes.
 #[derive(
     Debug,
@@ -802,12 +1185,37 @@ impl FromStr for Sha512Checksum {
 }
 
 #[cfg(test)]
-#[allow(clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_port() -> Result<(), StampError> {
+    fn test_non_empty_string() -> Result<(), StampError> {
+        let s = NonEmptyString::new("hello")?;
+        assert_eq!(s.as_str(), "hello");
+        assert_eq!(s.as_ref(), "hello");
+        assert_eq!(s.to_string(), "hello");
+        assert_eq!(NonEmptyString::from_str("world")?.as_str(), "world");
+        assert!(NonEmptyString::new("").is_err());
+        assert!(NonEmptyString::new("   ").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_secret_string() {
+        let sec = SecretString::new("super-secret".to_string());
+        assert_eq!(sec.expose_secret(), "super-secret");
+        assert!(!sec.is_empty());
+        assert_eq!(format!("{sec:?}"), "***REDACTED***");
+        assert_eq!(format!("{sec}"), "***REDACTED***");
+
+        let from_str_ref = SecretString::from("s1");
+        let from_string = SecretString::from("s1".to_string());
+        assert_eq!(from_str_ref, from_string);
+        assert!(SecretString::default().is_empty());
+    }
+
+    #[test]
+    fn test_port_and_port_range() -> Result<(), StampError> {
         let port = Port::new(8080);
         assert_eq!(port.get(), 8080);
         let port_clone = port;
@@ -816,11 +1224,68 @@ mod tests {
         assert_eq!(Port::default().get(), 22);
         assert_eq!(Port::from_str("9090")?.get(), 9090);
         assert!(Port::from_str("invalid").is_err());
+
+        let range = PortRange::new(8000, 8100)?;
+        assert_eq!(range.min_port().get(), 8000);
+        assert_eq!(range.max_port().get(), 8100);
+        assert_eq!(range.as_tuple(), (8000, 8100));
+        assert_eq!(range.to_string(), "8000-8100");
+        assert_eq!(PortRange::default().as_tuple(), (8000, 9000));
+        assert!(PortRange::new(9000, 8000).is_err());
         Ok(())
     }
 
     #[test]
-    fn test_timeout() {
+    fn test_host_address_communicator_and_export_format() -> Result<(), StampError> {
+        let ip_host = HostAddress::from_str("127.0.0.1")?;
+        assert_eq!(ip_host.to_string(), "127.0.0.1");
+        let dns_host = HostAddress::parse("example.com")?;
+        assert_eq!(dns_host.to_string(), "example.com");
+        assert!(HostAddress::parse("   ").is_err());
+
+        assert_eq!(CommunicatorKind::default(), CommunicatorKind::Ssh);
+        for (input, expected, display_str) in [
+            ("none", CommunicatorKind::None, "none"),
+            ("ssh", CommunicatorKind::Ssh, "ssh"),
+            ("winrm", CommunicatorKind::WinRm, "winrm"),
+            ("docker", CommunicatorKind::Docker, "docker"),
+            ("podman", CommunicatorKind::Podman, "podman"),
+            ("chroot", CommunicatorKind::Chroot, "chroot"),
+            ("ssm", CommunicatorKind::Ssm, "ssm"),
+            ("grpc-proxy", CommunicatorKind::GrpcProxy, "grpc-proxy"),
+            ("grpc_proxy", CommunicatorKind::GrpcProxy, "grpc-proxy"),
+            ("mock", CommunicatorKind::Mock, "mock"),
+        ] {
+            let parsed = CommunicatorKind::from_str(input)?;
+            assert_eq!(parsed, expected);
+            assert_eq!(parsed.to_string(), display_str);
+        }
+        assert!(CommunicatorKind::from_str("unknown").is_err());
+
+        assert_eq!(ExportFormat::default(), ExportFormat::Qcow2);
+        for (input, expected, display_str) in [
+            ("qcow2", ExportFormat::Qcow2, "qcow2"),
+            ("raw", ExportFormat::Raw, "raw"),
+            ("img", ExportFormat::Raw, "raw"),
+            ("vmdk", ExportFormat::Vmdk, "vmdk"),
+            ("vdi", ExportFormat::Vdi, "vdi"),
+            ("vhd", ExportFormat::Vhd, "vhd"),
+            ("vhdx", ExportFormat::Vhdx, "vhdx"),
+            ("ova", ExportFormat::Ova, "ova"),
+            ("ovf", ExportFormat::Ovf, "ovf"),
+            ("tar", ExportFormat::Tar, "tar"),
+            ("box", ExportFormat::Box, "box"),
+        ] {
+            let parsed = ExportFormat::from_str(input)?;
+            assert_eq!(parsed, expected);
+            assert_eq!(parsed.to_string(), display_str);
+        }
+        assert!(ExportFormat::from_str("unknown").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_timeout() -> Result<(), StampError> {
         let duration = Duration::from_secs(30);
         let timeout = Timeout::new(duration);
         assert_eq!(timeout.get(), duration);
@@ -828,6 +1293,16 @@ mod tests {
         assert_eq!(timeout, timeout_clone);
         assert_eq!(timeout.to_string(), "30s");
         assert_eq!(Timeout::default().get(), Duration::from_secs(30));
+        assert_eq!(
+            Timeout::from_str("500ms")?.get(),
+            Duration::from_millis(500)
+        );
+        assert_eq!(Timeout::from_str("10s")?.get(), Duration::from_secs(10));
+        assert_eq!(Timeout::from_str("2m")?.get(), Duration::from_secs(120));
+        assert_eq!(Timeout::from_str("1h")?.get(), Duration::from_secs(3600));
+        assert_eq!(Timeout::from_str("45")?.get(), Duration::from_secs(45));
+        assert!(Timeout::from_str("invalid").is_err());
+        Ok(())
     }
 
     #[test]
@@ -857,19 +1332,18 @@ mod tests {
     #[test]
     fn test_ami_id_invalid() {
         assert!(AmiId::parse("not-an-ami").is_err());
-        assert!(AmiId::parse("ami-123").is_err()); // too short
-        assert!(AmiId::parse("ami-123456789012345678").is_err()); // too long
-        assert!(AmiId::parse("ami-1234567z").is_err()); // non-hex
+        assert!(AmiId::parse("ami-123").is_err());
+        assert!(AmiId::parse("ami-123456789012345678").is_err());
+        assert!(AmiId::parse("ami-1234567z").is_err());
     }
 
     #[test]
-    fn test_ipv4_cidr() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_ipv4_cidr() -> Result<(), StampError> {
         let cidr = Ipv4Cidr::parse("192.168.1.0/24")?;
         assert_eq!(cidr.to_string(), "192.168.1.0/24");
         assert_eq!(Ipv4Cidr::from_str("10.0.0.0/8")?.get().prefix_len(), 8);
         assert!(Ipv4Cidr::parse("invalid").is_err());
 
-        // Serde roundtrip
         let json = serde_json::to_string(&cidr)?;
         let decoded: Ipv4Cidr = serde_json::from_str(&json)?;
         assert_eq!(cidr, decoded);
@@ -877,13 +1351,12 @@ mod tests {
     }
 
     #[test]
-    fn test_ipv6_cidr() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_ipv6_cidr() -> Result<(), StampError> {
         let cidr = Ipv6Cidr::parse("2001:db8::/32")?;
         assert_eq!(cidr.to_string(), "2001:db8::/32");
         assert_eq!(Ipv6Cidr::from_str("fe80::/64")?.get().prefix_len(), 64);
         assert!(Ipv6Cidr::parse("invalid").is_err());
 
-        // Serde roundtrip
         let json = serde_json::to_string(&cidr)?;
         let decoded: Ipv6Cidr = serde_json::from_str(&json)?;
         assert_eq!(cidr, decoded);
@@ -894,7 +1367,7 @@ mod tests {
     fn test_mac_address() -> Result<(), StampError> {
         let valid_colon = "00:1a:2b:3c:4d:5e";
         let valid_hyphen = "00-1A-2B-3C-4D-5E";
-        let mac1 = MacAddress::parse(valid_colon)?;
+        let mac1 = MacAddress::from_str(valid_colon)?;
         let mac2 = MacAddress::parse(valid_hyphen)?;
         assert_eq!(mac1.octets(), [0x00, 0x1a, 0x2b, 0x3c, 0x4d, 0x5e]);
         assert_eq!(mac1, mac2);
@@ -941,7 +1414,14 @@ mod tests {
     }
 
     #[test]
-    fn test_disk_size_gb() -> Result<(), StampError> {
+    fn test_disk_size_mb_and_gb() -> Result<(), StampError> {
+        let disk_mb = DiskSizeMb::new(1024);
+        assert_eq!(disk_mb.get(), 1024);
+        assert_eq!(disk_mb.to_bytes(), 1024 * 1024 * 1024);
+        assert_eq!(disk_mb.to_string(), "1024MB");
+        assert_eq!(DiskSizeMb::from_str("2048")?.get(), 2048);
+        assert!(DiskSizeMb::from_str("invalid").is_err());
+
         let disk = DiskSizeGb::new(50);
         assert_eq!(disk.get(), 50);
         assert_eq!(disk.to_bytes(), 50 * 1024 * 1024 * 1024);
@@ -976,8 +1456,8 @@ mod tests {
     }
 
     #[test]
-    fn test_semver_constraint() -> Result<(), Box<dyn std::error::Error>> {
-        let constraint = SemVerConstraint::parse(">= 1.2.0, < 2.0.0")?;
+    fn test_semver_constraint() -> Result<(), StampError> {
+        let constraint = SemVerConstraint::from_str(">= 1.2.0, < 2.0.0")?;
         assert_eq!(constraint.to_string(), ">=1.2.0, <2.0.0");
 
         let v1 = semver::Version::parse("1.5.0")?;
@@ -992,7 +1472,6 @@ mod tests {
 
         assert!(SemVerConstraint::parse("invalid-semver-req").is_err());
 
-        // Serde roundtrip
         let json = serde_json::to_string(&constraint)?;
         let decoded: SemVerConstraint = serde_json::from_str(&json)?;
         assert_eq!(constraint, decoded);
@@ -1002,26 +1481,26 @@ mod tests {
     #[test]
     fn test_sha256_checksum() -> Result<(), StampError> {
         let hex64 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-        let c = Sha256Checksum::parse(hex64)?;
+        let c = Sha256Checksum::from_str(hex64)?;
         assert_eq!(c.as_str(), hex64);
         assert_eq!(c.to_string(), hex64);
 
         assert!(Sha256Checksum::parse("too-short").is_err());
-        assert!(Sha256Checksum::parse(&format!("{hex64}0")).is_err()); // 65 chars
-        assert!(Sha256Checksum::parse(&hex64.replace('0', "z")).is_err()); // non-hex
+        assert!(Sha256Checksum::parse(&format!("{hex64}0")).is_err());
+        assert!(Sha256Checksum::parse(&hex64.replace('0', "z")).is_err());
         Ok(())
     }
 
     #[test]
     fn test_sha512_checksum() -> Result<(), StampError> {
         let hex128 = "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e";
-        let c = Sha512Checksum::parse(hex128)?;
+        let c = Sha512Checksum::from_str(hex128)?;
         assert_eq!(c.as_str(), hex128);
         assert_eq!(c.to_string(), hex128);
 
         assert!(Sha512Checksum::parse("too-short").is_err());
-        assert!(Sha512Checksum::parse(&format!("{hex128}0")).is_err()); // 129 chars
-        assert!(Sha512Checksum::parse(&hex128.replace('0', "z")).is_err()); // non-hex
+        assert!(Sha512Checksum::parse(&format!("{hex128}0")).is_err());
+        assert!(Sha512Checksum::parse(&hex128.replace('0', "z")).is_err());
         Ok(())
     }
 }

@@ -56,6 +56,7 @@ impl MtlsCertificates {
         let ca_cert = ca_params
             .self_signed(&ca_key)
             .map_err(|e| StampError::Execution(format!("CA self-signing failed: {e}")))?;
+        let ca_issuer = rcgen::Issuer::from_params(&ca_params, &ca_key);
         let ca_cert_pem = ca_cert.pem();
 
         // 2. Generate Server Certificate signed by CA
@@ -75,7 +76,7 @@ impl MtlsCertificates {
         let server_key = KeyPair::generate()
             .map_err(|e| StampError::Execution(format!("Server keypair generation failed: {e}")))?;
         let server_cert = server_params
-            .signed_by(&server_key, &ca_cert, &ca_key)
+            .signed_by(&server_key, &ca_issuer)
             .map_err(|e| StampError::Execution(format!("Server signing failed: {e}")))?;
         let server_cert_pem = server_cert.pem();
         let server_key_pem = server_key.serialize_pem();
@@ -93,7 +94,7 @@ impl MtlsCertificates {
         let client_key = KeyPair::generate()
             .map_err(|e| StampError::Execution(format!("Client keypair generation failed: {e}")))?;
         let client_cert = client_params
-            .signed_by(&client_key, &ca_cert, &ca_key)
+            .signed_by(&client_key, &ca_issuer)
             .map_err(|e| StampError::Execution(format!("Client signing failed: {e}")))?;
         let client_cert_pem = client_cert.pem();
         let client_key_pem = client_key.serialize_pem();

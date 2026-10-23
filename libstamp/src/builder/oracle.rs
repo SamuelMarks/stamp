@@ -10,7 +10,6 @@ use rsa::RsaPrivateKey;
 use rsa::pkcs1::DecodeRsaPrivateKey;
 use rsa::pkcs1v15::Pkcs1v15Sign;
 use rsa::pkcs8::DecodePrivateKey;
-use rsa::traits::SignatureScheme;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt::Write;
@@ -110,13 +109,8 @@ content-length: {}",
     hasher.update(signing_string.as_bytes());
     let signature_digest = hasher.finalize();
 
-    let signing_scheme = Pkcs1v15Sign::new_unprefixed();
-    let signature = signing_scheme
-        .sign(
-            Option::<&mut rsa::rand_core::OsRng>::None,
-            &rsa_key,
-            &signature_digest,
-        )
+    let signature = rsa_key
+        .sign(Pkcs1v15Sign::new_unprefixed(), &signature_digest)
         .unwrap_or_default();
 
     let b64_sig = base64::engine::general_purpose::STANDARD.encode(signature);

@@ -777,19 +777,19 @@ pub fn find_vmware_tools_iso(flavor: Option<&VmwareToolsFlavor>) -> Option<PathB
 ///
 /// Returns `StampError::Builder` if `vmrun` fails.
 pub async fn run_vmrun(args: &[&str]) -> Result<String, StampError> {
-    run_vmrun_with_cmd(vmrun_binary(), args).await
+    let bin = vmrun_binary();
+    run_vmrun_with_cmd(&bin, args).await
 }
 
-#[cfg(not(test))]
-/// Resolves the default `vmrun` binary name for production execution.
-fn vmrun_binary() -> &'static str {
-    "vmrun"
-}
-
-#[cfg(test)]
-/// Resolves the mock `echo` binary name during unit tests.
+/// Resolves the `vmrun` binary path, checking `VMRUN_PATH` environment variable first.
 fn vmrun_binary() -> String {
-    std::env::var("VMRUN_PATH").unwrap_or_else(|_| "echo".to_string())
+    std::env::var("VMRUN_PATH").unwrap_or_else(|_| {
+        if cfg!(test) {
+            "echo".to_string()
+        } else {
+            "vmrun".to_string()
+        }
+    })
 }
 
 /// Execute a specific command as `vmrun` driver.
@@ -1131,7 +1131,8 @@ pub async fn discover_guest_ip_internal(
     driver: VmwareDriver,
     extra_lease_paths: &[&Path],
 ) -> Result<String, StampError> {
-    discover_guest_ip_with_cmd(vmrun_binary(), vmx_path, driver, extra_lease_paths).await
+    let bin = vmrun_binary();
+    discover_guest_ip_with_cmd(&bin, vmx_path, driver, extra_lease_paths).await
 }
 
 /// Discover the guest IP address with custom command and optional extra lease search paths.
@@ -1322,11 +1323,9 @@ version=1
             &vmx_data,
         );
 
-        if !cfg!(test) {
-            tokio::fs::write(&vmx_path, vmx_content.as_bytes())
-                .await
-                .map_err(StampError::Io)?;
-        }
+        tokio::fs::write(&vmx_path, vmx_content.as_bytes())
+            .await
+            .map_err(StampError::Io)?;
 
         Ok(StepAction::Continue)
     }
@@ -1469,12 +1468,6 @@ impl Step for StepProvision {
     async fn run(&mut self, state: &mut StateBag) -> Result<StepAction, StampError> {
         self.ui.say(&self.name, "Provisioning VMware VM...");
 
-        if let Some(handle) =
-            state.get::<crate::builder::http_server::HttpServerHandle>("http_server_handle")
-        {
-            handle.abort();
-        }
-
         let ip = state.get::<String>("vm_ip").cloned().unwrap_or_default();
         let comm_type = self.config.communicator.as_deref().unwrap_or("ssh");
 
@@ -1533,7 +1526,18 @@ impl Step for StepProvision {
                 .hook
                 .run_error_cleanup_provisioners(comm, &build_ctx, self.ui.clone())
                 .await;
+            if let Some(handle) =
+                state.get::<crate::builder::http_server::HttpServerHandle>("http_server_handle")
+            {
+                handle.abort();
+            }
             return Err(e);
+        }
+
+        if let Some(handle) =
+            state.get::<crate::builder::http_server::HttpServerHandle>("http_server_handle")
+        {
+            handle.abort();
         }
 
         Ok(StepAction::Continue)

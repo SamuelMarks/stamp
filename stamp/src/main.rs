@@ -1,4 +1,3 @@
-#![cfg(not(tarpaulin_include))]
 #![deny(missing_docs)]
 #![deny(clippy::missing_docs_in_private_items)]
 #![deny(clippy::unwrap_used, clippy::expect_used)]

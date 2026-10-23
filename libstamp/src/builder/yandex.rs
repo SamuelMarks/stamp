@@ -334,16 +334,18 @@ impl YandexClient {
     pub async fn create_image(
         &self,
         iam_token: &str,
-        folder_id: &str,
+        config: &YandexConfig,
         source_disk_id: Option<&str>,
         source_snapshot_id: Option<&str>,
-        name: &str,
-        family: Option<&str>,
-        description: Option<&str>,
     ) -> Result<String, StampError> {
         if cfg!(test) {
             return Ok(format!("fd8{}", uuid::Uuid::new_v4().simple()));
         }
+
+        let folder_id = config.folder_id.as_deref().unwrap_or("b1gmockfolder");
+        let name = config.image_name.as_deref().unwrap_or(&config.name);
+        let family = config.image_family.as_deref();
+        let description = config.image_description.as_deref();
 
         let client = reqwest::Client::new();
         let mut payload = serde_json::json!({
@@ -616,16 +618,13 @@ impl Step for StepCaptureYandexImage {
             .client
             .create_image(
                 &token,
-                folder,
+                &self.config,
                 if snapshot_id.is_none() {
                     Some(&disk_id)
                 } else {
                     None
                 },
                 snapshot_id.as_deref(),
-                image_name,
-                self.config.image_family.as_deref(),
-                self.config.image_description.as_deref(),
             )
             .await?;
 
@@ -759,6 +758,9 @@ mod tests {
             folder_id: Some("folder-1".to_string()),
             zone: Some("ru-central1-b".to_string()),
             source_image_family: Some("ubuntu-2204-lts".to_string()),
+            image_name: Some("my-image".to_string()),
+            image_family: Some("ubuntu-custom".to_string()),
+            image_description: Some("Custom base image".to_string()),
             cores: Some(2),
             memory_gb: Some(4),
             disk_size_gb: Some(30),
@@ -778,15 +780,7 @@ mod tests {
         assert!(snap_id.starts_with("snap-"));
 
         let img_id = client
-            .create_image(
-                &token,
-                "folder-1",
-                None,
-                Some(&snap_id),
-                "my-image",
-                Some("ubuntu-custom"),
-                Some("Custom base image"),
-            )
+            .create_image(&token, &config, None, Some(&snap_id))
             .await?;
         assert!(img_id.starts_with("fd8"));
 

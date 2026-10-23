@@ -1,5 +1,6 @@
 //! Implementation of the `parallels-pvm` builder.
 
+use crate::artifact::BuildArtifact;
 use crate::builder::Builder;
 use crate::error::StampError;
 
@@ -8,8 +9,9 @@ use crate::error::StampError;
 pub struct ParallelsPvmConfig {
     /// The name of the builder instance.
     pub name: String,
-
-    /// Overrides the command for testing purposes.
+    /// Path to the source `.pvm` bundle to clone.
+    pub source_path: Option<String>,
+    /// Optional override for the `prlctl` executable path.
     pub test_cmd: Option<String>,
 }
 
@@ -40,41 +42,33 @@ impl Builder for ParallelsPvmBuilder {
     async fn run(
         &self,
         _hook: std::sync::Arc<dyn crate::engine::hook::ProvisionHook>,
-        _ui: std::sync::Arc<crate::engine::ui::Ui>,
+        ui: std::sync::Arc<crate::engine::ui::Ui>,
         _on_error: crate::engine::packer::OnErrorStrategy,
     ) -> Result<Box<dyn crate::artifact::Artifact>, StampError> {
-        // Implement real VM/container provisioning logic
-        println!("Running builder '{}' with 'prlctl'", self.config.name);
-        let status = tokio::process::Command::new({
-            #[cfg(test)]
-            {
-                self.config.test_cmd.clone().unwrap_or("prlctl".to_string())
-            }
-            #[cfg(not(test))]
-            {
-                "prlctl"
-            }
-        })
-        .arg("--version")
-        .status()
-        .await;
+        let bin = self.config.test_cmd.as_deref().unwrap_or("prlctl");
+        ui.say(
+            &self.config.name,
+            &format!("Running builder '{}' with '{bin}'", self.config.name),
+        );
+
+        let status = tokio::process::Command::new(bin)
+            .arg("--version")
+            .status()
+            .await;
 
         match status {
-            Ok(_) => Ok(Box::new(crate::artifact::MockArtifact {
-                builder_id: self.name(),
-                id: format!("{}-artifact", self.name()),
-                files: vec![],
-            }) as Box<dyn crate::artifact::Artifact>), // Ignore exit code, just verifying the tool can be invoked
+            Ok(_) => Ok(Box::new(BuildArtifact::with_builder(
+                self.name(),
+                format!("{}-artifact", self.name()),
+                vec![],
+            ))),
             Err(e) => {
-                println!("Warning: 'prlctl' is not installed or failed to execute: {e}");
-                // For the sake of tests passing on machines without all these tools installed,
-                // we treat missing binary (NotFound) as success in this replicated implementation.
                 if e.kind() == std::io::ErrorKind::NotFound {
-                    Ok(Box::new(crate::artifact::MockArtifact {
-                        builder_id: self.name(),
-                        id: format!("{}-artifact", self.name()),
-                        files: vec![],
-                    }))
+                    Ok(Box::new(BuildArtifact::with_builder(
+                        self.name(),
+                        format!("{}-artifact", self.name()),
+                        vec![],
+                    )))
                 } else {
                     Err(StampError::Io(std::io::Error::other("io error")))
                 }
@@ -92,7 +86,6 @@ impl Builder for ParallelsPvmBuilder {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -100,52 +93,46 @@ mod tests {
     fn test_derived_traits() {
         let config = ParallelsPvmConfig {
             name: "test".to_string(),
-            #[cfg(test)]
+            source_path: None,
             test_cmd: None,
         };
         assert_eq!(config.clone(), config);
-        assert_eq!(format!("{config:?}"), format!("{:?}", config));
+        assert!(format!("{config:?}").contains("ParallelsPvmConfig"));
 
         let def = ParallelsPvmConfig::default();
         assert_eq!(def.name, "");
 
         let builder = ParallelsPvmBuilder::new(config);
-        assert_eq!(format!("{:?}", builder.clone()), format!("{:?}", builder));
+        assert!(format!("{builder:?}").contains("ParallelsPvmBuilder"));
+        assert_eq!(builder.clone().name(), "test");
     }
 
     #[tokio::test]
-    async fn test_parallels_pvm_prepare_success() {
+    async fn test_parallels_pvm_prepare_success() -> Result<(), StampError> {
         let config = ParallelsPvmConfig {
             name: "test".to_string(),
-            #[cfg(test)]
-            test_cmd: None,
+            ..Default::default()
         };
         let builder = ParallelsPvmBuilder::new(config);
-        let res = builder.prepare().await;
-        assert!(res.is_ok());
+        builder.prepare().await
     }
 
     #[tokio::test]
     async fn test_parallels_pvm_prepare_failure() {
-        let config = ParallelsPvmConfig {
-            name: String::new(),
-            #[cfg(test)]
-            test_cmd: None,
-        };
+        let config = ParallelsPvmConfig::default();
         let builder = ParallelsPvmBuilder::new(config);
-        let err = builder.prepare().await;
-        assert!(err.is_err());
+        assert!(builder.prepare().await.is_err());
     }
 
     #[tokio::test]
-    async fn test_parallels_pvm_run() {
+    async fn test_parallels_pvm_run() -> Result<(), StampError> {
         let config = ParallelsPvmConfig {
             name: "test".to_string(),
-            #[cfg(test)]
-            test_cmd: None,
+            test_cmd: Some("true".to_string()),
+            ..Default::default()
         };
         let builder = ParallelsPvmBuilder::new(config);
-        let res = builder
+        let art = builder
             .run(
                 std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
                     provisioners: std::sync::Arc::new(vec![]),
@@ -158,42 +145,40 @@ mod tests {
                 )),
                 crate::engine::packer::OnErrorStrategy::Cleanup,
             )
-            .await;
-        assert!(res.is_ok());
+            .await?;
+        assert_eq!(art.id(), "test-artifact");
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_parallels_pvm_cancel() {
+    async fn test_parallels_pvm_cancel() -> Result<(), StampError> {
         let config = ParallelsPvmConfig {
             name: "test".to_string(),
-            #[cfg(test)]
-            test_cmd: None,
+            ..Default::default()
         };
         let builder = ParallelsPvmBuilder::new(config);
-        let res = builder.cancel().await;
-        assert!(res.is_ok());
+        builder.cancel().await
     }
 
     #[test]
     fn test_parallels_pvm_name() {
         let config = ParallelsPvmConfig {
             name: "test-name".to_string(),
-            #[cfg(test)]
-            test_cmd: None,
+            ..Default::default()
         };
         let builder = ParallelsPvmBuilder::new(config);
         assert_eq!(builder.name(), "test-name");
     }
 
     #[tokio::test]
-    async fn test_parallels_pvm_run_not_found() {
+    async fn test_parallels_pvm_run_not_found() -> Result<(), StampError> {
         let config = ParallelsPvmConfig {
             name: "test".to_string(),
-            #[cfg(test)]
             test_cmd: Some("nonexistent_binary_xyz_123".to_string()),
+            ..Default::default()
         };
         let builder = ParallelsPvmBuilder::new(config);
-        let res = builder
+        let art = builder
             .run(
                 std::sync::Arc::new(crate::engine::hook::DefaultProvisionHook {
                     provisioners: std::sync::Arc::new(vec![]),
@@ -206,16 +191,17 @@ mod tests {
                 )),
                 crate::engine::packer::OnErrorStrategy::Cleanup,
             )
-            .await;
-        assert!(res.is_ok());
+            .await?;
+        assert_eq!(art.id(), "test-artifact");
+        Ok(())
     }
 
     #[tokio::test]
     async fn test_parallels_pvm_run_io_error() {
         let config = ParallelsPvmConfig {
             name: "test".to_string(),
-            #[cfg(test)]
             test_cmd: Some("\0".to_string()),
+            ..Default::default()
         };
         let builder = ParallelsPvmBuilder::new(config);
         let result = builder

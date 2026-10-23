@@ -113,14 +113,14 @@ impl PostProcessor for GoPluginPostProcessor {
                     )));
                 }
 
-                return Ok(Artifact {
-                    id: if resp.artifact_id.is_empty() {
+                return Ok(Artifact::new(
+                    if resp.artifact_id.is_empty() {
                         artifact.id
                     } else {
                         resp.artifact_id
                     },
-                    files: resp.files,
-                });
+                    resp.files,
+                ));
             }
         }
 

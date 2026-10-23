@@ -13,6 +13,174 @@ pub fn docker_executable() -> String {
 /// Mutex for synchronizing tests that mutate environment variables.
 pub static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// RAII guard for setting or removing an environment variable while holding [`ENV_MUTEX`]
+/// or restoring its prior value on drop.
+#[derive(Debug)]
+pub struct ScopedEnvVar {
+    /// The environment variable name.
+    key: String,
+    /// The previous value before modification, if any.
+    previous: Option<std::ffi::OsString>,
+}
+
+impl ScopedEnvVar {
+    /// Sets an environment variable to `value` and restores its previous state when dropped.
+    #[must_use]
+    pub fn set(key: impl Into<String>, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let key_str = key.into();
+        let previous = std::env::var_os(&key_str);
+        unsafe {
+            std::env::set_var(&key_str, value);
+        }
+        Self {
+            key: key_str,
+            previous,
+        }
+    }
+
+    /// Removes an environment variable and restores its previous state when dropped.
+    #[must_use]
+    pub fn remove(key: impl Into<String>) -> Self {
+        let key_str = key.into();
+        let previous = std::env::var_os(&key_str);
+        unsafe {
+            std::env::remove_var(&key_str);
+        }
+        Self {
+            key: key_str,
+            previous,
+        }
+    }
+}
+
+impl Drop for ScopedEnvVar {
+    fn drop(&mut self) {
+        unsafe {
+            if let Some(ref prev) = self.previous {
+                std::env::set_var(&self.key, prev);
+            } else {
+                std::env::remove_var(&self.key);
+            }
+        }
+    }
+}
+
+/// Output captured from a subprocess execution via [`CommandRunner`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CommandOutput {
+    /// Exit status code of the process.
+    pub exit_code: i32,
+    /// Standard output string.
+    pub stdout: String,
+    /// Standard error string.
+    pub stderr: String,
+}
+
+/// Abstraction for executing external subprocesses, enabling deterministic unit testing
+/// without `if cfg!(test)` branches or host-specific binaries.
+#[async_trait::async_trait]
+pub trait CommandRunner: Send + Sync + std::fmt::Debug {
+    /// Execute `program` with `args` and optional `env` variables, returning [`CommandOutput`].
+    async fn run_command(
+        &self,
+        program: &str,
+        args: &[&str],
+        env: Option<&HashMap<String, String>>,
+    ) -> Result<CommandOutput, crate::error::StampError>;
+}
+
+/// Production [`CommandRunner`] that spawns OS subprocesses via `tokio::process::Command`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RealCommandRunner;
+
+#[async_trait::async_trait]
+impl CommandRunner for RealCommandRunner {
+    async fn run_command(
+        &self,
+        program: &str,
+        args: &[&str],
+        env: Option<&HashMap<String, String>>,
+    ) -> Result<CommandOutput, crate::error::StampError> {
+        let mut cmd = tokio::process::Command::new(program);
+        cmd.args(args);
+        if let Some(vars) = env {
+            cmd.envs(vars);
+        }
+        let output = cmd.output().await.map_err(crate::error::StampError::Io)?;
+        Ok(CommandOutput {
+            exit_code: output.status.code().unwrap_or(1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
+}
+
+/// Recorded command invocation entry `(program, args)`.
+pub type CommandInvocation = (String, Vec<String>);
+
+/// Canned command response entry `(pattern, result)`.
+pub type CommandResponse = (String, Result<CommandOutput, String>);
+
+/// Configurable mock [`CommandRunner`] for testing subprocess drivers without spawning real binaries.
+#[derive(Debug, Clone, Default)]
+pub struct MockCommandRunner {
+    /// Recorded invocations of `(program, args)`.
+    pub invocations: std::sync::Arc<std::sync::Mutex<Vec<CommandInvocation>>>,
+    /// Canned responses keyed by substring match on program or arguments.
+    pub responses: std::sync::Arc<std::sync::Mutex<Vec<CommandResponse>>>,
+    /// Default output when no canned response matches.
+    pub default_output: CommandOutput,
+}
+
+impl MockCommandRunner {
+    /// Create a new `MockCommandRunner` that succeeds with exit code 0 by default.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a canned response when the full command line (`program + args`) contains `pattern`.
+    pub fn on_pattern(&self, pattern: impl Into<String>, response: Result<CommandOutput, String>) {
+        if let Ok(mut guard) = self.responses.lock() {
+            guard.push((pattern.into(), response));
+        }
+    }
+
+    /// Returns a snapshot of all recorded `(program, args)` invocations.
+    #[must_use]
+    pub fn recorded_invocations(&self) -> Vec<CommandInvocation> {
+        self.invocations
+            .lock()
+            .map_or_else(|e| e.into_inner().clone(), |g| g.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl CommandRunner for MockCommandRunner {
+    async fn run_command(
+        &self,
+        program: &str,
+        args: &[&str],
+        _env: Option<&HashMap<String, String>>,
+    ) -> Result<CommandOutput, crate::error::StampError> {
+        let arg_vec: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+        let full_line = format!("{program} {}", arg_vec.join(" "));
+        if let Ok(mut guard) = self.invocations.lock() {
+            guard.push((program.to_string(), arg_vec));
+        }
+        let responses = self
+            .responses
+            .lock()
+            .map_or_else(|e| e.into_inner().clone(), |g| g.clone());
+        for (pattern, outcome) in responses {
+            if full_line.contains(&pattern) {
+                return outcome.map_err(crate::error::StampError::Execution);
+            }
+        }
+        Ok(self.default_output.clone())
+    }
+}
+
 /// Helper to parse variable file content (supporting both JSON and HCL formats).
 fn parse_var_content(content: &str, vars: &mut HashMap<String, String>) {
     if let Ok(parsed) = serde_json::from_str::<HashMap<String, serde_json::Value>>(content) {
@@ -152,7 +320,7 @@ pub async fn get_or_download_cached(
     let cache_dir = packer_cache_dir();
     std::fs::create_dir_all(&cache_dir)?;
 
-    let filename = format!("{:x}", sha2::Sha256::digest(source_url.as_bytes()));
+    let filename = hex::encode(sha2::Sha256::digest(source_url.as_bytes()));
     let cached_file = cache_dir.join(&filename);
     let lock_file_path = cache_dir.join(format!("{filename}.lock"));
 
@@ -368,6 +536,32 @@ pub fn init_packer_logging() -> Result<Option<String>, crate::error::StampError>
     Ok(Some(log_level.to_string()))
 }
 
+/// Maps any displayable error to a `tonic::Status` internal error.
+pub(crate) fn map_status_internal(e: impl std::fmt::Display) -> tonic::Status {
+    tonic::Status::internal(e.to_string())
+}
+
+/// Maps any displayable error to a Stream output execution error.
+pub(crate) fn map_exec_err_stream(e: impl std::fmt::Display) -> crate::error::StampError {
+    crate::error::StampError::Execution(format!("Failed to stream command: {e}"))
+}
+
+/// Maps any displayable error to a Chunk output execution error.
+pub(crate) fn map_exec_err_chunk(e: impl std::fmt::Display) -> crate::error::StampError {
+    crate::error::StampError::Execution(format!("Execute stream chunk error: {e}"))
+}
+
+/// Maps any displayable error to a `DownloadChunk` output execution error.
+pub(crate) fn map_exec_err_dl_chunk(e: impl std::fmt::Display) -> crate::error::StampError {
+    crate::error::StampError::Execution(format!("Download stream chunk error: {e}"))
+}
+
+/// Maps any displayable error to an `UploadChunk` output execution error.
+#[allow(dead_code)]
+pub(crate) fn map_exec_err_up_chunk(e: impl std::fmt::Display) -> crate::error::StampError {
+    crate::error::StampError::Execution(format!("Upload stream chunk error: {e}"))
+}
+
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]
 mod tests {
@@ -399,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    fn test_load_variables_with_precedence() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_load_variables_with_precedence() -> Result<(), crate::error::StampError> {
         let _guard = ENV_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -457,7 +651,7 @@ mod tests {
     }
 
     #[test]
-    fn test_load_variables_edge_cases() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_load_variables_edge_cases() -> Result<(), crate::error::StampError> {
         let _guard = ENV_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -502,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn test_packer_config_path() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_packer_config_path() -> Result<(), crate::error::StampError> {
         let _guard = ENV_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -580,7 +774,7 @@ mod tests {
     }
 
     #[test]
-    fn test_packer_config_dir() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_packer_config_dir() -> Result<(), crate::error::StampError> {
         let _guard = ENV_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -613,7 +807,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_or_download_cached_and_clean() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_get_or_download_cached_and_clean() -> Result<(), crate::error::StampError> {
         use sha2::Digest as _;
         let _guard = ENV_MUTEX
             .lock()
@@ -629,39 +823,33 @@ mod tests {
         std::fs::write(&source_file, b"ISO_CONTENT_12345")?;
         let expected_sha256 = hex::encode(sha2::Sha256::digest(b"ISO_CONTENT_12345"));
 
-        let source_path_str = match source_file.to_str() {
-            Some(s) => s,
-            None => return Err("Invalid path string".into()),
-        };
+        let source_path_str = source_file.to_string_lossy();
 
-        let cached = get_or_download_cached(source_path_str, Some(&expected_sha256)).await?;
+        let cached = get_or_download_cached(&source_path_str, Some(&expected_sha256)).await?;
         assert!(cached.exists());
 
         // 2. Re-read from cache with checksum
-        let cached2 = get_or_download_cached(source_path_str, Some(&expected_sha256)).await?;
+        let cached2 = get_or_download_cached(&source_path_str, Some(&expected_sha256)).await?;
         assert_eq!(cached, cached2);
 
         // 3. Re-read from cache without checksum
-        let cached3 = get_or_download_cached(source_path_str, None).await?;
+        let cached3 = get_or_download_cached(&source_path_str, None).await?;
         assert_eq!(cached, cached3);
 
         // 4. Local file without checksum
         let other_file = temp_dir.path().join("other.bin");
         std::fs::write(&other_file, b"OTHER_DATA")?;
-        let other_path_str = match other_file.to_str() {
-            Some(s) => s,
-            None => return Err("Invalid path string".into()),
-        };
-        let other_cached = get_or_download_cached(other_path_str, None).await?;
+        let other_path_str = other_file.to_string_lossy();
+        let other_cached = get_or_download_cached(&other_path_str, None).await?;
         assert!(other_cached.exists());
 
         // 5. Checksum mismatch on local file
-        let bad_checksum = get_or_download_cached(source_path_str, Some("bad_hash")).await;
+        let bad_checksum = get_or_download_cached(&source_path_str, Some("bad_hash")).await;
         assert!(bad_checksum.is_err());
 
         // 6. Cache file corrupted (mismatch causes removal and re-fetching)
         std::fs::write(&cached, b"CORRUPTED_CACHE")?;
-        let re_cached = get_or_download_cached(source_path_str, Some(&expected_sha256)).await?;
+        let re_cached = get_or_download_cached(&source_path_str, Some(&expected_sha256)).await?;
         assert_eq!(re_cached, cached);
 
         // 7. Clean cache
@@ -685,7 +873,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_or_download_cached_http() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_get_or_download_cached_http() -> Result<(), crate::error::StampError> {
         use sha2::Digest as _;
         let _guard = ENV_MUTEX
             .lock()
@@ -760,22 +948,19 @@ mod tests {
     }
 
     #[test]
-    fn test_init_packer_logging() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_init_packer_logging() -> Result<(), crate::error::StampError> {
         let _guard = ENV_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let temp_dir = tempfile::tempdir()?;
         let temp_log = temp_dir.path().join("test_packer_log.log");
-        let temp_log_str = match temp_log.to_str() {
-            Some(s) => s,
-            None => return Err("Invalid path string".into()),
-        };
+        let temp_log_str = temp_log.to_string_lossy().to_string();
 
         // 1. "1" level
         unsafe {
             std::env::set_var("PACKER_LOG", "1");
-            std::env::set_var("PACKER_LOG_PATH", temp_log_str);
+            std::env::set_var("PACKER_LOG_PATH", &temp_log_str);
         }
         let lvl = init_packer_logging()?;
         assert_eq!(lvl.as_deref(), Some("DEBUG"));
@@ -820,35 +1005,78 @@ mod tests {
 
         Ok(())
     }
-}
 
-#[cfg(not(tarpaulin_include))]
-/// Maps any displayable error to a tonic::Status internal error.
-pub(crate) fn map_status_internal(e: impl std::fmt::Display) -> tonic::Status {
-    tonic::Status::internal(e.to_string())
-}
+    #[tokio::test]
+    async fn test_scoped_env_var_and_command_runners() -> Result<(), crate::error::StampError> {
+        {
+            let _guard = ENV_MUTEX
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _v1 = ScopedEnvVar::set("STAMP_SCOPED_TEST_VAR", "val1");
+            assert_eq!(
+                std::env::var("STAMP_SCOPED_TEST_VAR").ok().as_deref(),
+                Some("val1")
+            );
+            {
+                let _v2 = ScopedEnvVar::set("STAMP_SCOPED_TEST_VAR", "val2");
+                assert_eq!(
+                    std::env::var("STAMP_SCOPED_TEST_VAR").ok().as_deref(),
+                    Some("val2")
+                );
+                let _v3 = ScopedEnvVar::remove("STAMP_SCOPED_TEST_VAR");
+                assert!(std::env::var("STAMP_SCOPED_TEST_VAR").is_err());
+            }
+            assert_eq!(
+                std::env::var("STAMP_SCOPED_TEST_VAR").ok().as_deref(),
+                Some("val1")
+            );
+        }
+        assert!(std::env::var("STAMP_SCOPED_TEST_VAR").is_err());
 
-#[cfg(not(tarpaulin_include))]
-/// Maps any displayable error to a Stream output execution error.
-pub(crate) fn map_exec_err_stream(e: impl std::fmt::Display) -> crate::error::StampError {
-    crate::error::StampError::Execution(format!("Failed to stream command: {e}"))
-}
+        let real = RealCommandRunner;
+        let mut env_map = HashMap::new();
+        env_map.insert("STAMP_CHILD_ENV".to_string(), "hello".to_string());
+        let out = real
+            .run_command("echo", &["hello-runner"], Some(&env_map))
+            .await?;
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stdout.contains("hello-runner"));
 
-#[cfg(not(tarpaulin_include))]
-/// Maps any displayable error to a Chunk output execution error.
-pub(crate) fn map_exec_err_chunk(e: impl std::fmt::Display) -> crate::error::StampError {
-    crate::error::StampError::Execution(format!("Execute stream chunk error: {e}"))
-}
+        let mock = MockCommandRunner::new();
+        mock.on_pattern(
+            "custom-tool --fail",
+            Err("simulated tool failure".to_string()),
+        );
+        let ok_out = mock.run_command("custom-tool", &["--ok"], None).await?;
+        assert_eq!(ok_out.exit_code, 0);
+        assert!(
+            mock.run_command("custom-tool", &["--fail"], None)
+                .await
+                .is_err()
+        );
+        assert_eq!(mock.recorded_invocations().len(), 2);
 
-#[cfg(not(tarpaulin_include))]
-/// Maps any displayable error to a DownloadChunk output execution error.
-pub(crate) fn map_exec_err_dl_chunk(e: impl std::fmt::Display) -> crate::error::StampError {
-    crate::error::StampError::Execution(format!("Download stream chunk error: {e}"))
-}
-
-#[cfg(not(tarpaulin_include))]
-/// Maps any displayable error to an UploadChunk output execution error.
-#[allow(dead_code)]
-pub(crate) fn map_exec_err_up_chunk(e: impl std::fmt::Display) -> crate::error::StampError {
-    crate::error::StampError::Execution(format!("Upload stream chunk error: {e}"))
+        assert_eq!(map_status_internal("err").message(), "err");
+        assert!(
+            map_exec_err_stream("err")
+                .to_string()
+                .contains("Failed to stream command: err")
+        );
+        assert!(
+            map_exec_err_chunk("err")
+                .to_string()
+                .contains("Execute stream chunk error: err")
+        );
+        assert!(
+            map_exec_err_dl_chunk("err")
+                .to_string()
+                .contains("Download stream chunk error: err")
+        );
+        assert!(
+            map_exec_err_up_chunk("err")
+                .to_string()
+                .contains("Upload stream chunk error: err")
+        );
+        Ok(())
+    }
 }

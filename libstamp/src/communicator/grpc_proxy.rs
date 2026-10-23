@@ -452,7 +452,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_grpc_proxy_struct_traits() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_grpc_proxy_struct_traits() -> Result<(), StampError> {
         let endpoint = "http://127.0.0.1:50051".to_string();
         let channel =
             tonic::transport::Channel::from_static("http://127.0.0.1:50051").connect_lazy();
@@ -477,7 +477,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_grpc_dead_channel_errors() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_grpc_dead_channel_errors() -> Result<(), StampError> {
         let channel = tonic::transport::Channel::from_static("http://127.0.0.1:1").connect_lazy();
         let proxy = GrpcCommunicatorProxy::new("http://127.0.0.1:1".to_string(), channel);
         let cmd = Command::new("ls".to_string());
@@ -495,7 +495,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_grpc_server_empty_command_stream() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_grpc_server_empty_command_stream() -> Result<(), StampError> {
         let mock_comm = Arc::new(MockCommunicator::default());
         let server = GrpcCommunicatorServer::new(mock_comm);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -518,8 +518,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_grpc_communicator_execute_upload_download()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_grpc_communicator_execute_upload_download() -> Result<(), StampError> {
         let mock_comm = Arc::new(MockCommunicator::default());
         let server = GrpcCommunicatorServer::new(mock_comm.clone());
 
@@ -585,8 +584,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_grpc_communicator_empty_and_large_download()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_grpc_communicator_empty_and_large_download() -> Result<(), StampError> {
         // Test empty download
         let empty_comm = Arc::new(ConfigurableCommunicator {
             payload: Vec::new(),
@@ -649,7 +647,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_grpc_communicator_failing_paths() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_grpc_communicator_failing_paths() -> Result<(), StampError> {
         let failing_comm = Arc::new(FailingCommunicator);
         let server = GrpcCommunicatorServer::new(failing_comm);
 

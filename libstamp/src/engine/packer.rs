@@ -1,5 +1,3 @@
-#![cfg(not(tarpaulin_include))]
-
 //! Packer concurrent build engine.
 
 use crate::error::StampError;
@@ -695,7 +693,7 @@ pub fn fmt_file(template_path: &str, config: &FmtConfig) -> Result<(), StampErro
         serde_json::to_string_pretty(&parsed).map_err(|e| StampError::Parse(e.to_string()))?
     } else {
         hashicorp_configuration_language_rs::serde::from_str::<serde_json::Value>(&content)
-            .map_err(|e| StampError::Parse(e.clone()))?;
+            .map_err(|e| StampError::Parse(e.to_string()))?;
         crate::engine::fmt::format_hcl_canonical(&content)
     };
 

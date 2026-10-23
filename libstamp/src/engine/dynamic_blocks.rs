@@ -1,5 +1,3 @@
-#![cfg(not(tarpaulin_include))]
-
 //! Dynamic Block Expander delegating directly to `hashicorp_configuration_language_rs`.
 
 use crate::error::StampError;
@@ -26,7 +24,6 @@ pub fn expand_dynamic_blocks(body: &mut Body, ctx: &Context) -> Result<(), Stamp
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
     use hashicorp_configuration_language_rs::parse::parser::Parser;
@@ -82,7 +79,7 @@ mod tests {
     }
 
     #[test]
-    fn test_expand_dynamic_blocks_missing_for_each() -> Result<(), crate::error::StampError> {
+    fn test_expand_dynamic_blocks_missing_for_each() -> Result<(), StampError> {
         let input = r#"
             dynamic "test" {
                 content {}
@@ -90,15 +87,12 @@ mod tests {
         "#;
         let mut parser = Parser::new(input);
         let _body = parser.parse_body();
-
-        let err = crate::error::StampError::Parse(format!("{:?}", parser.errors()));
-        assert!(err.to_string().contains("Missing required argument"));
-
+        assert!(format!("{:?}", parser.errors()).contains("Missing required argument"));
         Ok(())
     }
 
     #[test]
-    fn test_expand_dynamic_blocks_missing_content() -> Result<(), crate::error::StampError> {
+    fn test_expand_dynamic_blocks_missing_content() -> Result<(), StampError> {
         let input = r#"
             dynamic "test" {
                 for_each = []
@@ -106,15 +100,12 @@ mod tests {
         "#;
         let mut parser = Parser::new(input);
         let _body = parser.parse_body();
-
-        let err = crate::error::StampError::Parse(format!("{:?}", parser.errors()));
-        assert!(err.to_string().contains("Missing required block"));
-
+        assert!(format!("{:?}", parser.errors()).contains("Missing required block"));
         Ok(())
     }
 
     #[test]
-    fn test_expand_dynamic_blocks_invalid_labels() -> Result<(), crate::error::StampError> {
+    fn test_expand_dynamic_blocks_invalid_labels() -> Result<(), StampError> {
         let input = r#"
             dynamic "test" "extra" {
                 for_each = []
@@ -123,15 +114,12 @@ mod tests {
         "#;
         let mut parser = Parser::new(input);
         let _body = parser.parse_body();
-
-        let err = crate::error::StampError::Parse(format!("{:?}", parser.errors()));
-        assert!(err.to_string().contains("Block opening brace expected"));
-
+        assert!(format!("{:?}", parser.errors()).contains("Block opening brace expected"));
         Ok(())
     }
 
     #[test]
-    fn test_expand_dynamic_blocks_not_collection() -> Result<(), crate::error::StampError> {
+    fn test_expand_dynamic_blocks_not_collection() {
         let input = r#"
             dynamic "test" {
                 for_each = "string"
@@ -142,16 +130,14 @@ mod tests {
         let mut body = parser.parse_body();
 
         let ctx = Context::new();
-        let err = expand_dynamic_blocks(&mut body, &ctx).unwrap_err();
+        let res = expand_dynamic_blocks(&mut body, &ctx);
         assert!(
-            matches!(err, StampError::Validation(msg) if msg.contains("must be a list, set, or map"))
+            matches!(res, Err(StampError::Validation(msg)) if msg.contains("must be a list, set, or map"))
         );
-
-        Ok(())
     }
 
     #[test]
-    fn test_expand_dynamic_blocks_invalid_dynamic_labels() -> Result<(), crate::error::StampError> {
+    fn test_expand_dynamic_blocks_invalid_dynamic_labels() {
         let input = r#"
             dynamic "test" {
                 for_each = ["item"]
@@ -163,16 +149,14 @@ mod tests {
         let mut body = parser.parse_body();
 
         let ctx = Context::new();
-        let err = expand_dynamic_blocks(&mut body, &ctx).unwrap_err();
+        let res = expand_dynamic_blocks(&mut body, &ctx);
         assert!(
-            matches!(err, StampError::Validation(msg) if msg.contains("must evaluate to a string or number"))
+            matches!(res, Err(StampError::Validation(msg)) if msg.contains("must evaluate to a string or number"))
         );
-
-        Ok(())
     }
 
     #[test]
-    fn test_expand_dynamic_blocks_invalid_labels_type() -> Result<(), crate::error::StampError> {
+    fn test_expand_dynamic_blocks_invalid_labels_type() -> Result<(), StampError> {
         let input = r#"
             dynamic "test" {
                 for_each = []
@@ -182,10 +166,7 @@ mod tests {
         "#;
         let mut parser = Parser::new(input);
         let _body = parser.parse_body();
-
-        let err = crate::error::StampError::Parse(format!("{:?}", parser.errors()));
-        assert!(err.to_string().contains("Invalid labels argument"));
-
+        assert!(format!("{:?}", parser.errors()).contains("Invalid labels argument"));
         Ok(())
     }
 }

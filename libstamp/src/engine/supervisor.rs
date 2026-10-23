@@ -229,14 +229,10 @@ impl SupervisedPlugin {
             NetworkType::Unix => {
                 #[cfg(unix)]
                 {
-                    let path = self.handshake.address.clone();
-                    tonic::transport::Endpoint::try_from("http://[::]:50051")
+                    let uri = format!("unix:{}", self.handshake.address);
+                    tonic::transport::Endpoint::from_shared(uri)
                         .map_err(|e| StampError::Execution(format!("Invalid endpoint: {e}")))?
-                        .connect_with_connector(tower::service_fn(
-                            move |_: tonic::transport::Uri| {
-                                tokio::net::UnixStream::connect(path.clone())
-                            },
-                        ))
+                        .connect()
                         .await
                         .map_err(|e| {
                             StampError::Execution(format!(
@@ -471,14 +467,10 @@ impl PluginSupervisor {
             NetworkType::Unix => {
                 #[cfg(unix)]
                 {
-                    let path = endpoint.to_string();
-                    let channel = tonic::transport::Endpoint::try_from("http://[::]:50051")
+                    let uri = format!("unix:{endpoint}");
+                    let channel = tonic::transport::Endpoint::from_shared(uri)
                         .map_err(|e| StampError::Execution(format!("Invalid endpoint: {e}")))?
-                        .connect_with_connector(tower::service_fn(
-                            move |_: tonic::transport::Uri| {
-                                tokio::net::UnixStream::connect(path.clone())
-                            },
-                        ))
+                        .connect()
                         .await
                         .map_err(|e| {
                             StampError::Execution(format!("Healthcheck Unix connect error: {e}"))

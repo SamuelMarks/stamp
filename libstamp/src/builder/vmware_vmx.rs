@@ -327,42 +327,16 @@ impl Builder for VmwareVmxBuilder {
 
         let mut runner = Runner::new(steps);
         let mut state = StateBag::new();
-        match runner.run(&mut state).await {
-            Ok(()) => {
-                runner.cleanup(&state).await;
-            }
-            Err(e) => {
-                match on_error {
-                    crate::engine::packer::OnErrorStrategy::Cleanup => {
-                        runner.cleanup(&state).await;
-                    }
-                    crate::engine::packer::OnErrorStrategy::Abort
-                    | crate::engine::packer::OnErrorStrategy::RunCleanupProvisioner => {}
-                    crate::engine::packer::OnErrorStrategy::Ask => {
-                        let msg = format!(
-                            "Build '{}' errored: {}
-Do you want to clean up? [y/N]: ",
-                            self.name(),
-                            e
-                        );
-                        if let Ok(ans) = ui.ask("stamp", &msg)
-                            && (ans == "y" || ans == "yes")
-                        {
-                            runner.cleanup(&state).await;
-                        }
-                    }
-                }
-                return Err(e);
-            }
-        }
+        runner
+            .run_with_strategy(&mut state, &self.name(), &ui, on_error)
+            .await?;
 
         let vmx_path = state.get::<String>("vmx_path").cloned().unwrap_or_default();
-
-        Ok(Box::new(crate::artifact::MockArtifact {
-            builder_id: self.name(),
-            id: format!("vmware-vmx:{vmx_path}"),
-            files: vec![],
-        }))
+        Ok(Box::new(crate::artifact::BuildArtifact::with_builder(
+            self.name(),
+            format!("vmware-vmx:{vmx_path}"),
+            vec![],
+        )))
     }
 
     async fn cancel(&self) -> Result<(), StampError> {
@@ -375,7 +349,6 @@ Do you want to clean up? [y/N]: ",
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
     use crate::engine::hook::DefaultProvisionHook;
@@ -383,7 +356,8 @@ mod tests {
     use crate::engine::ui::Ui;
 
     #[tokio::test]
-    async fn test_vmwarevmxbuilder_run() {
+    async fn test_vmwarevmxbuilder_run() -> Result<(), StampError> {
+        let temp_dir = tempfile::tempdir()?;
         let mut vmx_data = HashMap::new();
         vmx_data.insert("custom.vmx".to_string(), "val".to_string());
 
@@ -391,7 +365,13 @@ mod tests {
             name: "test-builder".to_string(),
             source_path: Some("source.vmx".to_string()),
             vm_name: Some("test-vm".to_string()),
-            output_directory: Some("custom-vmware-out".to_string()),
+            output_directory: Some(
+                temp_dir
+                    .path()
+                    .join("custom-vmware-out")
+                    .to_string_lossy()
+                    .to_string(),
+            ),
             vmx_data,
             driver: VmwareDriver::Govc,
             export_format: Some("ova".to_string()),
@@ -399,7 +379,7 @@ mod tests {
         };
         let builder = VmwareVmxBuilder::new(config.clone());
 
-        assert!(builder.prepare().await.is_ok());
+        builder.prepare().await?;
         assert_eq!(builder.name(), "test-builder");
 
         let hook = Arc::new(DefaultProvisionHook {
@@ -414,19 +394,20 @@ mod tests {
 
         let res = builder
             .run(hook.clone(), ui.clone(), OnErrorStrategy::Cleanup)
-            .await;
-        assert!(
-            res.as_ref()
-                .map(|a| a.id())
-                .ok()
-                .unwrap_or_default()
-                .contains("test-vm.vmx")
-        );
-        assert!(builder.cancel().await.is_ok());
+            .await?;
+        assert!(res.id().contains("test-vm.vmx"));
+        builder.cancel().await?;
 
-        // Default run without export_format, output_directory, vm_name
+        // Default run without export_format, vm_name
         let b_default = VmwareVmxBuilder::new(VmwareVmxConfig {
             name: "default-vmx".to_string(),
+            output_directory: Some(
+                temp_dir
+                    .path()
+                    .join("output-vmware-vmx")
+                    .to_string_lossy()
+                    .to_string(),
+            ),
             ..Default::default()
         });
         let res_default = b_default
@@ -441,13 +422,13 @@ mod tests {
             name: "test".to_string(),
             hook,
         };
-        assert!(prov_step.run(&mut empty_state).await.is_ok());
+        prov_step.run(&mut empty_state).await?;
 
         let mut state = StateBag::new();
         state.put("vm_ip", "10.0.0.1".to_string());
         state.put("vmx_path", "/tmp/vm.vmx".to_string());
         state.put("ssh_port", 2222u16);
-        assert!(prov_step.run(&mut state).await.is_ok());
+        prov_step.run(&mut state).await?;
         prov_step.cleanup(&state).await;
 
         let mut export_ovf = StepExportVmx {
@@ -455,10 +436,17 @@ mod tests {
             name: "test".to_string(),
             config: VmwareVmxConfig {
                 export_format: Some("ovf".to_string()),
+                output_directory: Some(
+                    temp_dir
+                        .path()
+                        .join("ovf-out")
+                        .to_string_lossy()
+                        .to_string(),
+                ),
                 ..Default::default()
             },
         };
-        assert!(export_ovf.run(&mut state).await.is_ok());
+        export_ovf.run(&mut state).await?;
         export_ovf.cleanup(&state).await;
 
         let mut export_invalid = StepExportVmx {
@@ -469,14 +457,14 @@ mod tests {
                 ..Default::default()
             },
         };
-        assert!(export_invalid.run(&mut state).await.is_ok());
+        export_invalid.run(&mut state).await?;
 
         let mut export_none = StepExportVmx {
             ui: ui.clone(),
             name: "test".to_string(),
             config: VmwareVmxConfig::default(),
         };
-        assert!(export_none.run(&mut state).await.is_ok());
+        export_none.run(&mut state).await?;
 
         let mut clone_step = StepCloneVM {
             ui: ui.clone(),
@@ -497,6 +485,7 @@ mod tests {
             name: "test".to_string(),
         };
         shutdown_step.cleanup(&state).await;
+        Ok(())
     }
 
     #[test]

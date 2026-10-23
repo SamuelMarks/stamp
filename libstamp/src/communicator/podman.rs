@@ -22,6 +22,8 @@ pub struct PodmanConfig {
     pub remote_socket: Option<String>,
     /// Operation timeout.
     pub timeout: Timeout,
+    /// Path or name of the Podman CLI executable (defaults to `"podman"`).
+    pub executable: String,
 }
 
 impl PodmanConfig {
@@ -35,7 +37,15 @@ impl PodmanConfig {
             rootless: true,
             remote_socket: None,
             timeout: Timeout::new(Duration::from_secs(60)),
+            executable: "podman".to_string(),
         }
+    }
+
+    /// Sets a custom executable path for invoking Podman.
+    #[must_use]
+    pub fn with_executable(mut self, executable: impl Into<String>) -> Self {
+        self.executable = executable.into();
+        self
     }
 }
 
@@ -107,20 +117,8 @@ impl Communicator for PodmanCommunicator {
             ));
         }
 
-        let cmd_name = if cfg!(test) {
-            if cmd.command.contains("fail_cmd") {
-                "false"
-            } else if cmd.command.contains("missing_binary") {
-                "nonexistent_podman_binary_12345"
-            } else {
-                "true"
-            }
-        } else {
-            "podman"
-        };
-
         let args = self.build_exec_args(&cmd.command);
-        let output = tokio::process::Command::new(cmd_name)
+        let output = tokio::process::Command::new(&self.config.executable)
             .args(&args)
             .output()
             .await
@@ -142,21 +140,9 @@ impl Communicator for PodmanCommunicator {
         local_path: &FilePath,
         remote_path: &FilePath,
     ) -> Result<(), StampError> {
-        let cmd_name = if cfg!(test) {
-            if std::env::var("PODMAN_MOCK_SPAWN_FAIL").is_ok() {
-                "/nonexistent/podman/bin"
-            } else if std::env::var("PODMAN_MOCK_FAIL").is_ok() {
-                "/usr/bin/false"
-            } else {
-                "/usr/bin/true"
-            }
-        } else {
-            "podman"
-        };
-
         let target_dest = format!("{}:{}", self.config.container_id, remote_path.0.display());
         let args = self.build_cp_args(&local_path.0.to_string_lossy(), &target_dest);
-        let status = tokio::process::Command::new(cmd_name)
+        let status = tokio::process::Command::new(&self.config.executable)
             .args(&args)
             .status()
             .await
@@ -178,21 +164,9 @@ impl Communicator for PodmanCommunicator {
         remote_path: &FilePath,
         local_path: &FilePath,
     ) -> Result<(), StampError> {
-        let cmd_name = if cfg!(test) {
-            if std::env::var("PODMAN_MOCK_SPAWN_FAIL").is_ok() {
-                "/nonexistent/podman/bin"
-            } else if std::env::var("PODMAN_MOCK_FAIL").is_ok() {
-                "/usr/bin/false"
-            } else {
-                "/usr/bin/true"
-            }
-        } else {
-            "podman"
-        };
-
         let source = format!("{}:{}", self.config.container_id, remote_path.0.display());
         let args = self.build_cp_args(&source, &local_path.0.to_string_lossy());
-        let status = tokio::process::Command::new(cmd_name)
+        let status = tokio::process::Command::new(&self.config.executable)
             .args(&args)
             .status()
             .await
@@ -211,7 +185,6 @@ impl Communicator for PodmanCommunicator {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
@@ -225,11 +198,14 @@ mod tests {
             rootless: true,
             remote_socket: None,
             timeout: Timeout::new(Duration::from_secs(30)),
+            executable: "podman".to_string(),
         };
-        assert_eq!(config.clone(), config);
-        assert_eq!(format!("{config:?}"), format!("{config:?}"));
+        let cloned = config.clone();
+        assert_eq!(config, cloned);
+        assert!(format!("{config:?}").contains("test-cnt"));
         let comm = PodmanCommunicator::new(config);
-        assert_eq!(format!("{comm:?}"), format!("{:?}", comm.clone()));
+        assert!(format!("{comm:?}").contains("PodmanCommunicator"));
+        assert_eq!(comm.clone().config.container_id, "test-cnt");
     }
 
     #[test]
@@ -252,23 +228,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_podman_execute_success() {
-        let comm = PodmanCommunicator::new(PodmanConfig::new("c1"));
+    async fn test_podman_execute_success() -> Result<(), StampError> {
+        let comm = PodmanCommunicator::new(PodmanConfig::new("c1").with_executable("true"));
         let res = comm
             .execute(&Command::new("echo hello".to_string()))
-            .await
-            .expect("execute");
+            .await?;
         assert_eq!(res.exit_code, 0);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_podman_execute_failure() {
-        let comm = PodmanCommunicator::new(PodmanConfig::new("c1"));
-        let res = comm
-            .execute(&Command::new("fail_cmd".to_string()))
-            .await
-            .expect("execute fail");
+    async fn test_podman_execute_failure() -> Result<(), StampError> {
+        let comm = PodmanCommunicator::new(PodmanConfig::new("c1").with_executable("false"));
+        let res = comm.execute(&Command::new("fail_cmd".to_string())).await?;
         assert_ne!(res.exit_code, 0);
+        Ok(())
     }
 
     #[tokio::test]
@@ -279,51 +253,41 @@ mod tests {
 
     #[tokio::test]
     async fn test_podman_execute_missing_binary() {
-        let comm = PodmanCommunicator::new(PodmanConfig::new("c1"));
-        assert!(
-            comm.execute(&Command::new("missing_binary".to_string()))
-                .await
-                .is_err()
+        let comm = PodmanCommunicator::new(
+            PodmanConfig::new("c1").with_executable("/nonexistent/podman_binary_12345"),
         );
+        assert!(comm.execute(&Command::new("ls".to_string())).await.is_err());
     }
 
     #[tokio::test]
-    async fn test_podman_upload_and_download() {
-        let comm = PodmanCommunicator::new(PodmanConfig::new("c1"));
+    async fn test_podman_upload_and_download() -> Result<(), StampError> {
         let local_path = FilePath::new(PathBuf::from("/tmp/test_local.txt"));
         let remote_path = FilePath::new(PathBuf::from("/tmp/test_remote.txt"));
 
-        let up_res = comm.upload(&local_path, &remote_path).await;
-        assert!(up_res.is_ok());
+        let comm_ok = PodmanCommunicator::new(PodmanConfig::new("c1").with_executable("true"));
+        comm_ok.upload(&local_path, &remote_path).await?;
+        comm_ok.download(&remote_path, &local_path).await?;
 
-        let down_res = comm.download(&remote_path, &local_path).await;
-        assert!(down_res.is_ok());
+        let comm_fail = PodmanCommunicator::new(PodmanConfig::new("c1").with_executable("false"));
+        assert!(comm_fail.upload(&local_path, &remote_path).await.is_err());
+        assert!(comm_fail.download(&remote_path, &local_path).await.is_err());
 
-        // Test upload and download failures (status code)
-        unsafe {
-            std::env::set_var("PODMAN_MOCK_FAIL", "1");
-        }
-        let fail_up = comm.upload(&local_path, &remote_path).await;
-        assert!(fail_up.is_err());
-
-        let fail_down = comm.download(&remote_path, &local_path).await;
-        assert!(fail_down.is_err());
-        unsafe {
-            std::env::remove_var("PODMAN_MOCK_FAIL");
-        }
-
-        // Test upload and download failures (spawn failure)
-        unsafe {
-            std::env::set_var("PODMAN_MOCK_SPAWN_FAIL", "1");
-        }
-        let spawn_fail_up = comm.upload(&local_path, &remote_path).await;
-        assert!(spawn_fail_up.is_err());
-
-        let spawn_fail_down = comm.download(&remote_path, &local_path).await;
-        assert!(spawn_fail_down.is_err());
-        unsafe {
-            std::env::remove_var("PODMAN_MOCK_SPAWN_FAIL");
-        }
+        let comm_spawn_fail = PodmanCommunicator::new(
+            PodmanConfig::new("c1").with_executable("/nonexistent/podman/bin"),
+        );
+        assert!(
+            comm_spawn_fail
+                .upload(&local_path, &remote_path)
+                .await
+                .is_err()
+        );
+        assert!(
+            comm_spawn_fail
+                .download(&remote_path, &local_path)
+                .await
+                .is_err()
+        );
+        Ok(())
     }
 
     #[test]

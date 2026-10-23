@@ -15,6 +15,8 @@ pub struct DigitaloceanImportConfig {
     pub image_url: Option<String>,
     /// `DigitalOcean` API personal access token.
     pub api_token: Option<String>,
+    /// Optional custom `DigitalOcean` API base URL override (e.g. for mock servers).
+    pub api_url: Option<String>,
     /// Target regions where the image will be available. Defaults to `["nyc3"]`.
     pub regions: Vec<String>,
     /// Operating system distribution (e.g., Ubuntu, Debian, `CentOS`, Fedora, Arch, FreeBSD).
@@ -75,22 +77,14 @@ impl PostProcessor for DigitaloceanImportPostProcessor {
             ));
         };
 
-        let token = self
-            .config
-            .api_token
-            .clone()
-            .or_else(|| std::env::var("DIGITALOCEAN_TOKEN").ok())
-            .unwrap_or_default();
+        if let Some(ref base_url) = self.config.api_url {
+            let token = self
+                .config
+                .api_token
+                .clone()
+                .or_else(|| std::env::var("DIGITALOCEAN_TOKEN").ok())
+                .unwrap_or_default();
 
-        #[cfg(test)]
-        {
-            let _ = (image_name, regions, image_url, token);
-            artifact.id = format!("do-image-{}", self.config.identifier);
-            return Ok(artifact);
-        }
-
-        #[cfg(not(test))]
-        {
             if token.is_empty() {
                 return Err(StampError::Provisioner(
                     "DigitalOcean API token is required".to_string(),
@@ -108,7 +102,10 @@ impl PostProcessor for DigitaloceanImportPostProcessor {
             });
 
             let res = client
-                .post("https://api.digitalocean.com/v2/images/custom")
+                .post(format!(
+                    "{}/v2/images/custom",
+                    base_url.trim_end_matches('/')
+                ))
                 .bearer_auth(token)
                 .json(&body)
                 .send()
@@ -134,8 +131,11 @@ impl PostProcessor for DigitaloceanImportPostProcessor {
             );
 
             artifact.id = image_id;
-            Ok(artifact)
+            return Ok(artifact);
         }
+
+        artifact.id = format!("do-image-{}", self.config.identifier);
+        Ok(artifact)
     }
 
     fn keep_input_artifact(&self) -> bool {
@@ -144,12 +144,11 @@ impl PostProcessor for DigitaloceanImportPostProcessor {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_digitalocean_import_process_success() -> Result<(), StampError> {
+    async fn test_digitalocean_import_process_success_and_http() -> Result<(), StampError> {
         let config = DigitaloceanImportConfig {
             identifier: "processed".to_string(),
             image_name: "my-custom-img".to_string(),
@@ -160,13 +159,53 @@ mod tests {
             tags: vec!["packer".to_string()],
             keep_input_artifact: true,
             api_token: Some("dummy_token".to_string()),
+            api_url: None,
         };
         let processor = DigitaloceanImportPostProcessor::new(config);
         let artifact = Artifact::new("base".to_string(), vec![]);
 
-        let result = processor.process(artifact).await?;
+        let result = processor.process(artifact.clone()).await?;
         assert_eq!(result.id, "do-image-processed");
         assert!(processor.keep_input_artifact());
+
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("POST", "/v2/images/custom")
+            .with_status(201)
+            .with_body(r#"{"image":{"id":887766}}"#)
+            .create_async()
+            .await;
+
+        let live_proc = DigitaloceanImportPostProcessor::new(DigitaloceanImportConfig {
+            identifier: "live".to_string(),
+            image_name: "live-img".to_string(),
+            image_url: Some("https://example.com/disk.qcow2".to_string()),
+            api_token: Some("tok".to_string()),
+            api_url: Some(server.url()),
+            ..Default::default()
+        });
+        let live_res = live_proc.process(artifact.clone()).await?;
+        assert_eq!(live_res.id, "887766");
+
+        // Missing token error when api_url is set
+        let no_tok_proc = DigitaloceanImportPostProcessor::new(DigitaloceanImportConfig {
+            identifier: "live".to_string(),
+            image_url: Some("https://example.com/disk.qcow2".to_string()),
+            api_token: Some(String::new()),
+            api_url: Some(server.url()),
+            ..Default::default()
+        });
+        assert!(no_tok_proc.process(artifact.clone()).await.is_err());
+
+        // Server 500 error
+        let _m_err = server
+            .mock("POST", "/v2/images/custom")
+            .with_status(500)
+            .with_body("server error")
+            .create_async()
+            .await;
+        assert!(live_proc.process(artifact).await.is_err());
+
         Ok(())
     }
 
@@ -222,6 +261,7 @@ mod tests {
             image_name: "test".to_string(),
             image_url: None,
             api_token: None,
+            api_url: None,
             regions: vec![],
             distribution: None,
             description: None,
@@ -230,9 +270,10 @@ mod tests {
         };
         let config2 = config1.clone();
         assert_eq!(config1, config2);
-        assert_eq!(format!("{config1:?}"), format!("{config2:?}"));
+        assert!(format!("{config1:?}").contains("DigitaloceanImportConfig"));
         let st1 = DigitaloceanImportPostProcessor::new(config1);
         let st2 = st1.clone();
-        assert_eq!(format!("{st1:?}"), format!("{st2:?}"));
+        assert!(format!("{st1:?}").contains("DigitaloceanImportPostProcessor"));
+        assert_eq!(st2.config.identifier, "processed");
     }
 }

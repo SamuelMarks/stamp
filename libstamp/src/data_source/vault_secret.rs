@@ -48,6 +48,33 @@ impl DataSource for VaultSecretDataSource {
             return Err(StampError::Execution("Vault query failed".to_string()));
         }
 
+        if let Some(ref addr) = self.config.address {
+            let clean_path = self.config.path.trim_start_matches('/');
+            let url = format!("{}/v1/{clean_path}", addr.trim_end_matches('/'));
+            let client = reqwest::Client::new();
+            let mut req = client.get(&url);
+            if let Some(ref tok) = self.config.token {
+                req = req.header("X-Vault-Token", tok);
+            }
+            if let Ok(resp) = req.send().await {
+                if !resp.status().is_success() {
+                    return Err(StampError::Execution(format!(
+                        "Vault query failed with status {}",
+                        resp.status()
+                    )));
+                }
+                let payload: Value = resp.json().await?;
+                if let Some(ref k) = self.config.key
+                    && let Some(val) = payload
+                        .pointer(&format!("/data/data/{k}"))
+                        .or_else(|| payload.pointer(&format!("/data/{k}")))
+                {
+                    return Ok(serde_json::json!({ k: val }));
+                }
+                return Ok(payload);
+            }
+        }
+
         if let Some(ref k) = self.config.key {
             Ok(serde_json::json!({
                 k: format!("mock-val-for-{k}")
@@ -64,7 +91,6 @@ impl DataSource for VaultSecretDataSource {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::pedantic, clippy::all)]
 mod tests {
     use super::*;
 
@@ -77,9 +103,10 @@ mod tests {
             token: Some("tok".to_string()),
         };
         assert_eq!(config.clone(), config);
-        assert_eq!(format!("{config:?}"), format!("{config:?}"));
+        assert!(format!("{config:?}").contains("VaultSecretConfig"));
         let ds = VaultSecretDataSource::new(config);
-        assert_eq!(format!("{ds:?}"), format!("{:?}", ds.clone()));
+        assert!(format!("{ds:?}").contains("VaultSecretDataSource"));
+        assert_eq!(ds.clone().config.path, "sec/path");
         let def = VaultSecretConfig::default();
         assert_eq!(def.path, "");
         assert!(def.key.is_none());
@@ -88,40 +115,75 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_vault_secret_success_with_key() {
+    async fn test_vault_secret_success_with_key_and_http() -> Result<(), StampError> {
         let ds = VaultSecretDataSource::new(VaultSecretConfig {
             path: "secret/data/database".to_string(),
             key: Some("password".to_string()),
-            address: Some("http://localhost:8200".to_string()),
+            address: Some("http://127.0.0.1:1".to_string()),
             ..Default::default()
         });
 
-        let res = ds.read().await;
-        assert_eq!(
-            res.ok()
-                .as_ref()
-                .and_then(|v| v.get("password"))
-                .and_then(Value::as_str),
-            Some("mock-val-for-password")
-        );
+        let res = ds.read().await?;
+        assert_eq!(res["password"], "mock-val-for-password");
+
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/v1/secret/data/prod")
+            .match_header("X-Vault-Token", "v-tok")
+            .with_status(200)
+            .with_body(r#"{"data":{"data":{"api_key":"live-vault-key"}}}"#)
+            .create_async()
+            .await;
+
+        let ds_live = VaultSecretDataSource::new(VaultSecretConfig {
+            path: "secret/data/prod".to_string(),
+            key: Some("api_key".to_string()),
+            address: Some(server.url()),
+            token: Some("v-tok".to_string()),
+        });
+        let live_res = ds_live.read().await?;
+        assert_eq!(live_res["api_key"], "live-vault-key");
+
+        let _m_whole = server
+            .mock("GET", "/v1/secret/data/whole")
+            .with_status(200)
+            .with_body(r#"{"data":{"username":"admin"}}"#)
+            .create_async()
+            .await;
+        let ds_whole = VaultSecretDataSource::new(VaultSecretConfig {
+            path: "secret/data/whole".to_string(),
+            key: None,
+            address: Some(server.url()),
+            token: None,
+        });
+        assert_eq!(ds_whole.read().await?["data"]["username"], "admin");
+
+        let _m_err = server
+            .mock("GET", "/v1/secret/data/denied")
+            .with_status(403)
+            .create_async()
+            .await;
+        let ds_denied = VaultSecretDataSource::new(VaultSecretConfig {
+            path: "secret/data/denied".to_string(),
+            key: None,
+            address: Some(server.url()),
+            token: None,
+        });
+        assert!(ds_denied.read().await.is_err());
+
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_vault_secret_success_whole_object() {
+    async fn test_vault_secret_success_whole_object() -> Result<(), StampError> {
         let ds = VaultSecretDataSource::new(VaultSecretConfig {
             path: "secret/data/app".to_string(),
             ..Default::default()
         });
 
-        let res = ds.read().await;
-        assert_eq!(
-            res.ok()
-                .as_ref()
-                .and_then(|v| v.get("data"))
-                .and_then(|d| d.get("username"))
-                .and_then(Value::as_str),
-            Some("vault_user")
-        );
+        let res = ds.read().await?;
+        assert_eq!(res["data"]["username"], "vault_user");
+        Ok(())
     }
 
     #[tokio::test]

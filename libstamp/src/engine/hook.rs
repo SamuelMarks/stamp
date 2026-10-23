@@ -302,7 +302,7 @@ mod tests {
             ]
         };
 
-        let mut hook = DefaultProvisionHook {
+        let hook = DefaultProvisionHook {
             provisioners: Arc::new(create_provs()),
             error_cleanup_provisioners: Arc::new(create_provs()),
         };

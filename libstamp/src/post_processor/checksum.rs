@@ -4,7 +4,6 @@ use crate::error::StampError;
 use crate::post_processor::{Artifact, PostProcessor};
 use async_trait::async_trait;
 use md5::{Digest, Md5 as Md5Hasher};
-use sha2::Digest as _;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
@@ -86,12 +85,12 @@ impl ChecksumPostProcessor {
             ChecksumAlgorithm::Sha256 => {
                 let mut hasher = sha2::Sha256::new();
                 hasher.update(&bytes);
-                Ok(format!("{:x}", hasher.finalize()))
+                Ok(hex::encode(hasher.finalize()))
             }
             ChecksumAlgorithm::Sha512 => {
                 let mut hasher = sha2::Sha512::new();
                 hasher.update(&bytes);
-                Ok(format!("{:x}", hasher.finalize()))
+                Ok(hex::encode(hasher.finalize()))
             }
             ChecksumAlgorithm::Md5 => {
                 let mut hasher = Md5Hasher::new();

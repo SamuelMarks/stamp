@@ -14,54 +14,50 @@ repository = "https://github.com/SamuelMarks/stamp"
 workspace = true
 
 [dependencies]
-
 async-trait = { version = "0.1", default-features = false }
 base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 bzip2 = "0.6"
-derive_more = { version = "1.0", default-features = false, features = ["display", "from"] }
+derive_more = { version = "2.1", default-features = false, features = ["display", "error", "from"] }
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 fs2 = { version = "0.4", default-features = false }
-futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+futures-util = { version = "0.3", default-features = false }
 libc = { version = "0.2", default-features = false }
-hashicorp-configuration-language-rs = { version = "0.0.1", path = "../../hashicorp-configuration-language-rs" }
-#hashicorp-configuration-language-rs = { version = "0.1", path = "../../hashicorp-configuration-language-rs" }
+hashicorp-configuration-language-rs = { version = "0.0.1", path = "../../hashicorp-configuration-language-rs", default-features = false }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 serde_json = { version = "1.0", default-features = false, features = ["std"] }
-sha2 = { version = "0.10", default-features = false }
-hmac = { version = "0.12", default-features = false }
+sha2 = { version = "0.11", default-features = false }
+hmac = { version = "0.13", default-features = false }
 tar = { version = "0.4", default-features = false }
-tokio = { version = "1.53", default-features = false, features = ["fs", "io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
+tokio = { version = "1.54", default-features = false, features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
 tokio-stream = { version = "0.1", default-features = false, features = ["net", "sync"] }
-uuid = { version = "1.26", default-features = false, features = ["std", "v4"] }
-zip = { version = "8.6", default-features = false, features = ["deflate"] }
-rustyline = { version = "18.0", default-features = false }
-tonic = { version = "0.11", default-features = false, features = ["channel", "codegen", "prost", "tls", "transport"] }
-tower = { version = "0.4", default-features = false }
-prost = { version = "0.12", default-features = false, features = ["prost-derive", "std"] }
-russh = "0.63"
-winrm-rs = { version = "1.1", default-features = false }
+uuid = { version = "1.28", default-features = false, features = ["v4"] }
+zip = { version = "9.0", default-features = false, features = ["deflate-flate2"] }
+rustyline = { version = "19.0", default-features = false }
+tonic = { version = "0.14", default-features = false, features = ["codegen", "router", "tls-aws-lc", "transport"] }
+tonic-prost = { version = "0.14", default-features = false }
+prost = { version = "0.14", default-features = false, features = ["derive", "std"] }
+russh = { version = "0.64", default-features = false, features = ["aws-lc-rs"] }
+winrm-rs = { version = "1.4", default-features = false }
 url = { version = "2.5", default-features = false }
 semver = { version = "1.0", default-features = false, features = ["std"] }
-regex = { version = "1.13", default-features = false, features = ["perf", "std"] }
+regex = { version = "1.13", default-features = false, features = ["std", "unicode-perl"] }
 serde_yaml = { version = "0.9", default-features = false }
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+chrono = { version = "0.4", default-features = false, features = ["now"] }
 glob = { version = "0.3", default-features = false }
 md-5 = { version = "0.11", default-features = false }
-sha1 = { version = "0.10", default-features = false }
+sha1 = { version = "0.11", default-features = false }
 bcrypt = { version = "0.19", default-features = false, features = ["std"] }
 rsa = { version = "0.9", default-features = false, features = ["pem", "std"] }
 ipnet = { version = "2.12", default-features = false }
-mockito = { version = "1.7", default-features = false }
-russh-sftp = { version = "2.4", default-features = false }
+russh-sftp = { version = "3.0", default-features = false }
 tempfile = { version = "3.27", default-features = false }
-rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 
 [dev-dependencies]
-lazy_static = { version = "1.5", default-features = false }
-tokio = { version = "1.53", default-features = false, features = ["fs", "macros", "process", "rt", "sync"] }
+mockito = { version = "1.7", default-features = false }
 
 [build-dependencies]
-protoc-bin-vendored = { version = "3.2", default-features = false }
-tonic-build = { version = "0.11", default-features = false, features = ["prost", "transport"] }
+protoc-bin-vendored = { version = "3.3", default-features = false }
+tonic-prost-build = { version = "0.14", default-features = false, features = ["transport"] }
