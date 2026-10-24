@@ -1477,12 +1477,18 @@ mod tests {
         let fake_tools = td.path().join("tools.iso");
         tokio::fs::write(&fake_tools, b"ISO").await?;
         {
+            let _guard = crate::utils::ENV_MUTEX
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let _env =
                 crate::utils::ScopedEnvVar::set("PRLCTL_PATH", fake_prl.to_string_lossy().as_ref());
             assert_eq!(find_prlctl_binary(), fake_prl);
         }
         let _ = find_prlctl_binary();
         {
+            let _guard = crate::utils::ENV_MUTEX
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let _env = crate::utils::ScopedEnvVar::set(
                 "PARALLELS_TOOLS_ISO",
                 fake_tools.to_string_lossy().as_ref(),
@@ -1715,11 +1721,17 @@ mod tests {
         let fake_tools = td.path().join("tools.iso");
         std::fs::write(&fake_tools, b"ISO")?;
         {
+            let _guard = crate::utils::ENV_MUTEX
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let _env =
                 crate::utils::ScopedEnvVar::set("PRLCTL_PATH", fake_prl.to_string_lossy().as_ref());
             assert_eq!(find_prlctl_binary(), fake_prl);
         }
         {
+            let _guard = crate::utils::ENV_MUTEX
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let _env = crate::utils::ScopedEnvVar::set(
                 "PARALLELS_TOOLS_ISO",
                 fake_tools.to_string_lossy().as_ref(),
@@ -1776,6 +1788,9 @@ mod tests {
         let td = tempfile::tempdir()?;
 
         {
+            let _guard = crate::utils::ENV_MUTEX
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let _env = crate::utils::ScopedEnvVar::set(
                 "PRLCTL_PATH",
                 td.path().join("non_exist").to_string_lossy().as_ref(),
@@ -1783,6 +1798,9 @@ mod tests {
             let _ = find_prlctl_binary();
         }
         {
+            let _guard = crate::utils::ENV_MUTEX
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let _env = crate::utils::ScopedEnvVar::set(
                 "PARALLELS_TOOLS_ISO",
                 td.path().join("non_exist_iso").to_string_lossy().as_ref(),
@@ -1812,7 +1830,10 @@ mod tests {
         assert_eq!(ver_whitespace, None);
 
         {
-            let _env = crate::utils::ScopedEnvVar::set("MOCK_PRLCTL_CMD", "true");
+            let _env = crate::utils::ScopedEnvVar::set(
+                "MOCK_PRLCTL_CMD",
+                script_ver.to_string_lossy().as_ref(),
+            );
             let ver = query_prlctl_version().await;
             assert_eq!(ver, None);
 
