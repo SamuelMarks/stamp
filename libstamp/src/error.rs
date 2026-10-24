@@ -276,6 +276,20 @@ mod tests {
     use super::*;
     use std::error::Error as StdError;
 
+    fn assert_err_from<T, E>(res: Result<T, E>, expected_prefix: &str)
+    where
+        StampError: From<E>,
+    {
+        let mapped = res.map_err(|e| {
+            let stamp_err = StampError::from(e);
+            (
+                stamp_err.to_string().starts_with(expected_prefix),
+                stamp_err.source().is_some(),
+            )
+        });
+        assert_eq!(mapped.err(), Some((true, true)));
+    }
+
     #[test]
     fn test_stamp_error_display_and_sources() {
         let io_err = std::io::Error::other("io error");
@@ -284,100 +298,45 @@ mod tests {
         assert!(stamp_io.source().is_some());
 
         let json_res: Result<serde_json::Value, _> = serde_json::from_str("{ bad json");
-        if let Err(e) = json_res {
-            let stamp_err = StampError::from(e);
-            assert!(stamp_err.to_string().starts_with("JSON error:"));
-            assert!(stamp_err.source().is_some());
-        }
+        assert_err_from(json_res, "JSON error:");
 
-        let yaml_res: Result<serde_yaml::Value, _> = serde_yaml::from_str(
-            "::::
-	bad",
-        );
-        if let Err(e) = yaml_res {
-            let stamp_err = StampError::from(e);
-            assert!(stamp_err.to_string().starts_with("YAML error:"));
-            assert!(stamp_err.source().is_some());
-        }
+        let yaml_res: Result<serde_yaml::Value, _> = serde_yaml::from_str("::::\n\tbad");
+        assert_err_from(yaml_res, "YAML error:");
 
         let url_res = url::Url::parse("not a url");
-        if let Err(e) = url_res {
-            let stamp_err = StampError::from(e);
-            assert!(stamp_err.to_string().starts_with("URL parse error:"));
-            assert!(stamp_err.source().is_some());
-        }
+        assert_err_from(url_res, "URL parse error:");
 
         let semver_res = semver::Version::parse("not-a-semver");
-        if let Err(e) = semver_res {
-            let stamp_err = StampError::from(e);
-            assert!(stamp_err.to_string().starts_with("SemVer error:"));
-            assert!(stamp_err.source().is_some());
-        }
+        assert_err_from(semver_res, "SemVer error:");
 
         let bad_regex_pattern = String::from("[unclosed");
         let regex_res = regex::Regex::new(&bad_regex_pattern);
-        if let Err(e) = regex_res {
-            let stamp_err = StampError::from(e);
-            assert!(stamp_err.to_string().starts_with("Regex error:"));
-            assert!(stamp_err.source().is_some());
-        }
+        assert_err_from(regex_res, "Regex error:");
 
         let glob_res = glob::Pattern::new("[unclosed");
-        if let Err(e) = glob_res {
-            let stamp_err = StampError::from(e);
-            assert!(stamp_err.to_string().starts_with("Glob pattern error:"));
-            assert!(stamp_err.source().is_some());
-        }
+        assert_err_from(glob_res, "Glob pattern error:");
 
         let int_res = "abc".parse::<u32>();
-        if let Err(e) = int_res {
-            let stamp_err = StampError::from(e);
-            assert!(stamp_err.to_string().starts_with("Integer parse error:"));
-            assert!(stamp_err.source().is_some());
-        }
+        assert_err_from(int_res, "Integer parse error:");
 
         let float_res = "abc".parse::<f64>();
-        if let Err(e) = float_res {
-            let stamp_err = StampError::from(e);
-            assert!(stamp_err.to_string().starts_with("Float parse error:"));
-            assert!(stamp_err.source().is_some());
-        }
+        assert_err_from(float_res, "Float parse error:");
 
         let bool_res = "notbool".parse::<bool>();
-        if let Err(e) = bool_res {
-            let stamp_err = StampError::from(e);
-            assert!(stamp_err.to_string().starts_with("Boolean parse error:"));
-            assert!(stamp_err.source().is_some());
-        }
+        assert_err_from(bool_res, "Boolean parse error:");
 
         let addr_res = "bad_addr".parse::<std::net::SocketAddr>();
-        if let Err(e) = addr_res {
-            let stamp_err = StampError::from(e);
-            assert!(stamp_err.to_string().starts_with("Address parse error:"));
-            assert!(stamp_err.source().is_some());
-        }
+        assert_err_from(addr_res, "Address parse error:");
 
         let ipnet_res = "bad_cidr".parse::<ipnet::Ipv4Net>();
-        if let Err(e) = ipnet_res {
-            let stamp_err = StampError::from(e);
-            assert!(stamp_err.to_string().starts_with("IP network parse error:"));
-            assert!(stamp_err.source().is_some());
-        }
+        assert_err_from(ipnet_res, "IP network parse error:");
 
         let utf8_res = String::from_utf8(vec![0xff, 0xfe]);
-        if let Err(e) = utf8_res {
-            let stamp_err = StampError::from(e);
-            assert!(stamp_err.to_string().starts_with("UTF-8 error:"));
-            assert!(stamp_err.source().is_some());
-        }
+        assert_err_from(utf8_res, "UTF-8 error:");
 
         let bad_bytes = vec![0xff_u8, 0xfe_u8];
         let str_utf8_res = std::str::from_utf8(&bad_bytes);
-        if let Err(e) = str_utf8_res {
-            let stamp_err = StampError::from(e);
-            assert!(stamp_err.to_string().starts_with("UTF-8 slice error:"));
-            assert!(stamp_err.source().is_some());
-        }
+        assert_err_from(str_utf8_res, "UTF-8 slice error:");
 
         let status_err = StampError::from(tonic::Status::internal("grpc fail"));
         assert!(status_err.to_string().starts_with("gRPC status error:"));
@@ -387,7 +346,7 @@ mod tests {
         assert!(zip_err.to_string().starts_with("ZIP error:"));
         assert!(zip_err.source().is_some());
 
-        let russh_err = StampError::from(russh::Error::Disconnected);
+        let russh_err = StampError::from(russh::Error::Disconnect);
         assert!(russh_err.to_string().starts_with("SSH error:"));
         assert!(russh_err.source().is_some());
 
@@ -395,9 +354,7 @@ mod tests {
         assert!(russh_keys_err.to_string().starts_with("SSH key error:"));
         assert!(russh_keys_err.source().is_some());
 
-        let ssh_key_err = StampError::from(russh::keys::ssh_key::Error::Encoding(
-            ssh_encoding::Error::Length,
-        ));
+        let ssh_key_err = StampError::from(russh::keys::ssh_key::Error::Version { number: 99 });
         assert!(ssh_key_err.to_string().starts_with("SSH key format error:"));
         assert!(ssh_key_err.source().is_some());
 
